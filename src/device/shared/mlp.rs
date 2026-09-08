@@ -202,7 +202,11 @@ pub(crate) fn feedforward(
         gate_weight_scale,
     );
     let x = geglu(ctx, up, gate, up_global_scale, gate_global_scale);
-    let down = project_down(ctx, &x, down_weight_packed, down_weight_scale);
+    // Stage the geglu output through HBM: a DM-to-DM relayout into the column-split layout
+    // costs 11.7k cycles, an HBM round trip a fraction of that (see V7).
+    let mut x_hbm: HbmTensor<bf16, Chip, m![L]> = HbmTensor::new();
+    x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
+    let down = project_down(ctx, &x_hbm, down_weight_packed, down_weight_scale);
 
     let down_global_scale: DmTensor<f32, Chip, Cluster, Slice, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
@@ -355,12 +359,11 @@ pub(crate) type DownRowsByColumns = m![H / 120, L / 1920];
 
 pub(crate) fn project_down(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]>,
+    x: &HbmTensor<bf16, Chip, m![L]>,
     down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
     down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    // One relayout from the geglu layout straight to the column-split layout the contraction
-    // reads (each slice needs 1920 of L), instead of replicating all of L to every slice first.
+    // Each slice loads only its 1920-wide chunk of the geglu output from HBM.
     let x: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![L % 1920]> = x.to_dm(&mut ctx.tdma);
 
     const ROWS_PER_SLICE: usize = 120;
