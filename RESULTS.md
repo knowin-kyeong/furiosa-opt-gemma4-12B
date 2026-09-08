@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q/K/V weight 로드를 rmsnorm 앞(커널 맨 앞)에서 발행해 DMA 큐 앞 12k의 공백을 메움 (기하평균상 가장 덜 개선된 qkv 집중) | — | — | — | — | — | — | 설계됨 |
+| `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개(3k) 제거 | — | — | — | — | — | — | 설계됨 |
+| `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q weight의 LUT pass를 rmsnorm 앞에 발행해 Q 로드가 DMA 큐 선두로 (K/V까지 같은 방식은 무효) | **59,216** | 34,776 | 186,976 | **4.649** | — | — | makespan 측정 |
 | `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
 | `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드가 같은 7.5 KB HBM 구간을 512번 읽는 패턴(420 B/cycle) → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본 읽기 | **60,412** | 38,240 | 191,122 | **4.434** | — | — | makespan 측정 |
 | `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
@@ -34,8 +35,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V16_rmsnorm_fused_residual`**
-(…+V16 누적, 기하평균 4.618×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V17_qkv_hoist_weight_loads`**
+(…+V17 누적, 기하평균 4.649×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -200,6 +201,35 @@ L=15360이면 60 × 256.
   rmsnorm 앞에서 발행하면 Q 로드 13.5k가 rmsnorm·x 스테이징(6.6k)과 겹치고 K/V도 연달아 흐른다.
 - **변경 파일:** `src/device/sliding/projection.rs`(로더 함수 분리), `src/ops.rs`(qkv 본문 순서)
 - **예상:** qkv 60.4k → ~50k.
+
+### 측정
+
+| 변형 | qkv | 비고 |
+|---|---:|---|
+| (a) 세 weight `to_dm`만 rmsnorm 앞으로 이동 | 60,412 | **불변** — 스케줄러는 발행 순서가 아니라 소비자 기준으로 DMA를 배치 |
+| (b) Q만 LUT pass 분리(소비자를 rmsnorm 앞에 발행), contraction은 bf16에서 | **59,216** | Q 로드 3.6–17.1k로 선두, LUT 5k가 x 로드와 겹침. 그러나 K 로드는 여전히 32k 시작(7.7k 공백) |
+| (c) K/V도 LUT 분리 + x_trf를 그 앞에 스테이징 | 60,375 | K/V 로드·LUT가 Q contract 뒤로 밀림 — Main도 프로그램 순서를 따르지 않음 |
+
+- **채택:** (b). 기하평균 4.649.
+- **배운 것:** 스케줄러는 DMA도 Main도 리스트 스케줄링(자체 우선순위)이며 소스 순서로 제어되지 않는다.
+  DMA를 앞당기려면 **그 DMA를 소비하는 명령이 의존성 그래프상 일찍 필요해져야** 한다. qkv의 잔여
+  59k는 DMA 36k(Q 13.5 + x 5.4 + K 7 + V 7 + 소량) + 마지막 로드 뒤 tail(V pass·normalize·scatter ≈ 8k)
+  + 스케줄러 slack(~10k: q/k/v rmsnorm·rope 소형 pass들이 직렬). 하한은 ~50k.
+
+## V18_attnout_scale_in_epilogue
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V17_qkv_hoist_weight_loads`
+- **가설:** attn_out tail(13k/34.8k)에서 채널 scale pass가 1920 타일 2개(Sub 743 + Main 761 ×2 ≈ 3k)를 쓴다.
+  contraction 체인은 `contract_lane → vector_init → inter_slice_reduce → vector_final`로 끝나는데, book이
+  InterFirst(reducer 뒤 intra chain) 순서를 지원하므로 reduce 뒤에 `narrow_split → MulF(scale_vrf) →
+  widen_concat`을 붙이면 slice당 60행의 scale 곱이 epilogue에서 끝나 tail pass가 사라진다. scale VRF는
+  행당 1값을 `m![H % 60, 1 # 8]` 패딩 패킷으로 스테이징.
+- **변경 파일:** `src/device/sliding/projection.rs`
+- **리스크:** contract 출력 패킷(`1 # 8`)의 narrow_split 분해(`m![H % 60, 1 # 2], m![1 # 4]`)와 scale VRF
+  매핑 일치가 미검증.
+- **예상:** attn_out −3k (8.6%).
+
 
 ## V16_rmsnorm_fused_residual
 
