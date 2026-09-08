@@ -12,7 +12,7 @@ pub(crate) type UpGateRowsPaired = m![L / 120, 1 # 2];
 
 pub(crate) fn project_up_and_gate(
     ctx: &mut Context,
-    x_trf: &TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]>,
+    x: &DmTensor<bf16, Chip, Cluster, UpGateRows, m![H]>,
     up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
     gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
     up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
@@ -29,19 +29,33 @@ pub(crate) fn project_up_and_gate(
     // tile lands instead of behind a whole-matrix load on the DMA queue. Only the packed f4
     // tiles ever reach DM: the f4 -> f8 lookup and f8 -> f32 cast run in the fetch stage of
     // the scale pass.
-    let up_weight_scale: DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60, H / 16]> =
-        up_weight_scale.to_dm(&mut ctx.tdma);
-    let gate_weight_scale: DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60, H / 16]> =
-        gate_weight_scale.to_dm(&mut ctx.tdma);
-
     let mut up: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]> = DmTensor::new();
     let mut gate: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]> = DmTensor::new();
 
-    for i in 0..PASSES {
+    // The block scales are streamed per pass as well (a whole-matrix scale load would sit on
+    // the DMA queue ahead of the first tile), and x is staged into the TRF only after the
+    // first tiles are on their way so its load does not delay them either.
+    let first_up = load_up_gate_rows(ctx, up_weight_packed, 0);
+    let first_up_scale = load_up_gate_scale(ctx, up_weight_scale, 0);
+    let first_gate = load_up_gate_rows(ctx, gate_weight_packed, 0);
+    let first_gate_scale = load_up_gate_scale(ctx, gate_weight_scale, 0);
+    let x_trf: TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![H / 16], m![H % 16]>()
+        .collect::<m![H / 16], m![H % 16]>()
+        .to_trf();
+    project_up_gate_rows(ctx, &x_trf, &first_up, &first_up_scale, 0, &mut up);
+    project_up_gate_rows(ctx, &x_trf, &first_gate, &first_gate_scale, 0, &mut gate);
+    const REST: usize = PASSES - 1;
+    for k in 0..REST {
+        let i = k + 1;
         let cur_up = load_up_gate_rows(ctx, up_weight_packed, i);
-        project_up_gate_rows(ctx, x_trf, &cur_up, &up_weight_scale, i, &mut up);
+        let cur_up_scale = load_up_gate_scale(ctx, up_weight_scale, i);
+        project_up_gate_rows(ctx, &x_trf, &cur_up, &cur_up_scale, i, &mut up);
         let cur_gate = load_up_gate_rows(ctx, gate_weight_packed, i);
-        project_up_gate_rows(ctx, x_trf, &cur_gate, &gate_weight_scale, i, &mut gate);
+        let cur_gate_scale = load_up_gate_scale(ctx, gate_weight_scale, i);
+        project_up_gate_rows(ctx, &x_trf, &cur_gate, &cur_gate_scale, i, &mut gate);
     }
 
     (up, gate)
@@ -59,18 +73,30 @@ fn load_up_gate_rows(
         .to_dm(&mut ctx.tdma)
 }
 
+/// Loads `ROWS_PER_PASS` rows of block scales of one up/gate matrix.
+fn load_up_gate_scale(
+    ctx: &mut Context,
+    scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    pass: usize,
+) -> DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60 = 4, H / 16]> {
+    scale
+        .view()
+        .tile::<m![L % 60], 4, m![L / 60, L % 60 = 4 # 60, H / 16]>(4 * pass)
+        .to_dm(&mut ctx.tdma)
+}
+
 /// Dequantizes `ROWS_PER_PASS` rows of one up/gate matrix and contracts them with `x_trf`.
 fn project_up_gate_rows(
     ctx: &mut Context,
     x_trf: &TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, Cluster, UpGateRows, m![L % 60 = 4, H]>,
-    scale: &DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60, H / 16]>,
+    scale: &DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60 = 4, H / 16]>,
     pass: usize,
     out: &mut DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
 ) {
     let scale_vrf: VrfTensor<f32, Chip, Cluster, UpGateRows, m![L % 60 = 4, H / 16]> = ctx
         .sub
-        .begin(scale.view().tile::<m![L % 60], 4, m![L % 60 = 4 # 60, H / 16]>(4 * pass))
+        .begin(scale.view())
         .fetch::<m![L % 60 = 4], m![H / 16]>()
         .fetch_cast::<f32>()
         .collect::<m![L % 60 = 4, H / 16 / 8], m![H / 16 % 8]>()
@@ -120,29 +146,18 @@ pub(crate) fn feedforward(
     gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
     down_global_scale: &HbmTensor<f32, Chip, m![1]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    // The down-projection block scales do not depend on anything computed here, so put
-    // their load on the DMA queue before the up/gate work instead of after it.
-    let down_weight_scale: DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120, L / 16 % 120]> =
-        down_weight_scale.to_dm(&mut ctx.tdma);
-
     let x: DmTensor<bf16, Chip, Cluster, UpGateRows, m![H]> = unsafe { x.reshape() };
-    let x_trf: TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]> = ctx
-        .sub
-        .begin(x.view())
-        .fetch::<m![H / 16], m![H % 16]>()
-        .collect::<m![H / 16], m![H % 16]>()
-        .to_trf();
 
     let (up, gate) = project_up_and_gate(
         ctx,
-        &x_trf,
+        &x,
         up_weight_packed,
         gate_weight_packed,
         up_weight_scale,
         gate_weight_scale,
     );
     let x = geglu(ctx, up, gate, up_global_scale, gate_global_scale);
-    let down = project_down(ctx, &x, down_weight_packed, &down_weight_scale);
+    let down = project_down(ctx, &x, down_weight_packed, down_weight_scale);
 
     let down_global_scale: DmTensor<f32, Chip, Cluster, Slice, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
@@ -297,17 +312,11 @@ pub(crate) fn project_down(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]>,
     down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
-    down_weight_scale: &DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120, L / 16 % 120]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
     // One relayout from the geglu layout straight to the column-split layout the contraction
     // reads (each slice needs 1920 of L), instead of replicating all of L to every slice first.
     let x: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![L % 1920]> = x.to_dm(&mut ctx.tdma);
-    let x_trf: TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]> = ctx
-        .sub
-        .begin(x.view())
-        .fetch::<m![L / 16 % 120], m![L % 16]>()
-        .collect::<m![L / 16 % 120], m![L % 16]>()
-        .to_trf();
 
     const ROWS_PER_SLICE: usize = 120;
     const ROWS_PER_PASS: usize = 4;
@@ -316,12 +325,29 @@ pub(crate) fn project_down(
     let mut down: DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]> = DmTensor::new();
 
     // Two tiles are live per iteration so they land in different DM buffers: the second
-    // tile's load overlaps the first tile's dequant instead of waiting for its buffer.
-    for j in 0..PASSES / 2 {
+    // tile's load overlaps the first tile's dequant instead of waiting for its buffer. The
+    // block scales are streamed per pass too, and x goes to the TRF after the first loads.
+    let first_a = load_down_rows(ctx, down_weight_packed, 0);
+    let first_scale_a = load_down_scale(ctx, down_weight_scale, 0);
+    let first_b = load_down_rows(ctx, down_weight_packed, 1);
+    let first_scale_b = load_down_scale(ctx, down_weight_scale, 1);
+    let x_trf: TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![L / 16 % 120], m![L % 16]>()
+        .collect::<m![L / 16 % 120], m![L % 16]>()
+        .to_trf();
+    project_down_rows(ctx, &x_trf, &first_a, &first_scale_a, 0, &mut down);
+    project_down_rows(ctx, &x_trf, &first_b, &first_scale_b, 1, &mut down);
+    const REST_PAIRS: usize = PASSES / 2 - 1;
+    for k in 0..REST_PAIRS {
+        let j = k + 1;
         let tile_a = load_down_rows(ctx, down_weight_packed, 2 * j);
+        let scale_a = load_down_scale(ctx, down_weight_scale, 2 * j);
         let tile_b = load_down_rows(ctx, down_weight_packed, 2 * j + 1);
-        project_down_rows(ctx, &x_trf, &tile_a, down_weight_scale, 2 * j, &mut down);
-        project_down_rows(ctx, &x_trf, &tile_b, down_weight_scale, 2 * j + 1, &mut down);
+        let scale_b = load_down_scale(ctx, down_weight_scale, 2 * j + 1);
+        project_down_rows(ctx, &x_trf, &tile_a, &scale_a, 2 * j, &mut down);
+        project_down_rows(ctx, &x_trf, &tile_b, &scale_b, 2 * j + 1, &mut down);
     }
 
     down.to_dm(&mut ctx.tdma)
@@ -339,22 +365,30 @@ fn load_down_rows(
         .to_dm(&mut ctx.tdma)
 }
 
+/// Loads four rows' block scales for each slice's L / 1920 column chunk.
+fn load_down_scale(
+    ctx: &mut Context,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    pass: usize,
+) -> DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]> {
+    down_weight_scale
+        .view()
+        .tile::<m![H % 120], 4, m![H / 120, H % 120 = 4 # 120, L / 16]>(4 * pass)
+        .to_dm(&mut ctx.tdma)
+}
+
 /// Dequantizes four rows' column chunk, contracts with `x_trf`, and sums the eight chunks.
 fn project_down_rows(
     ctx: &mut Context,
     x_trf: &TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]>,
     packed: &DmTensor<f4e2m1, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]>,
-    down_weight_scale: &DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120, L / 16 % 120]>,
+    down_weight_scale: &DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]>,
     pass: usize,
     down: &mut DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]>,
 ) {
     let down_weight_scale_vrf: VrfTensor<f32, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]> =
         ctx.sub
-            .begin(
-                down_weight_scale
-                    .view()
-                    .tile::<m![H % 120], 4, m![H % 120 = 4 # 120, L / 16 % 120]>(4 * pass),
-            )
+            .begin(down_weight_scale.view())
             .fetch::<m![H % 120 = 4], m![L / 16 % 120]>()
             .fetch_cast::<f32>()
             .collect::<m![H % 120 = 4, L / 128 % 15], m![L / 16 % 8]>()
