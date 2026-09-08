@@ -205,6 +205,8 @@ pub(crate) fn project_output(
     // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
     // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
     // eight chunk partials are summed across slices within a cluster.
+    let weight_f8: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60, Qs % 512]> =
+        weight.to_dm(&mut ctx.tdma);
     let x: DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
     let x_trf: TrfTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Qs % 512]> = ctx
         .sub
@@ -212,9 +214,17 @@ pub(crate) fn project_output(
         .fetch::<m![Qs / 16 % 32], m![Qs % 16]>()
         .collect::<m![Qs / 16 % 32], m![Qs % 16]>()
         .to_trf();
+    // The per-channel scale rides along the contraction epilogue: one value per row, staged
+    // as a padded packet per time step in the VRF.
+    let weight_scale: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = weight_scale.to_dm(&mut ctx.tdma);
+    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows, m![H % 60, 1 # 8]> = ctx
+        .sub
+        .begin(weight_scale.view())
+        .fetch::<m![H % 60], m![1 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60], m![1 # 8]>()
+        .to_vrf();
 
-    let weight_f8: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60, Qs % 512]> =
-        weight.to_dm(&mut ctx.tdma);
     let contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = ctx
         .main
         .begin(weight_f8.view())
@@ -227,6 +237,10 @@ pub(crate) fn project_output(
         .contract_lane::<m![H % 60], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
         .vector_inter_slice_reduce::<HiddenRows, m![H % 60]>(InterSliceReduceOpF32::Add)
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H % 60, 1 # 2], m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
+        .vector_widen_concat::<m![H % 60], m![1 # 8]>()
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
         .transpose::<m![H / 4 % 15], m![H % 4 # 16]>()
@@ -234,11 +248,10 @@ pub(crate) fn project_output(
         .commit();
 
     // Gather the [H] vector from both clusters through HBM (each cluster writes its half,
-    // then the Slice layout is loaded back) and scale it there.
+    // then the Slice layout is loaded back); the channel scale is already applied.
     let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
-    let gathered: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = gathered_hbm.to_dm(&mut ctx.tdma);
-    apply_output_channel_scale(ctx, &gathered, weight_scale)
+    gathered_hbm.to_dm(&mut ctx.tdma)
 }
 
 type TwoClusters = m![H / 1920];
