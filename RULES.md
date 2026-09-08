@@ -439,19 +439,22 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 main ─ V0_baseline ─ V1_ffn_down_chunked_dequant ─ V2_attnout_rows_over_256_slices
                                                      └─ V7_qkv_x_replicate_via_hbm
                                                           ├─ V8_weight_rows_interleaved_dma   (기각, 실물 A/B용으로 보존)
-                                                          └─ V9_ffn_x_via_hbm ─ V6_ffn_upgate_overlap ─ V10_attn_weight_tiles_fused_lut ─ V11_residual_1920_tiles  ← 선두
+                                                          └─ V9_ffn_x_via_hbm ─ V6_ffn_upgate_overlap ─ V10_attn_weight_tiles_fused_lut ─ V11_residual_1920_tiles
+                                                                  ─ V12_ffn_rows_per_pass_12 ─ V13_ffn_dma_trims ─ V14_two_clusters  ← 선두
                                                                                                                                               (V3, V4, V5는 슬롯만; V5는 V10에 흡수)
 ```
 
-**makespan (정적, cargo-furiosa-opt 0.6.0):** V0 116,583 / 194,020 / 1,693,200 → V11 93,127 / 50,110 / 408,566
-(기하평균 2.716×). **실측은 하나도 없다.** 정확도도 미검증.
+**makespan (정적, cargo-furiosa-opt 0.6.0):** V0 116,583 / 194,020 / 1,693,200 → V14 73,445 / 38,240 / 191,122
+(기하평균 4.147×). **실측은 하나도 없다.** 정확도도 미검증. V14는 베이스라인이 칩의 두 클러스터 중
+하나만 쓰고 있었다는 발견(`Cluster = m![1 # 2]`)을 세 커널에 적용한 것이라 이득이 가장 크고, 실측에서
+확인할 가치도 가장 크다.
 
 **Arena 승인이 나면 가장 먼저 할 일 (순서 고정):**
 
 1. pod에서 `. /root/env.sh; cd /root/furiosa-opt-gemma4-12B; git checkout V0_baseline && ./scripts/rngd_test.sh`
    → 세 커널의 **분모**(V0 실측 cycle)와 정확도 PASS 확인. 이게 없으면 아무것도 판정 못 한다.
-2. `git checkout V11_residual_1920_tiles && ./scripts/rngd_test.sh` → 정확도와 실측 cycle.
-3. V11이 정확도에서 깨지면 계보를 거슬러 이분 탐색: V10 → V6 → V9 → V7 → V2 → V1. 각 브랜치가
+2. `git checkout V14_two_clusters && ./scripts/rngd_test.sh` → 정확도와 실측 cycle.
+3. V14가 정확도에서 깨지면 계보를 거슬러 이분 탐색: V13 → V12 → V11 → V10 → V6 → V9 → V7 → V2 → V1. 각 브랜치가
    단일 기전이라 깨진 지점이 곧 원인이다. 수치를 건드린 변경은 없다(V2의 f32 inter-slice reduce는 오히려
    정밀). **유효성 리스크가 가장 큰 것은 V7/V9의 커널 내 `HbmTensor::new()`** — 채점 런타임이 커널 내
    HBM 할당을 거부하면 DM→DM 복제(54k)로 되돌린다.
@@ -466,8 +469,9 @@ main ─ V0_baseline ─ V1_ffn_down_chunked_dequant ─ V2_attnout_rows_over_25
 
 | 후보 | 기대 | 근거 |
 |---|---|---|
-| FFN `ROWS_PER_PASS` 4 → 12 (scale VRF를 두 번에 나눠 로드) | ffn −50k~−70k | pass당 고정 DMA(`DmaLoad ?` 838)와 명령 수가 1/3로 |
-| FFN scale pass 절반을 `ctx.sub`로 (LUT는 Main 별도 pass) | ffn −40k~−80k (불확실) | Vector 엔진이 Main/Sub에서 병렬 동작하는 것을 gelu가 증명 |
+| qkv x 복제 18.4k: Q를 H-split(클러스터당 H 절반, partial을 HBM에서 합산)으로 | qkv −9k | x가 슬라이스당 절반이면 바이트 절반 |
+| geglu·rmsnorm·residual 등 단일 클러스터 vector 단계를 두 클러스터로 | attn_out tail −5k, ffn −5k | V14 원리 |
+| FFN scale 타일 36k(120~240 B 행, 낮은 DMA 효율) | ffn −10k | 24행 단위 로드 등 |
 | `shared::rmsnorm` 경량화 (ReducingSlices 경로 3~4k × 4회) | 세 커널 각 −2k~−3k | 기하평균 레버리지 |
 | qkv x 복제 18.4k (H-split, 정렬 리스크) | qkv −10k | §RESULTS V3 보류 사유 참조 |
 | V8 실물 A/B (인터리브 레이아웃) | 실측에서만 판단 가능 | 정적 모델은 무반응 |

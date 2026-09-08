@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live). 두 클러스터에 행을 실제로 나눠 512 슬라이스 사용 → DMA·연산 2배 기대. attn_out 프로브부터 | — | — | — | — | — | — | 설계됨 |
+| `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
@@ -31,8 +31,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V13_ffn_dma_trims`**
-(…+V13 누적, 기하평균 2.866×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V14_two_clusters`**
+(…+V14 누적, 기하평균 4.147×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -166,6 +166,36 @@ L=15360이면 60 × 256.
 - **리스크:** 클러스터 축의 실제 분할을 DSL/DMA가 지원하는지, 클러스터 간 gather(`to_dm` → `Cluster 1#2`)가
   되는지 미지수. `#[device(chip = 1)]`과 HBM 텐서의 `Chip` 매핑은 그대로.
 - **예상:** 성공 시 attn_out weight DMA 29k → ~15k, Main 절반. 세 커널 전부에 적용 가능.
+
+### 측정 (단계별, 브랜치 안에서 누적)
+
+| 단계 | 변경 | qkv | attn_out | ffn |
+|---|---|---:|---:|---:|
+| V13 | (출발점) | 93,127 | 50,110 | 348,874 |
+| attn_out | Cluster `H/1920` × Slice `H/60 % 32, Qs/512`, 60×512/슬라이스, 8-way reduce, HBM gather | | **38,240** | |
+| ffn down | Cluster `H/1920` × Slice `H/60 % 32, L/1920`, 12행 타일 5개 선로드 | | | 291,679 |
+| ffn up/gate | Cluster `L/7680` × Slice `L/60 % 128, H/1920`, 60×1920/슬라이스(dequant 1회), 2-way reduce, HBM으로 geglu 레이아웃 복귀; x는 슬라이스당 절반만 | | | **191,122** |
+| qkv v1 | Q 8행·K/V 4행 두 클러스터, 결과를 512 슬라이스에서 직접 HBM 저장 | 176,882 (악화) | | |
+| qkv v2 | x를 `BothClusters=m![Dummy2]`로 1회 로드해 reshape 공유; 클러스터 안 switch gather 후 HBM 2 디스크립터 | **73,445** | | |
+| **기하평균 (V0 대비 누적)** | | | | **4.147** |
+
+- **결정적 관측:** 같은 12행 down 타일 로드가 256 슬라이스 때 6,326 cycle, 512 슬라이스(2배 바이트) 때도
+  6,326 cycle → **DMA 처리량이 정확히 2배**. attn_out weight 15.7 MB 전체가 13,512 cycle(util 0.86).
+- **제약:** 클러스터 간 DM→DM DMA는 `synchronization_checker`가 거부(`T13 is used by DmaCommand#O8, while
+  not synchronized from other clusters`); `DmTensor::to_dm`은 Cluster 타입을 못 바꾸고(`to_dm_view`만 가능).
+  **HBM 경유 gather는 통과**한다. 작은 조각(슬라이스당 8~16 B)을 512 슬라이스에서 HBM으로 직접 쓰면
+  디스크립터 비용으로 37k — 먼저 클러스터 안에서 switch로 모아 클러스터당 1개 조각으로 쓴다.
+- **정확도:** 수치 동일(행 분할·partial 합산 f32). 전체 테스트 바이너리 빌드 통과.
+- **측정 방식:** makespan only
+- **지배 context:** qkv DMA 84% (x 복제 18.4k, Q 13.5k, K/V 7k×2) / attn_out DMA 56% + tail 16k /
+  ffn DMA 90% (weight 타일 6.3k×15, scale 2.4k×15, HBM hop 4.5k×2+2.2k).
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** 하루 종일 싸운 "DMA-bound"의 절반은 칩의 절반만 쓰고 있었기 때문이었다. 베이스라인의
+  `Cluster = m![1 # 2]`를 의심하지 않은 것이 가장 비싼 가정이었다.
+- **다음 후보:** qkv x 복제(18.4k; Q를 H-split으로 바꾸면 절반), attn_out tail 16k(scale·rmsnorm·residual),
+  ffn scale 타일 36k·`DmaLoad ?`, geglu(단일 클러스터 vector 작업)도 두 클러스터로.
 
 
 ## V12_ffn_rows_per_pass_12
