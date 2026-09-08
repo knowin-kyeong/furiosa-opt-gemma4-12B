@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (공유 코드, 새 함수 추가) | — | — | — | — | — | — | 설계됨 |
+| `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
 | `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드가 같은 7.5 KB HBM 구간을 512번 읽는 패턴(420 B/cycle) → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본 읽기 | **60,412** | 38,240 | 191,122 | **4.434** | — | — | makespan 측정 |
 | `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
@@ -33,8 +33,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V15_x_replicate_hbm_copies`**
-(…+V15 누적, 기하평균 4.434×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V16_rmsnorm_fused_residual`**
+(…+V16 누적, 기하평균 4.618×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -198,6 +198,22 @@ L=15360이면 60 × 256.
   `normalize_add`, `normalize_add_gate`를 추가(full/vision/audio 경로 무영향).
 - **변경 파일:** `src/device/shared/rmsnorm.rs`(함수 추가), `src/ops.rs`(attn_out·ffn 본문)
 - **예상:** attn_out −2.5k, ffn −3.5k.
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_attention_output` | 38,240 → **34,776** | — | 1.100 |
+| `decoder_feedforward` | 191,122 → **186,976** | — | 1.022 |
+| **기하평균 (V0 대비 누적)** | | | **4.618** |
+
+- **컴파일 교훈:** `vector_clip`은 `vector_narrow_split` 이전(8-wide) 단계 전용 — 정규화 곱셈 뒤에는
+  `vector_fp_binary(FpBinaryOp::AddF, &vrf)`를 쓴다(`no method named vector_clip ... Way4`).
+- **정확도:** 연산 순서 동일(정규화 → ×w → +residual → ×gate), 중간 bf16 반올림이 한 번 줄어 오히려 정밀.
+- **측정 방식:** makespan only
+
+### 판정: makespan 측정 (실측 대기)
+
 
 
 ## V14_two_clusters
