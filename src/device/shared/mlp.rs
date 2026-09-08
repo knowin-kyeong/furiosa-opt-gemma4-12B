@@ -353,68 +353,57 @@ pub(crate) fn project_down(
     const ROWS_PER_SLICE: usize = 120;
     const ROWS_PER_PASS: usize = 4;
     const PASSES: usize = ROWS_PER_SLICE / ROWS_PER_PASS;
-    const HALVES_PER_PASS: usize = 2;
 
     let mut down: DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]> = DmTensor::new();
 
-    let down_weight_scale: DmTensor<f8e4m3, Chip, Cluster, DownRows, m![H % 120, L / 16]> =
+    // Each slice only ever contracts its own L / 1920 column chunk, so load the block scales
+    // in that layout once and the weight rows in that layout per pass. Nothing is dequantized
+    // that the slice will not use, and no DM-to-DM relayout is needed.
+    let down_weight_scale: DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
 
     for i in 0..PASSES {
-        let mut down_weight: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]> =
-            DmTensor::new();
-
-        for j in 0..HALVES_PER_PASS {
-            let down_weight_packed: DmTensor<f4e2m1, Chip, Cluster, DownRows, m![H % 120 = 2, L]> = down_weight_packed
+        let down_weight_packed: DmTensor<f4e2m1, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]> =
+            down_weight_packed
                 .view()
-                .tile::<m![H % 120], 2, m![H / 120, H % 120 = 2 # 120, L]>(4 * i + 2 * j)
+                .tile::<m![H % 120], 4, m![H / 120, H % 120 = 4 # 120, L]>(4 * i)
                 .to_dm(&mut ctx.tdma);
-            let down_weight_packed: DmTensor<f8e4m3, Chip, Cluster, DownRows, m![H % 120 = 2, L]> = ctx
-                .main
-                .begin(down_weight_packed.view())
-                .fetch::<m![H % 120 = 2], m![L]>()
-                .fetch_table_lookup::<f8e4m3>()
-                .collect::<m![H % 120 = 2, L / 32], m![L % 32]>()
-                .commit_trim::<m![L % 32]>()
-                .commit();
+        let down_weight_packed: DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]> = ctx
+            .main
+            .begin(down_weight_packed.view())
+            .fetch::<m![H % 120 = 4], m![L % 1920]>()
+            .fetch_table_lookup::<f8e4m3>()
+            .collect::<m![H % 120 = 4, L / 32 % 60], m![L % 32]>()
+            .commit_trim::<m![L % 32]>()
+            .commit();
 
-            let down_weight_scale_vrf: VrfTensor<f32, Chip, Cluster, DownRows, m![H % 120 = 2, L / 16]> = ctx
-                .sub
+        let down_weight_scale_vrf: VrfTensor<f32, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]> =
+            ctx.sub
                 .begin(
                     down_weight_scale
                         .view()
-                        .tile::<m![H % 120], 2, m![H % 120 = 2 # 120, L / 16]>(4 * i + 2 * j),
+                        .tile::<m![H % 120], 4, m![H % 120 = 4 # 120, L / 16 % 120]>(4 * i),
                 )
-                .fetch::<m![H % 120 = 2], m![L / 16]>()
+                .fetch::<m![H % 120 = 4], m![L / 16 % 120]>()
                 .fetch_cast::<f32>()
-                .collect::<m![H % 120 = 2, L / 16 / 8], m![L / 16 % 8]>()
+                .collect::<m![H % 120 = 4, L / 128 % 15], m![L / 16 % 8]>()
                 .to_vrf();
 
-            let down_weight_tile: DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120 = 2, L]> = ctx
-                .main
-                .begin(down_weight_packed.view())
-                .fetch::<m![H % 120 = 2, L / 32], m![L % 32]>()
-                .fetch_cast::<f32>()
-                .collect::<m![H % 120 = 2, L / 8], m![L % 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![H % 120 = 2, L / 4], m![L % 4]>()
-                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &down_weight_scale_vrf)
-                .vector_widen_concat::<m![H % 120 = 2, L / 8], m![L % 8]>()
-                .vector_final()
-                .cast::<bf16, m![L % 8 # 16]>()
-                .commit_trim::<m![L % 8]>()
-                .commit();
-            let down_weight_tile: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 2, L % 1920]> =
-                down_weight_tile.to_dm(&mut ctx.tdma);
-
-            down_weight_tile.view().to_dm_view(
-                &mut ctx.tdma,
-                down_weight
-                    .view_mut()
-                    .tile::<m![H % 120 = 4], 2, m![H % 120 = 4 = 2 #{!} 4, L % 1920]>(2 * j),
-            );
-        }
+        let down_weight: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]> = ctx
+            .main
+            .begin(down_weight_packed.view())
+            .fetch::<m![H % 120 = 4, L / 32 % 60], m![L % 32]>()
+            .fetch_cast::<f32>()
+            .collect::<m![H % 120 = 4, L / 8 % 240], m![L % 8]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_narrow_split::<m![H % 120 = 4, L / 4 % 480], m![L % 4]>()
+            .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &down_weight_scale_vrf)
+            .vector_widen_concat::<m![H % 120 = 4, L / 8 % 240], m![L % 8]>()
+            .vector_final()
+            .cast::<bf16, m![L % 8 # 16]>()
+            .commit_trim::<m![L % 8]>()
+            .commit();
 
         ctx.main
             .begin(down_weight.view())
