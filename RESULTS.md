@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드(7.7 MB, 420 B/cycle)가 같은 7.5 KB HBM 구간을 512번 읽는 패턴 → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본을 읽게 해 채널 인터리빙 | — | — | — | — | — | — | 설계됨 |
+| `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (공유 코드, 새 함수 추가) | — | — | — | — | — | — | 설계됨 |
+| `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드가 같은 7.5 KB HBM 구간을 512번 읽는 패턴(420 B/cycle) → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본 읽기 | **60,412** | 38,240 | 191,122 | **4.434** | — | — | makespan 측정 |
 | `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
@@ -32,8 +33,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V14_two_clusters`**
-(…+V14 누적, 기하평균 4.147×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V15_x_replicate_hbm_copies`**
+(…+V15 누적, 기하평균 4.434×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -167,6 +168,37 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/ops.rs` (qkv 본문), 필요 시 `layout.rs`
 - **리스크:** HBM 쪽 Dummy 축과 DM 쪽 Dummy 축의 대응을 DSL이 "사본 선택"으로 해석하는지 미지수.
 - **예상:** qkv −9k (18.4k → ~9k).
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_project_qkv` | 73,445 → **60,412** | — | 1.216 |
+| **기하평균 (V0 대비 누적)** | | | **4.434** |
+
+- x 복제 DmaLoad **18,400 → 5,367** (util 0.157 → 0.539). `HbmTensor<bf16, Chip, m![Dummy8, H]>`에 8부 쓰고
+  DM 슬라이스 매핑 `m![Dummy256 / 8, Dummy8]`로 로드(HBM에 있는 Dummy 축은 사본 선택, 없는 축은 복제) 후
+  `unsafe reshape`로 `Replicated` 타입으로 되돌림. axes.rs는 채점에서 무시되므로 새 Dummy 축을 추가하지 않고
+  `Dummy256 / 8`로 32를 만들었다.
+- **정확도:** 수치 동일. **측정 방식:** makespan only.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** 복제 로드의 병목은 디스크립터 수가 아니라 **같은 HBM 구간의 반복 읽기**(채널 집중)였다.
+  attn_out(x 2k)과 ffn(x 3.4k)의 청크 로드도 같은 원리가 적용될 수 있으나 절대량이 작다.
+
+## V16_rmsnorm_fused_residual
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V15_x_replicate_hbm_copies`
+- **가설:** attn_out tail 16k와 ffn tail에는 rmsnorm(ReducingSlices 레이아웃, Main pass 4개) 뒤에 residual add
+  (1920 타일 2개: Sub 743 + Main 521 ×2 ≈ 2.5k)와 ffn의 layer gate pass(~1.2k)가 별도로 붙는다. rmsnorm의
+  마지막 정규화 pass는 이미 vector 체인(DivF rms, MulF weight)이므로 residual VRF(480 f32 = 1.9 KB)를
+  `vector_clip(Add)`로, gate를 `MulF(Mul1)`로 접어 넣으면 tail pass들이 사라진다. `normalize`는 그대로 두고
+  `normalize_add`, `normalize_add_gate`를 추가(full/vision/audio 경로 무영향).
+- **변경 파일:** `src/device/shared/rmsnorm.rs`(함수 추가), `src/ops.rs`(attn_out·ffn 본문)
+- **예상:** attn_out −2.5k, ffn −3.5k.
+
 
 ## V14_two_clusters
 
