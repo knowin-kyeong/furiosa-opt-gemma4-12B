@@ -15,6 +15,7 @@ RNGD cycles만 점수다.
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA(54k) 대신 HBM 경유 로드(~7k)로 | — | — | — | — | — | — | 설계됨 |
+| `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 `rows % 256`으로 슬라이스에 교차 배치해 HBM→DM DMA를 DMN/슬라이스 인터리빙 (580 → ~2,000 B/cycle 목표) | — | — | — | — | — | — | 설계됨 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
 | `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | 설계됨 |

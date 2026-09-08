@@ -175,7 +175,7 @@ pub(crate) fn project_key_value(
 
 pub(crate) fn project_output(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, Replicated, m![Qs]>,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
     weight_scale: &HbmTensor<bf16, Chip, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {

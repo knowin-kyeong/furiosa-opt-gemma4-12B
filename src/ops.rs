@@ -59,7 +59,11 @@ pub fn sliding_project_qkv(
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = x.to_dm(&mut ctx.tdma);
     let x = shared::rmsnorm::normalize(ctx, &x, input_rms_weight);
 
-    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = layout::broadcast_hidden(ctx, &x);
+    // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
+    // staging the 7.5 KB vector in HBM and loading it back replicated runs at HBM DMA speed.
+    let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
+    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
 
     let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
         sliding::projection::project_query(ctx, &x, q_weight, q_weight_scale);
@@ -138,12 +142,11 @@ pub fn sliding_attention_output(
     o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
     residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
 ) {
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> = x.to_dm(&mut ctx.tdma);
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![Qs]> = unsafe { x.reshape() };
-    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![Qs]> = layout::broadcast_sliding_heads(ctx, &x);
-
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        sliding::projection::project_output(ctx, &x, o_weight, o_weight_scale);
+        sliding::projection::project_output(ctx, x, o_weight, o_weight_scale);
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::rmsnorm::normalize(ctx, &x, post_attn_rms_weight);
 
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = residual_hbm.to_dm(&mut ctx.tdma);
