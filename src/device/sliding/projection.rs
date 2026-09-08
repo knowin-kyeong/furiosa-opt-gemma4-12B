@@ -180,10 +180,32 @@ pub(crate) fn project_output(
     weight_scale: &HbmTensor<bf16, Chip, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
     // Every slice owns 60 hidden rows x one 1024-wide Qs chunk (64 row groups x 4 chunks =
-    // 256 slices), so the weight tile is 60 KB f8 / 120 KB bf16 and each slice needs only a
-    // quarter of x. The four Qs-chunk partials are summed across slices like project_down.
-    // (Live slice counts must be a power of two, and H = 3840 = 2^8 x 15 only tiles into
-    // 4-row transpose packets at 60 or 120 rows, so 15 x 256, 16 x 240 and 20 x 192 all fail.)
+    // 256 slices), so each slice needs only a quarter of x, and the four chunk partials are
+    // summed across slices like project_down. The rows come in 5 tiles of 12, all issued up
+    // front into distinct buffers, so the lookup and contraction of one tile overlap the
+    // loads of the rest. (Live slice counts must be a power of two, and H = 3840 = 2^8 x 15
+    // only tiles into 4-row transpose packets at 60 or 120 rows.)
+    let tile0: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60 = 12, Qs % 1024]> = weight
+        .view()
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, Qs]>(12 * 0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60 = 12, Qs % 1024]> = weight
+        .view()
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, Qs]>(12 * 1)
+        .to_dm(&mut ctx.tdma);
+    let tile2: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60 = 12, Qs % 1024]> = weight
+        .view()
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, Qs]>(12 * 2)
+        .to_dm(&mut ctx.tdma);
+    let tile3: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60 = 12, Qs % 1024]> = weight
+        .view()
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, Qs]>(12 * 3)
+        .to_dm(&mut ctx.tdma);
+    let tile4: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60 = 12, Qs % 1024]> = weight
+        .view()
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, Qs]>(12 * 4)
+        .to_dm(&mut ctx.tdma);
+
     let x: DmTensor<bf16, Chip, Cluster, HiddenRowsByColumns, m![Qs % 1024]> = x.to_dm(&mut ctx.tdma);
     let x_trf: TrfTensor<bf16, Chip, Cluster, HiddenRowsByColumns, m![1], m![Qs % 1024]> = ctx
         .sub
@@ -192,33 +214,88 @@ pub(crate) fn project_output(
         .collect::<m![Qs / 16 % 64], m![Qs % 16]>()
         .to_trf();
 
-    let weight_f8: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60, Qs % 1024]> =
-        weight.to_dm(&mut ctx.tdma);
-    let weight_dm: DmTensor<bf16, Chip, Cluster, HiddenRowsByColumns, m![H % 60, Qs % 1024]> = ctx
-        .main
-        .begin(weight_f8.view())
-        .fetch::<m![H % 60, Qs / 32 % 32], m![Qs % 32]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
-        .commit_trim::<m![Qs % 16]>()
-        .commit();
+    let mut contraction: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 60]> = DmTensor::new();
 
-    let contraction: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 60]> = ctx
-        .main
-        .begin(weight_dm.view())
-        .fetch::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
-        .collect::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
-        .contract_outer::<m![H % 60, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 12, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 60]>()
-        .contract_lane::<m![H % 60], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<HiddenRows, m![H % 60]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H / 4 % 15], m![H % 4 # 16]>()
-        .commit_trim::<m![H % 4]>()
-        .commit();
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * 0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 12, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * 1));
+    ctx.main
+        .begin(tile2.view())
+        .fetch::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 12, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * 2));
+    ctx.main
+        .begin(tile3.view())
+        .fetch::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 12, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * 3));
+    ctx.main
+        .begin(tile4.view())
+        .fetch::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 12, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 12, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * 4));
 
     // 60 rows do not tile into 8-wide f32 vector packets, so gather the [H] vector onto the
     // Slice layout first and apply the per-channel scale there.
