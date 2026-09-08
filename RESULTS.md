@@ -14,8 +14,9 @@ RNGD cycles만 점수다.
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | — | — | **기준** |
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
-| `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA(54k) 대신 HBM 경유 로드(~7k)로 | — | — | — | — | — | — | 설계됨 |
+| `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 `rows % 256`으로 슬라이스에 교차 배치해 HBM→DM DMA를 DMN/슬라이스 인터리빙 (580 → ~2,000 B/cycle 목표) | — | — | — | — | — | — | 설계됨 |
+| `V9_ffn_x_via_hbm` | `V8` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, ~18k)으로 | — | — | — | — | — | — | 설계됨 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
 | `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | 설계됨 |
@@ -25,7 +26,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-`V0_baseline` — 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V7_qkv_x_replicate_via_hbm`**
+(V1+V2+V7 누적, 기하평균 2.250×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -180,22 +182,58 @@ Qs=4096이면 16 × 256. L=15360이면 60 × 256.
   switch 비용 증가 가능. 스케줄의 DMA util로 확인.
 - **예상:** qkv 116k → ~60k.
 
-## V7_qkv_x_replicate_via_hbm
+## V8_weight_rows_interleaved_dma
 
 - **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V2`
-- **가설:** x를 256 슬라이스에 복제하는 비용이 세 방식 모두 비싸다 — switch 61k(하한),
-  DM→DM DMA 54k(FFN, ~70 B/cycle). 그런데 HBM→DM DmaLoad는 실측 ~580 B/cycle이다.
-  rmsnorm 출력 x(7.5 KB)를 HBM에 한 번 쓰고(`to_hbm_view`, ~500 cycle) HBM에서 Replicated
-  레이아웃으로 로드하면 3.9 MB / 580 ≈ 7k cycle. 스크래치 HBM은 (a) 커널 내 `HbmTensor::new()`가
-  되면 그것, (b) 안 되면 qkv는 `q_out`(8 KB, 마지막에 전부 덮어씀)을 빌려 쓴다. attn_out의
-  x[Qs]=8 KB는 `residual_hbm`(7.5 KB)에 안 들어가므로 (a)가 안 되면 별도 설계 필요.
-- **변경 파일:** `src/ops.rs` 본문 (`sliding_project_qkv`, `sliding_attention_output`),
-  필요 시 `src/device/layout.rs`에 헬퍼 추가
-- **공유 코드 영향:** 없음 (layout.rs의 기존 함수는 그대로 둠)
-- **리스크:** HBM WAR 해저드(스크래치 읽기 전에 q_out 쓰기가 앞당겨지면 오답) — 스케줄러가
-  HBM 의존성도 추적한다고 book이 명시. 정확도는 Arena에서 확인.
-- **예상:** qkv 116k → ~60k, attn_out 106k → ~45k (둘 다 이후 weight DMA-bound).
+- **분기점:** `V7`
+- **가설:** V7 이후 qkv(DMA 88%)와 attn_out(DMA 57%)은 weight DmaLoad가 임계 경로다. 실효
+  580 B/cycle은 피크 2,048의 28%이고 util 0.06–0.11. book(Memory Performance): "DMN interleaving:
+  alternate across 2 DMNs per cluster, else 50% loss", "Slice interleaving: spread across 32 slices
+  per DMN". 현재 레이아웃은 슬라이스당 61 KB(qkv Q) / 60 KB(attn_out) **연속 블록**이라 한
+  슬라이스·한 DMN에 순차 기록된다. 행을 4행 블록 단위로 슬라이스에 교차 배치
+  (`m![H / 4 % 64, Qs / 1024]`, element `m![H / 256, H % 4, ...]`)하면 HBM 순차 읽기가 연속
+  슬라이스로 번갈아 들어간다. 4행 블록인 이유: transpose 패킷(4행)과 `to_dm` permutation(8 B 단위)
+  제약. 먼저 attn_out에서 프로브, 효과 있으면 qkv(Q/K/V)와 ffn(up/gate/down)에 확장.
+- **변경 파일:** `src/device/sliding/projection.rs` (매핑만), 이후 `mlp.rs`
+- **공유 코드 영향:** 1차는 없음
+- **리스크:** DMA 엔진이 디스크립터를 어떻게 병렬화하는지 모른다 — 효과가 0일 수 있다.
+  출력 벡터가 블록 permutation된 채 나오므로 `to_dm` relayout이 8 B 조각 960개를 옮겨야 한다.
+- **예상:** attn_out weight DMA 26.7k → 10k 이하면 성공.
+
+## V7_qkv_x_replicate_via_hbm
+
+- **상태:** makespan 측정 (2026-09-09)
+- **분기점:** `V2_attnout_rows_over_256_slices` (`6403c3a`)
+- **가설:** x 복제 비용 — switch 61k(하한), DM→DM DMA ~70 B/cycle — 대신 HBM→DM 로드.
+  프로브 결과 커널 안에서 `HbmTensor::new()`가 **컴파일된다**. attn_out은 입력 `x`가 이미
+  HBM `[Ns, Gs, Ds]`이므로 `unsafe { x.view().reshape() }`로 `HbmTensorView<m![Qs]>`를 만들어
+  `project_output`이 슬라이스별 1024-청크를 직접 로드한다.
+- **변경 파일:** `src/ops.rs` 본문 2곳, `src/device/sliding/projection.rs` (`project_output` 시그니처)
+- **공유 코드 영향:** 없음 (`layout::broadcast_*`는 미사용으로 남음 — dead_code 경고만)
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup (makespan) |
+|---|---|---|---:|
+| `sliding_project_qkv` | 116,583 → **95,433** | — | 1.222 |
+| `sliding_attention_output` | 106,461 → **58,015** | — | 1.835 |
+| `decoder_feedforward` | 609,223 → 609,223 | — | 1.000 |
+| **기하평균 (V0 대비 누적)** | | | **2.250** |
+
+- **정확도:** — (Arena 대기). 수치 변화 없음(복제 경로만 변경). qkv의 스크래치는 별도
+  `HbmTensor::new()`라 `q_out`과 무관.
+- **측정 방식:** makespan only
+- **지배 context (변경 후):** qkv DMA 88.4% (Q 26,475 / x 18,400 / K,V 13,512×2 직렬) · Main 51.9%;
+  attn_out DMA 57.1% (weight 26,734) · Main 35.2%.
+- **HBM→DM Replicated 로드 실효:** 3.9 MB / 18,400 = 213 B/cycle (DM→DM 72 B/cycle의 3배,
+  HBM 순차 로드 580 B/cycle의 1/3 — 같은 7.5 KB를 512번 읽는 패턴 한계로 추정).
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** (1) 커널 내 HBM 스크래치 할당 가능 → 레이아웃 변환의 자유도가 크게 늘었다.
+  (2) 두 attention 커널 모두 이제 **weight DMA-bound** — 다음은 DMA 접근 패턴(V8).
+  (3) FFN의 x→Replicated DmaStos 54k도 같은 기법으로 ~18k로 줄일 수 있다 (V9로 등록).
+- **다음 후보:** V8(DMA 인터리빙) → V9(ffn x via HBM) → V6(up/gate 오버랩) → V5(LUT 융합).
 
 ## V2_attnout_rows_over_256_slices
 
