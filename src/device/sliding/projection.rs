@@ -21,20 +21,15 @@ pub(crate) fn project_query(
         .collect::<m![H / 16], m![H % 16]>()
         .to_trf();
 
+    // The f8 -> bf16 lookup runs in the fetch stage of the contraction: no bf16 copy of the
+    // weight is written to DM and the separate lookup pass disappears from the tail. (Tiling
+    // the load does not help here: qkv is DMA-bound and every extra tile adds a fixed DMA cost.)
     let weight_f8: DmTensor<f8e4m3, Chip, Cluster, QueryRows, m![Qs % 16, H]> = weight.to_dm(&mut ctx.tdma);
-    let weight_dm: DmTensor<bf16, Chip, Cluster, QueryRows, m![Qs % 16, H]> = ctx
+    let contraction: DmTensor<bf16, Chip, Cluster, QueryRows, m![Qs % 16]> = ctx
         .main
         .begin(weight_f8.view())
         .fetch::<m![Qs % 16, H / 16], m![H % 16]>()
         .fetch_table_lookup::<bf16>()
-        .collect::<m![Qs % 16, H / 16], m![H % 16]>()
-        .commit_trim::<m![H % 16]>()
-        .commit();
-
-    let contraction: DmTensor<bf16, Chip, Cluster, QueryRows, m![Qs % 16]> = ctx
-        .main
-        .begin(weight_dm.view())
-        .fetch::<m![Qs % 16, H / 16], m![H % 16]>()
         .collect::<m![Qs % 16, H / 16], m![H % 16]>()
         .contract_outer::<m![Qs % 16, H / 32], m![H % 32], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
@@ -91,19 +86,11 @@ fn project_one_kv_matrix(
     weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![Ps]> {
     let weight_f8: DmTensor<f8e4m3, Chip, Cluster, KvRows, m![Ps % 8, H]> = weight.to_dm(&mut ctx.tdma);
-    let weight_dm: DmTensor<bf16, Chip, Cluster, KvRows, m![Ps % 8, H]> = ctx
+    let contraction: DmTensor<bf16, Chip, Cluster, KvRows, m![Ps % 8]> = ctx
         .main
         .begin(weight_f8.view())
         .fetch::<m![Ps % 8, H / 16], m![H % 16]>()
         .fetch_table_lookup::<bf16>()
-        .collect::<m![Ps % 8, H / 16], m![H % 16]>()
-        .commit_trim::<m![H % 16]>()
-        .commit();
-
-    let contraction: DmTensor<bf16, Chip, Cluster, KvRows, m![Ps % 8]> = ctx
-        .main
-        .begin(weight_dm.view())
-        .fetch::<m![Ps % 8, H / 16], m![H % 16]>()
         .collect::<m![Ps % 8, H / 16], m![H % 16]>()
         .contract_outer::<m![Ps % 8, H / 32], m![H % 32], _, _, _>(x_trf)
         .contract_packet::<m![1]>()
