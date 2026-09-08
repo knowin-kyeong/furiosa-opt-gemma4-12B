@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개(3k) 제거 | — | — | — | — | — | — | 설계됨 |
+| `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개 제거 | 59,216 | **31,113** | 186,976 | **4.822** | — | — | makespan 측정 |
 | `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q weight의 LUT pass를 rmsnorm 앞에 발행해 Q 로드가 DMA 큐 선두로 (K/V까지 같은 방식은 무효) | **59,216** | 34,776 | 186,976 | **4.649** | — | — | makespan 측정 |
 | `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
 | `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드가 같은 7.5 KB HBM 구간을 512번 읽는 패턴(420 B/cycle) → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본 읽기 | **60,412** | 38,240 | 191,122 | **4.434** | — | — | makespan 측정 |
@@ -35,8 +35,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V17_qkv_hoist_weight_loads`**
-(…+V17 누적, 기하평균 4.649×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V18_attnout_scale_in_epilogue`**
+(…+V18 누적, 기하평균 4.822×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -229,6 +229,22 @@ L=15360이면 60 × 256.
 - **리스크:** contract 출력 패킷(`1 # 8`)의 narrow_split 분해(`m![H % 60, 1 # 2], m![1 # 4]`)와 scale VRF
   매핑 일치가 미검증.
 - **예상:** attn_out −3k (8.6%).
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_attention_output` | 34,776 → **31,113** | — | 1.118 |
+| **기하평균 (V0 대비 누적)** | | | **4.822** |
+
+- 첫 시도에 컴파일. scale VRF: DM `m![H % 60]`을 `fetch::<m![H % 60], m![1 # 8]>() → fetch_cast → collect`로
+  행당 패딩 패킷 스테이징; epilogue `inter_slice_reduce → intra_slice_tag → narrow_split::<m![H % 60, 1 # 2],
+  m![1 # 4]> → MulF → widen_concat::<m![H % 60], m![1 # 8]> → vector_final`. 같은 기법을 qkv의 Q/K/V scale
+  pass(각 ~1k+)에도 적용 가능 → V19 후보.
+- **정확도:** scale을 f32 단계에서 곱하므로 이전(bf16 재로드 후 곱)보다 정밀.
+
+### 판정: makespan 측정 (실측 대기)
+
 
 
 ## V16_rmsnorm_fused_residual
