@@ -17,7 +17,7 @@ RNGD cycles만 점수다.
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
-| `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | — | — | — | — | — | — | 설계됨 |
+| `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
@@ -29,8 +29,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V11_residual_1920_tiles`**
-(V1+V2+V7+V9+V6+V10+V11 누적, 기하평균 2.716×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V12_ffn_rows_per_pass_12`**
+(V1+V2+V7+V9+V6+V10+V11+V12 누적, 기하평균 2.857×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -142,6 +142,27 @@ L=15360이면 60 × 256.
 - **리스크:** 12행 transpose `m![L % 60 = 12 / 4], m![L % 60 = 12 % 4 # 16]` 문법 미검증 → 실패 시 contraction만
   4행 서브체인 3개로. DM: 타일 4개 동시 상주 시 f4 92 KB + bf16 92 KB (up/gate) — 여유.
 - **예상:** ffn −40k ~ −70k.
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `decoder_feedforward` | 408,566 → **352,164** | — | 1.160 |
+| **기하평균 (V0 대비 누적)** | | | **2.857** |
+
+- **정확도:** 수치 동일(행 묶음만 변경). 전체 테스트 바이너리 빌드 통과.
+- **측정 방식:** makespan only. 명령 수 1,112 → 632.
+- **지배 context:** DMA 79.6% / Main 67.9% / Vector 67.8%. 소스별: up/gate 타일 DmaLoad 10×10,271 / down 타일
+  10×6,326 / 절반 dequant 20×6,040 / down dequant 10×6,040 / up·gate contract 10×3,145 / scale 타일 DMA 51k /
+  `DmaLoad ?` 30×838 = 25k (V6의 75k에서) / x 복제 18.4k / geglu relayout 11.7k.
+- **컴파일 교훈:** 열 타일 뷰(`H = 1920 # 3840`)는 fetch에서 `/ 32`로 분해 불가("live input axis is left unread")
+  → 패킷 전체 `m![H = 1920]`로 fetch하고 collect에서 flit로 쪼갠다. 12행 transpose
+  `m![L % 60 = 12 / 4], m![L % 60 = 12 % 4 # 16]`는 된다.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** pass당 고정비가 실제로 컸다(−56k). dequant는 여전히 vector 엔진(≈3.8 elem/cycle)에 묶여
+  Main 180k. 다음은 Sub 컨텍스트에 vector 작업을 나누는 것(LUT는 Main 전용이므로 f8 pass 별도, 12.6 elem/cycle).
 
 ## V11_residual_1920_tiles
 
