@@ -17,7 +17,8 @@ RNGD cycles만 점수다.
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
-| `V13_ffn_dma_trims` | `V12` | FFN DMA 바이트·디스크립터 절감: (a) geglu 출력을 HBM 경유로 ByColumns 로드(DM→DM 11.7k 대체), (b) scale을 pass 타일 대신 행렬당 1회 로드(51k → ~27k) | — | — | — | — | — | — | 설계됨 |
+| `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live). 두 클러스터에 행을 실제로 나눠 512 슬라이스 사용 → DMA·연산 2배 기대. attn_out 프로브부터 | — | — | — | — | — | — | 설계됨 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
@@ -30,8 +31,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V12_ffn_rows_per_pass_12`**
-(V1+V2+V7+V9+V6+V10+V11+V12 누적, 기하평균 2.857×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V13_ffn_dma_trims`**
+(…+V13 누적, 기하평균 2.866×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -140,6 +141,32 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/device/shared/mlp.rs`
 - **공유 코드 영향:** vision/audio MLP 경로
 - **예상:** (a) −7k, (b) −10k~−15k.
+
+### 측정
+
+| 단계 | ffn makespan | 판정 |
+|---|---:|---|
+| (a) geglu → HBM 스크래치 → ByColumns 로드 | 352,164 → **348,874** | 채택 |
+| (b) + scale 행렬당 1회 로드 (`.view().tile()`로 pass별 참조) | 354,617 | **기각** — DMA busy 273k→258k인데 스케줄러가 8.3k scale 로드를 첫 타일 앞에 배치, Main 시작 15k→20.6k |
+
+- **컴파일 교훈:** 이미 행 타일된 뷰에 열 타일을 다시 걸 때는 매핑에 바깥 패딩을 함께 적는다
+  (`m![L % 60 = 12 # 60, H / 16 = 120 # 240]`), 아니면 `Output shape mismatch for IndexAccess`.
+- **판정:** makespan 측정 (실측 대기), 누적 기하평균 2.866.
+
+## V14_two_clusters
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V13_ffn_dma_trims`
+- **가설:** `src/device/layout.rs`의 `Cluster = m![1 # 2]`는 클러스터 축 "1 live + 1 패딩"이다. 즉 세 커널
+  모두 칩의 두 클러스터 중 하나(256 슬라이스, DM 128 MB, DMN 8개 = 1 KB/cycle)만 쓴다. 관측 DMA 최고치
+  ~590 B/cycle(256 슬라이스 기준)이 1 KB/cycle 한도 아래에 있는 것과 부합. 행(또는 열)을 클러스터 축
+  `m![H / 1920]` 같은 실제 분할로 바꾸면 슬라이스당 작업이 절반, DMA 대역폭 2배가 될 수 있다.
+  프로브: attn_out을 Cluster `m![H / 1920]` × Slice `m![H / 60 % 32, Qs / 512]`(60행 × 512열, 8-way reduce)로.
+- **변경 파일:** `src/device/sliding/projection.rs` (프로브), 성공 시 `layout.rs`·`mlp.rs`·rmsnorm 등 전반
+- **리스크:** 클러스터 축의 실제 분할을 DSL/DMA가 지원하는지, 클러스터 간 gather(`to_dm` → `Cluster 1#2`)가
+  되는지 미지수. `#[device(chip = 1)]`과 HBM 텐서의 `Chip` 매핑은 그대로.
+- **예상:** 성공 시 attn_out weight DMA 29k → ~15k, Main 절반. 세 커널 전부에 적용 가능.
+
 
 ## V12_ffn_rows_per_pass_12
 
