@@ -83,9 +83,7 @@ The following scoring values are still TBD:
 | Field | Planned rule |
 |---|---|
 | Performance metric and weighting | **TBD** |
-| Result aggregation across evaluations | **TBD** |
 | Failed or timed-out run | **TBD** |
-| Tie-break | **TBD** |
 | Reproducibility and code review | **TBD** |
 
 Schedule makespan is a useful development metric, but it is not a substitute for official
@@ -161,14 +159,11 @@ cargo +nightly-2026-05-01 binstall cargo-furiosa-opt
 cargo install furiosa-schedule-viewer
 ```
 
-Configure the RNGD CLI once before using `scripts/rngd_test.sh`:
+Configure the Furiosa Arena CLI once before using `scripts/rngd_test.sh`:
 
 ```sh
-curl -LO https://arena.furiosa.ai/cli/rngd-cli-linux-x86_64.tar.gz
-tar xzf rngd-cli-linux-x86_64.tar.gz
-mkdir -p ~/.local/bin && mv rngd ~/.local/bin/
+cargo binstall furiosa-arena-cli
 
-export RNGD_URL=https://arena.furiosa.ai
 rngd login
 ```
 
@@ -188,6 +183,7 @@ The scheduler commands used for troubleshooting are:
   — mappings, movement, computation, scheduling, and tuning.
 - [`furiosa_opt_std` API docs](https://docs.rs/furiosa-opt-std/latest/furiosa_opt_std/)
   — tensor types, mapping expressions, and engine modules.
+- [furiosa-arena-cli docs](https://github.com/kreatinj/furiosa-arena-cli#installation)
 - [OPTIMIZATION.md](OPTIMIZATION.md) — the Stage 1 kernel optimization workflow.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — repository layout and host/RNGD split.
 - [SERVING.md](SERVING.md) — running the model as an HTTP server.
