@@ -5,20 +5,35 @@ use crate::Chip;
 use crate::axes::{Ds, Gs, H, Ns, Ps, Qs};
 use crate::device::layout::{BothClusters, Cluster, Replicated, Slice};
 
+// Both clusters do real work: the query rows are split across the two clusters and then
+// 256 slices per cluster, 8 rows each.
+type QueryClusters = m![Qs / 2048];
+type QueryRows = m![Qs / 8 % 256];
+
+/// The query weight, dequantized to bf16 in its projection layout. Issued by the caller
+/// before anything that depends on x: the scheduler orders DMA by the program order of the
+/// consumer, so the lookup pass being first puts the 13.5k-cycle load at the head of the
+/// queue, and the pass itself runs while x is normalized, staged and replicated.
+pub(crate) type QueryWeight = DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8, H]>;
+
+pub(crate) fn load_query_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) -> QueryWeight {
+    let weight_f8: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8, H]> = weight.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(weight_f8.view())
+        .fetch::<m![Qs % 8, H / 16], m![H % 16]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![Qs % 8, H / 16], m![H % 16]>()
+        .commit_trim::<m![H % 16]>()
+        .commit()
+}
+
 pub(crate) fn project_query(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
-    weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    weight_f8: &QueryWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> {
-    // Both clusters do real work: the query rows are split across the two clusters and
-    // then 256 slices per cluster, 8 rows each. x is loaded replicated onto every slice of
-    // both clusters straight from HBM, and the f8 -> bf16 lookup runs in the fetch stage of
-    // the contraction.
-    type QueryClusters = m![Qs / 2048];
-    type QueryRows = m![Qs / 8 % 256];
-
-    let weight_f8: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8, H]> = weight.to_dm(&mut ctx.tdma);
+    // x is replicated onto every slice of both clusters.
     let x: DmTensorView<'_, bf16, Chip, QueryClusters, QueryRows, m![H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<bf16, Chip, QueryClusters, QueryRows, m![1], m![H]> = ctx
         .sub
@@ -31,7 +46,6 @@ pub(crate) fn project_query(
         .main
         .begin(weight_f8.view())
         .fetch::<m![Qs % 8, H / 16], m![H % 16]>()
-        .fetch_table_lookup::<bf16>()
         .collect::<m![Qs % 8, H / 16], m![H % 16]>()
         .contract_outer::<m![Qs % 8, H / 32], m![H % 32], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
@@ -89,13 +103,20 @@ pub(crate) fn project_query(
 type KvClusters = m![Ps / 1024];
 type KvRows = m![Ps / 4 % 256];
 
+/// A K or V weight in its projection layout. (Splitting its lookup out like the query's
+/// does not help: the scheduler still issues the K/V loads only around their contractions.)
+pub(crate) type KvWeight = DmTensor<f8e4m3, Chip, KvClusters, KvRows, m![Ps % 4, H]>;
+
+pub(crate) fn load_kv_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) -> KvWeight {
+    weight.to_dm(&mut ctx.tdma)
+}
+
 fn project_one_kv_matrix(
     ctx: &mut Context,
     x_trf: &TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]>,
-    weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    weight_f8: &KvWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![Ps]> {
-    let weight_f8: DmTensor<f8e4m3, Chip, KvClusters, KvRows, m![Ps % 4, H]> = weight.to_dm(&mut ctx.tdma);
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
         .main
         .begin(weight_f8.view())
@@ -152,8 +173,8 @@ fn project_one_kv_matrix(
 pub(crate) fn project_key_value(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
-    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
-    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    k_weight: &KvWeight,
+    v_weight: &KvWeight,
     k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
     v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> (

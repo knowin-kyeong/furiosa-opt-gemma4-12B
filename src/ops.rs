@@ -56,6 +56,11 @@ pub fn sliding_project_qkv(
     v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
     q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
 ) {
+    // The query weight is loaded and dequantized before anything that depends on x, which
+    // puts its 13.5k-cycle load at the head of the DMA queue (the scheduler orders loads by
+    // their consumer, not by issue order) and overlaps the lookup with x's staging.
+    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
+
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = x.to_dm(&mut ctx.tdma);
     let x = shared::rmsnorm::normalize(ctx, &x, input_rms_weight);
 
@@ -67,10 +72,13 @@ pub fn sliding_project_qkv(
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
     let x: DmTensor<bf16, Chip, layout::BothClusters, m![Dummy256 / 8, Dummy8], m![H]> = x_hbm.to_dm(&mut ctx.tdma);
     let x: DmTensor<bf16, Chip, layout::BothClusters, Replicated, m![H]> = unsafe { x.reshape() };
+    let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
+    let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
     let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
-        sliding::projection::project_query(ctx, &x, q_weight, q_weight_scale);
-    let (k, v) = sliding::projection::project_key_value(ctx, &x, k_weight, v_weight, k_weight_scale, v_weight_scale);
+        sliding::projection::project_query(ctx, &x, &q_weight, q_weight_scale);
+    let (k, v) =
+        sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight, k_weight_scale, v_weight_scale);
 
     let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
         sliding::rmsnorm::normalize_query(ctx, &q, q_rms_weight);
