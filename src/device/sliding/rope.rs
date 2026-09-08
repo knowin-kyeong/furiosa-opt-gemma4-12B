@@ -5,7 +5,7 @@ use crate::Chip;
 use crate::axes::{Ds, E, Gs, Ns};
 use crate::device::layout::{Cluster, Slice};
 
-type KvHeadsAcrossSlices = HeadSlices;
+type KvHeadsAcrossSlices = m![1 # 32, Ns];
 
 pub(crate) fn apply_rope(
     ctx: &mut Context,
