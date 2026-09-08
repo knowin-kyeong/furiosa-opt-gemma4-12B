@@ -17,6 +17,7 @@ RNGD cycles만 점수다.
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
+| `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | — | — | — | — | — | — | 설계됨 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
@@ -125,6 +126,22 @@ L=15360이면 60 × 256.
 - **배운 것:**
 - **다음 후보:**
 ======================================================================= -->
+
+## V12_ffn_rows_per_pass_12
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V11_residual_1920_tiles`
+- **가설:** V6 이후 FFN은 DMA 83% busy이고, dequant pass마다 설명 없는 4 KB `DmaLoad ?`(838 cycle)가 하나씩
+  붙어 90 pass × 838 ≈ 75k가 DMA 큐를 차지한다. 명령 수(스케줄러 오버헤드, Sub 프리로드 ×90)도 pass에 비례.
+  `ROWS_PER_PASS`를 12로 올리면 pass가 30개로 줄어 이 고정비가 1/3이 된다. 12행이 막혔던 이유는 scale VRF
+  (12 × 240 × 4 B = 11.5 KB > 8 KB)였는데, up/gate의 dequant를 1920열 절반씩 두 번 하면 scale이 5.8 KB로
+  들어간다(LUT pass 수는 60→... 절반 분할 때문에 up/gate는 10×2=20, down 10 → 총 30). down은 L 청크가
+  1920이라 12행 scale이 그대로 5.8 KB.
+- **변경 파일:** `src/device/shared/mlp.rs`
+- **공유 코드 영향:** vision/audio MLP 경로 동시 영향
+- **리스크:** 12행 transpose `m![L % 60 = 12 / 4], m![L % 60 = 12 % 4 # 16]` 문법 미검증 → 실패 시 contraction만
+  4행 서브체인 3개로. DM: 타일 4개 동시 상주 시 f4 92 KB + bf16 92 KB (up/gate) — 여유.
+- **예상:** ffn −40k ~ −70k.
 
 ## V11_residual_1920_tiles
 
