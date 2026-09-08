@@ -31,7 +31,8 @@
 | `V17_qkv_hoist_weight_loads` (…+V17 누적) | 59,216 | 34,776 | 186,976 | 4.649× |
 | `V18_attnout_scale_in_epilogue` (…+V18 누적) | 59,216 | 31,113 | 186,976 | 4.822× |
 | `V19_qkv_tail_heads_layout` (…+V19 누적) | 55,811 | 31,113 | 186,976 | 4.919× |
-| `V20_qkv_tail_per_cluster` (…+V20 누적) | 51,631 | 31,113 | 186,976 | **5.048×** |
+| `V20_qkv_tail_per_cluster` (…+V20 누적) | 51,631 | 31,113 | 186,976 | 5.048× |
+| `V22_attnout_weight_tiles` (…+V22 누적) | 51,631 | 30,487 | 186,976 | **5.082×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
