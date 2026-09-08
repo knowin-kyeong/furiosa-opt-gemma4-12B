@@ -34,6 +34,10 @@ Stage 1 점수 = 3개 커널의 **baseline 대비 speedup의 기하평균**.
 | `RESULTS.md` | **모든 실험 기록** (브랜치 1개 = 행 1개). 성공·실패 모두 | 실험할 때마다 |
 | `SOTA.md` | **SOTA 갱신 이력만.** road to SOTA 서사 (추후 report 원본) | 신기록이 나올 때만 |
 
+**문서의 최신본은 항상 선두(가장 최근 SOTA 후보) 브랜치에 있다.** 실험 브랜치는 선형 계보로 쌓이므로
+RESULTS.md/SOTA.md/RULES.md는 그 계보의 끝에서 갱신하고, `V0_baseline`의 사본은 출발점 기록일 뿐이다.
+새 세션은 `git fetch` 후 RESULTS.md 요약 보드의 가장 아래 행(최신)이 있는 브랜치를 체크아웃해서 시작한다.
+
 **RESULTS.md는 실패도 반드시 기록한다.** 이 문서의 존재 이유가 중복 실험 방지이므로,
 "해봤는데 안 됐다"가 "안 해봤다"보다 훨씬 가치 있다.
 
@@ -426,3 +430,44 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 2. `git branch -a`로 현재까지의 실험 목록을 본다.
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
+
+### 10.1 2026-09-09 세션이 남긴 상태 (다음 세션이 이어받을 것)
+
+**브랜치 계보 (모두 origin에 push됨, 각각 한 가지 변경만 담음):**
+
+```
+main ─ V0_baseline ─ V1_ffn_down_chunked_dequant ─ V2_attnout_rows_over_256_slices
+                                                     └─ V7_qkv_x_replicate_via_hbm
+                                                          ├─ V8_weight_rows_interleaved_dma   (기각, 실물 A/B용으로 보존)
+                                                          └─ V9_ffn_x_via_hbm ─ V6_ffn_upgate_overlap ─ V10_attn_weight_tiles_fused_lut ─ V11_residual_1920_tiles  ← 선두
+                                                                                                                                              (V3, V4, V5는 슬롯만; V5는 V10에 흡수)
+```
+
+**makespan (정적, cargo-furiosa-opt 0.6.0):** V0 116,583 / 194,020 / 1,693,200 → V11 93,127 / 50,110 / 408,566
+(기하평균 2.716×). **실측은 하나도 없다.** 정확도도 미검증.
+
+**Arena 승인이 나면 가장 먼저 할 일 (순서 고정):**
+
+1. pod에서 `. /root/env.sh; cd /root/furiosa-opt-gemma4-12B; git checkout V0_baseline && ./scripts/rngd_test.sh`
+   → 세 커널의 **분모**(V0 실측 cycle)와 정확도 PASS 확인. 이게 없으면 아무것도 판정 못 한다.
+2. `git checkout V11_residual_1920_tiles && ./scripts/rngd_test.sh` → 정확도와 실측 cycle.
+3. V11이 정확도에서 깨지면 계보를 거슬러 이분 탐색: V10 → V6 → V9 → V7 → V2 → V1. 각 브랜치가
+   단일 기전이라 깨진 지점이 곧 원인이다. 수치를 건드린 변경은 없다(V2의 f32 inter-slice reduce는 오히려
+   정밀). **유효성 리스크가 가장 큰 것은 V7/V9의 커널 내 `HbmTensor::new()`** — 채점 런타임이 커널 내
+   HBM 할당을 거부하면 DM→DM 복제(54k)로 되돌린다.
+4. 실측이 나오면 RESULTS.md 요약 보드의 "RNGD 실측"·"정확도" 칸을 채우고 판정을 `채택/기각`으로 바꾼다.
+   SOTA.md는 그때 처음으로 갱신한다.
+
+**pod 상태 (`root@213.192.2.99 -p 41008`, 휘발성):** 툴체인·env.sh·헬퍼 스크립트(`/root/*.py`, `/root/*.sh`)는
+전부 `scripts/dev/`와 RULES §6.3에 있으므로 pod이 사라져도 §6.3 절차로 30분 안에 복구된다.
+`cargo-furiosa-opt`는 **0.6.0을 고정 설치**해야 한다(0.7.0은 crate와 불일치, §6.3.1 참조).
+
+**다음 가설 후보 (RESULTS.md 각 섹션 "다음 후보" 종합, 기대값 순):**
+
+| 후보 | 기대 | 근거 |
+|---|---|---|
+| FFN `ROWS_PER_PASS` 4 → 12 (scale VRF를 두 번에 나눠 로드) | ffn −50k~−70k | pass당 고정 DMA(`DmaLoad ?` 838)와 명령 수가 1/3로 |
+| FFN scale pass 절반을 `ctx.sub`로 (LUT는 Main 별도 pass) | ffn −40k~−80k (불확실) | Vector 엔진이 Main/Sub에서 병렬 동작하는 것을 gelu가 증명 |
+| `shared::rmsnorm` 경량화 (ReducingSlices 경로 3~4k × 4회) | 세 커널 각 −2k~−3k | 기하평균 레버리지 |
+| qkv x 복제 18.4k (H-split, 정렬 리스크) | qkv −10k | §RESULTS V3 보류 사유 참조 |
+| V8 실물 A/B (인터리브 레이아웃) | 실측에서만 판단 가능 | 정적 모델은 무반응 |
