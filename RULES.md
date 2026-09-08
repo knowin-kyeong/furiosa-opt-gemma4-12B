@@ -84,6 +84,8 @@ V{version_num}_{description}
 - 실험 브랜치의 커밋 메시지 첫 줄: `V{n}: {한 줄 요약}`
 - 측정 결과가 나오면 RESULTS.md 갱신을 **별도 커밋**으로 남긴다 (코드 diff를 깨끗하게 유지).
 - 브랜치는 지우지 않는다. 실패한 실험도 근거로 남는다.
+- **브랜치를 만들면 곧바로 `origin`에 push한다.** 작업 서버가 휘발성 컨테이너
+  디스크이므로 push되지 않은 것은 언제든 사라질 수 있다 (§6.2.1).
 
 ---
 
@@ -217,22 +219,39 @@ RunPod에서 반드시 확인할 것:
 1. **아키텍처가 x86_64인지.** RunPod에는 ARM(Ampere/Graviton 계열) CPU pod도 있다.
    ARM에 걸리면 `cargo-furiosa-opt`가 아예 설치되지 않는다. 접속 직후 `uname -m`이
    `x86_64`인지 먼저 확인하고, 아니면 인스턴스를 갈아탄다.
-2. **80GB가 어떻게 쪼개지는지.** RunPod은 디스크를 *container disk*(휘발성)와
-   *volume disk*(`/workspace`, 영속)로 나눈다. 컨테이너 디스크에 작업물을 두면
-   pod을 stop/start할 때 전부 날아간다. **모든 것을 `/workspace` 아래에 둔다:**
-
-   ```sh
-   export CARGO_HOME=/workspace/.cargo
-   export RUSTUP_HOME=/workspace/.rustup
-   echo 'export CARGO_HOME=/workspace/.cargo'   >> ~/.bashrc
-   echo 'export RUSTUP_HOME=/workspace/.rustup' >> ~/.bashrc
-   echo 'export PATH=$CARGO_HOME/bin:$PATH'     >> ~/.bashrc
-   cd /workspace && git clone <repo>
-   ```
+2. **디스크 배분.** RunPod은 디스크를 *container disk*(휘발성)와 *volume disk*
+   (`/workspace`, 영속)로 나눈다. **이 프로젝트는 `/workspace`를 쓰지 않고 컨테이너
+   디스크에서 작업하기로 했다** (2026-09-09 결정). 따라서 80GB 중 대부분을
+   **container disk에 배정**해야 한다 — volume에 몰아주면 정작 빌드할 공간이 없다.
 
    대략적인 용량: rustup 툴체인 ~2GB, cargo registry ~3GB, `target/release` 5~15GB,
-   CPU torch ~1GB. 80GB면 여유 있지만 volume 쪽에 최소 50GB는 잡아야 한다.
-   부족해지면 `cargo clean` 대신 `rm -rf target/debug`부터 한다.
+   CPU torch ~1GB. 부족해지면 `cargo clean`(전부 날림) 대신 `rm -rf target/debug`부터 한다.
+
+### 6.2.1 컨테이너 디스크는 휘발성이다 — git이 유일한 안전장치
+
+컨테이너 디스크의 내용은 pod을 terminate하면 **전부 사라진다** (stop만 해도 보존이
+보장되지 않는다). 재빌드는 시간만 들면 되지만, **실험 코드와 측정 결과는 복구 불가능하다.**
+
+그래서 다음이 규칙이다:
+
+1. **실험 브랜치는 만들자마자 push한다.** 측정이 끝날 때까지 기다리지 않는다.
+
+   ```sh
+   git checkout -b V{n}_{description}
+   git push -u origin V{n}_{description}     # 코드를 쓰기 전에 먼저
+   ```
+
+2. **RESULTS.md를 갱신하면 즉시 commit + push한다.** 실측 cycle 숫자는 Arena 잡을
+   다시 돌려야만 얻을 수 있다. 로컬에만 있는 측정 결과 = 아직 없는 결과로 취급한다.
+
+3. **pod을 내리기 전에 `git status`가 깨끗한지, `git log origin/{branch}..HEAD`가
+   비어 있는지 확인한다.** 하나라도 남아 있으면 그 작업은 날아간다.
+
+4. `target/schedules/*.json`은 gitignore된 `target/` 아래에 있어 push되지 않는다.
+   보존이 필요한 makespan 수치는 **JSON이 아니라 RESULTS.md에 숫자로 옮겨 적는다.**
+
+원격: `origin` = `knowin-kyeong/furiosa-opt-gemma4-12B` (우리 fork, push 대상),
+`upstream` = `HoseongLee/furiosa-opt-gemma4-12B` (주최측 원본, **절대 push 금지**).
 
 ### 6.3 원격 서버 초기 셋업
 
