@@ -354,8 +354,12 @@ pub(crate) fn geglu(
         .commit()
 }
 
-pub(crate) type DownRows = m![H / 120, 1 # 8];
-pub(crate) type DownRowsByColumns = m![H / 120, L / 1920];
+/// Both clusters do real work on the down projection: hidden rows are split across the
+/// two clusters, then 32 row groups per cluster, and L across 8 column chunks (512 slices x
+/// 60 rows x 1920 columns). The chunk partials are summed across slices within a cluster.
+pub(crate) type DownClusters = m![H / 1920];
+pub(crate) type DownRows = m![H / 60 % 32, 1 # 8];
+pub(crate) type DownRowsByColumns = m![H / 60 % 32, L / 1920];
 
 pub(crate) fn project_down(
     ctx: &mut Context,
@@ -363,53 +367,45 @@ pub(crate) fn project_down(
     down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
     down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+    // All 5 tiles (and their block scales) are issued up front into distinct buffers so the
+    // loads stream back to back while each tile is dequantized as it lands.
+    let tile0 = load_down_rows(ctx, down_weight_packed, 0);
+    let scale0 = load_down_scale(ctx, down_weight_scale, 0);
+    let tile1 = load_down_rows(ctx, down_weight_packed, 1);
+    let scale1 = load_down_scale(ctx, down_weight_scale, 1);
+    let tile2 = load_down_rows(ctx, down_weight_packed, 2);
+    let scale2 = load_down_scale(ctx, down_weight_scale, 2);
+    let tile3 = load_down_rows(ctx, down_weight_packed, 3);
+    let scale3 = load_down_scale(ctx, down_weight_scale, 3);
+    let tile4 = load_down_rows(ctx, down_weight_packed, 4);
+    let scale4 = load_down_scale(ctx, down_weight_scale, 4);
+
     // Each slice loads only its 1920-wide chunk of the geglu output from HBM.
-    let x: DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![L % 1920]> = x.to_dm(&mut ctx.tdma);
-
-    const ROWS_PER_SLICE: usize = 120;
-    const ROWS_PER_PASS: usize = 12;
-    const PASSES: usize = ROWS_PER_SLICE / ROWS_PER_PASS;
-
-    let mut down: DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]> = DmTensor::new();
-
-    // Several tiles are live per iteration so they land in different DM buffers and their
-    // loads overlap the dequant of the earlier ones; x goes to the TRF after the first loads.
-    let first_a = load_down_rows(ctx, down_weight_packed, 0);
-    let first_scale_a = load_down_scale(ctx, down_weight_scale, 0);
-    let first_b = load_down_rows(ctx, down_weight_packed, 1);
-    let first_scale_b = load_down_scale(ctx, down_weight_scale, 1);
-    let first_weight_a = dequant_down_rows(ctx, &first_a, &first_scale_a);
-    let first_weight_b = dequant_down_rows(ctx, &first_b, &first_scale_b);
-    let x_trf: TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]> = ctx
+    let x: DmTensor<bf16, Chip, DownClusters, DownRowsByColumns, m![L % 1920]> = x.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<bf16, Chip, DownClusters, DownRowsByColumns, m![1], m![L % 1920]> = ctx
         .sub
         .begin(x.view())
         .fetch::<m![L / 16 % 120], m![L % 16]>()
         .collect::<m![L / 16 % 120], m![L % 16]>()
         .to_trf();
-    contract_down_rows(ctx, &x_trf, &first_weight_a, 0, &mut down);
-    contract_down_rows(ctx, &x_trf, &first_weight_b, 1, &mut down);
-    const QUADS: usize = (PASSES - 2) / 4;
-    for k in 0..QUADS {
-        let p0 = 4 * k + 2;
-        let t0 = load_down_rows(ctx, down_weight_packed, p0);
-        let s0 = load_down_scale(ctx, down_weight_scale, p0);
-        let t1 = load_down_rows(ctx, down_weight_packed, p0 + 1);
-        let s1 = load_down_scale(ctx, down_weight_scale, p0 + 1);
-        let t2 = load_down_rows(ctx, down_weight_packed, p0 + 2);
-        let s2 = load_down_scale(ctx, down_weight_scale, p0 + 2);
-        let t3 = load_down_rows(ctx, down_weight_packed, p0 + 3);
-        let s3 = load_down_scale(ctx, down_weight_scale, p0 + 3);
-        let w = dequant_down_rows(ctx, &t0, &s0);
-        contract_down_rows(ctx, &x_trf, &w, p0, &mut down);
-        let w = dequant_down_rows(ctx, &t1, &s1);
-        contract_down_rows(ctx, &x_trf, &w, p0 + 1, &mut down);
-        let w = dequant_down_rows(ctx, &t2, &s2);
-        contract_down_rows(ctx, &x_trf, &w, p0 + 2, &mut down);
-        let w = dequant_down_rows(ctx, &t3, &s3);
-        contract_down_rows(ctx, &x_trf, &w, p0 + 3, &mut down);
-    }
 
-    down.to_dm(&mut ctx.tdma)
+    let mut down: DmTensor<bf16, Chip, DownClusters, DownRows, m![H % 60]> = DmTensor::new();
+    let w = dequant_down_rows(ctx, &tile0, &scale0);
+    contract_down_rows(ctx, &x_trf, &w, 0, &mut down);
+    let w = dequant_down_rows(ctx, &tile1, &scale1);
+    contract_down_rows(ctx, &x_trf, &w, 1, &mut down);
+    let w = dequant_down_rows(ctx, &tile2, &scale2);
+    contract_down_rows(ctx, &x_trf, &w, 2, &mut down);
+    let w = dequant_down_rows(ctx, &tile3, &scale3);
+    contract_down_rows(ctx, &x_trf, &w, 3, &mut down);
+    let w = dequant_down_rows(ctx, &tile4, &scale4);
+    contract_down_rows(ctx, &x_trf, &w, 4, &mut down);
+
+    // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
+    // rejected by the synchronization checker) onto the Slice layout.
+    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    down.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut());
+    down_hbm.to_dm(&mut ctx.tdma)
 }
 
 /// Loads `ROWS_PER_PASS` packed rows x each slice's L / 1920 column chunk of the down matrix.
@@ -417,10 +413,10 @@ fn load_down_rows(
     ctx: &mut Context,
     down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
     pass: usize,
-) -> DmTensor<f4e2m1, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L % 1920]> {
+) -> DmTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L % 1920]> {
     down_weight_packed
         .view()
-        .tile::<m![H % 120], 12, m![H / 120, H % 120 = 12 # 120, L]>(12 * pass)
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, L]>(12 * pass)
         .to_dm(&mut ctx.tdma)
 }
 
@@ -429,39 +425,39 @@ fn load_down_scale(
     ctx: &mut Context,
     down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
     pass: usize,
-) -> DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L / 16 % 120]> {
+) -> DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L / 16 % 120]> {
     down_weight_scale
         .view()
-        .tile::<m![H % 120], 12, m![H / 120, H % 120 = 12 # 120, L / 16]>(12 * pass)
+        .tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 # 60, L / 16]>(12 * pass)
         .to_dm(&mut ctx.tdma)
 }
 
 /// Dequantizes `ROWS_PER_PASS` rows' column chunk of the down matrix to bf16.
 fn dequant_down_rows(
     ctx: &mut Context,
-    packed: &DmTensor<f4e2m1, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L % 1920]>,
-    down_weight_scale: &DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L / 16 % 120]>,
-) -> DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L % 1920]> {
-    let down_weight_scale_vrf: VrfTensor<f32, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L / 16 % 120]> =
+    packed: &DmTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L % 1920]>,
+    down_weight_scale: &DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L / 16 % 120]>,
+) -> DmTensor<bf16, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L % 1920]> {
+    let down_weight_scale_vrf: VrfTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L / 16 % 120]> =
         ctx.sub
             .begin(down_weight_scale.view())
-            .fetch::<m![H % 120 = 12], m![L / 16 % 120]>()
+            .fetch::<m![H % 60 = 12], m![L / 16 % 120]>()
             .fetch_cast::<f32>()
-            .collect::<m![H % 120 = 12, L / 128 % 15], m![L / 16 % 8]>()
+            .collect::<m![H % 60 = 12, L / 128 % 15], m![L / 16 % 8]>()
             .to_vrf();
 
     // f4 -> f8 lookup and f8 -> f32 cast in the fetch stage; no f8 copy is written to DM.
     ctx.main
         .begin(packed.view())
-        .fetch::<m![H % 120 = 12, L / 32 % 60], m![L % 32]>()
+        .fetch::<m![H % 60 = 12, L / 32 % 60], m![L % 32]>()
         .fetch_table_lookup::<f8e4m3>()
         .fetch_cast::<f32>()
-        .collect::<m![H % 120 = 12, L / 8 % 240], m![L % 8]>()
+        .collect::<m![H % 60 = 12, L / 8 % 240], m![L % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![H % 120 = 12, L / 4 % 480], m![L % 4]>()
+        .vector_narrow_split::<m![H % 60 = 12, L / 4 % 480], m![L % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &down_weight_scale_vrf)
-        .vector_widen_concat::<m![H % 120 = 12, L / 8 % 240], m![L % 8]>()
+        .vector_widen_concat::<m![H % 60 = 12, L / 8 % 240], m![L % 8]>()
         .vector_final()
         .cast::<bf16, m![L % 8 # 16]>()
         .commit_trim::<m![L % 8]>()
@@ -471,24 +467,24 @@ fn dequant_down_rows(
 /// Contracts `ROWS_PER_PASS` dequantized rows with `x_trf` and sums the eight column chunks into `down`.
 fn contract_down_rows(
     ctx: &mut Context,
-    x_trf: &TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]>,
-    down_weight: &DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 12, L % 1920]>,
+    x_trf: &TrfTensor<bf16, Chip, DownClusters, DownRowsByColumns, m![1], m![L % 1920]>,
+    down_weight: &DmTensor<bf16, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 12, L % 1920]>,
     pass: usize,
-    down: &mut DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]>,
+    down: &mut DmTensor<bf16, Chip, DownClusters, DownRows, m![H % 60]>,
 ) {
     ctx.main
         .begin(down_weight.view())
-        .fetch::<m![H % 120 = 12, L / 16 % 120], m![L % 16]>()
-        .collect::<m![H % 120 = 12, L / 16 % 120], m![L % 16]>()
-        .contract_outer::<m![H % 120 = 12, L / 32 % 60], m![L % 32], _, _, _>(x_trf)
+        .fetch::<m![H % 60 = 12, L / 16 % 120], m![L % 16]>()
+        .collect::<m![H % 60 = 12, L / 16 % 120], m![L % 16]>()
+        .contract_outer::<m![H % 60 = 12, L / 32 % 60], m![L % 32], _, _, _>(x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 120 = 12]>()
-        .contract_lane::<m![H % 120 = 12], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H % 60 = 12]>()
+        .contract_lane::<m![H % 60 = 12], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<DownRows, m![H % 120 = 12]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<DownRows, m![H % 60 = 12]>(InterSliceReduceOpF32::Add)
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H % 120 = 12 / 4], m![H % 120 = 12 % 4 # 16]>()
-        .commit_trim::<m![H % 120 = 12 % 4]>()
-        .commit_view(down.view_mut().tile::<m![H % 120], 12, m![H % 120 = 12 #{!} 120]>(12 * pass));
+        .transpose::<m![H % 60 = 12 / 4], m![H % 60 = 12 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 12 % 4]>()
+        .commit_view(down.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(12 * pass));
 }
