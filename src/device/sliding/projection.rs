@@ -179,112 +179,70 @@ pub(crate) fn project_output(
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
     weight_scale: &HbmTensor<bf16, Chip, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    const CHUNK: usize = 1024;
+    // 16 hidden rows per slice over 240 slices, the same shape as `project_query`: the whole
+    // weight tile (16 x Qs f8 = 64 KB) fits a slice, so no column chunking or partial sums.
+    let x: DmTensorView<'_, bf16, Chip, Cluster, HiddenRows, m![Qs]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<bf16, Chip, Cluster, HiddenRows, m![1], m![Qs]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![1], m![Qs]>()
+        .collect::<m![Qs / 16], m![Qs % 16]>()
+        .to_trf();
 
-    let p0 = output_partial(ctx, x, weight, 0);
-    let p1 = output_partial(ctx, x, weight, CHUNK);
-    let p2 = output_partial(ctx, x, weight, 2 * CHUNK);
-    let p3 = output_partial(ctx, x, weight, 3 * CHUNK);
+    let weight_f8: DmTensor<f8e4m3, Chip, Cluster, HiddenRows, m![H % 16, Qs]> = weight.to_dm(&mut ctx.tdma);
+    let weight_dm: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 16, Qs]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![H % 16, Qs / 16], m![Qs % 16]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 16, Qs / 16], m![Qs % 16]>()
+        .commit_trim::<m![Qs % 16]>()
+        .commit();
 
-    let p01 = add_partials(ctx, &p0, &p1);
-    let p23 = add_partials(ctx, &p2, &p3);
-    let result = add_partials(ctx, &p01, &p23);
-    let result = apply_output_channel_scale(ctx, &result, weight_scale);
+    let contraction: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 16]> = ctx
+        .main
+        .begin(weight_dm.view())
+        .fetch::<m![H % 16, Qs / 16], m![Qs % 16]>()
+        .collect::<m![H % 16, Qs / 16], m![Qs % 16]>()
+        .contract_outer::<m![H % 16, Qs / 32], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 16]>()
+        .contract_lane::<m![H % 16], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H / 4 % 4], m![H % 4 # 16]>()
+        .commit_trim::<m![H % 4]>()
+        .commit();
+
+    let result = apply_output_channel_scale(ctx, &contraction, weight_scale);
     result.to_dm(&mut ctx.tdma)
 }
 
-type HiddenRows = m![H / 120, 1 # 8];
-
-fn output_partial(
-    ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, Replicated, m![Qs]>,
-    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-    offset: usize,
-) -> DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]> {
-    let x: DmTensorView<'_, bf16, Chip, Cluster, HiddenRows, m![Qs]> = unsafe { x.view().reshape() };
-    let x = x.tile::<m![Qs], 1024, m![Qs = 1024 # 4096]>(offset);
-    let x_trf: TrfTensor<bf16, Chip, Cluster, HiddenRows, m![1], m![Qs = 1024]> = ctx
-        .sub
-        .begin(x)
-        .fetch::<m![1], m![Qs = 1024]>()
-        .collect::<m![Qs = 1024 / 16], m![Qs = 1024 % 16]>()
-        .to_trf();
-    let weight_f8: DmTensor<f8e4m3, Chip, Cluster, HiddenRows, m![H % 120, Qs = 1024]> = weight
-        .view()
-        .tile::<m![Qs], 1024, m![H, Qs = 1024 # 4096]>(offset)
-        .to_dm(&mut ctx.tdma);
-    let weight: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120, Qs = 1024]> = ctx
-        .main
-        .begin(weight_f8.view())
-        .fetch::<m![H % 120, Qs = 1024 / 32], m![Qs = 1024 % 32]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 120, Qs = 1024 / 16], m![Qs = 1024 % 16]>()
-        .commit_trim::<m![Qs = 1024 % 16]>()
-        .commit();
-    ctx.main
-        .begin(weight.view())
-        .fetch::<m![H % 120, Qs = 1024 / 16], m![Qs = 1024 % 16]>()
-        .collect::<m![H % 120, Qs = 1024 / 16], m![Qs = 1024 % 16]>()
-        .contract_outer::<m![H % 120, Qs = 1024 / 32], m![Qs = 1024 % 32], _, _, _>(&x_trf)
-        .contract_packet::<m![1]>()
-        .contract_time::<m![H % 120]>()
-        .contract_lane::<m![H % 120], m![1 # 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H / 4 % 30], m![H % 4 # 16]>()
-        .commit_trim::<m![H % 4]>()
-        .commit()
-}
-
-fn add_partials(
-    ctx: &mut Context,
-    left: &DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]>,
-    right: &DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]>,
-) -> DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]> {
-    let left: VrfTensor<f32, Chip, Cluster, HiddenRows, m![H % 120]> = ctx
-        .sub
-        .begin(left.view())
-        .fetch::<m![1], m![H % 120]>()
-        .fetch_cast::<f32>()
-        .collect::<m![H / 8 % 15], m![H % 8]>()
-        .to_vrf();
-    ctx.main
-        .begin(right.view())
-        .fetch::<m![1], m![H % 120]>()
-        .fetch_cast::<f32>()
-        .collect::<m![H / 8 % 15], m![H % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_clip(ClipBinaryOpF32::Add, &left)
-        .vector_final()
-        .cast::<bf16, m![H % 8 # 16]>()
-        .commit_trim::<m![H % 8]>()
-        .commit()
-}
+type HiddenRows = m![H / 16 # 256];
 
 fn apply_output_channel_scale(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]>,
+    x: &DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 16]>,
     weight_scale: &HbmTensor<bf16, Chip, m![H]>,
-) -> DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]> {
-    let weight_scale: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 120]> = weight_scale.to_dm(&mut ctx.tdma);
-    let weight_scale_vrf: VrfTensor<f32, Chip, Cluster, HiddenRows, m![H % 120]> = ctx
+) -> DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 16]> {
+    let weight_scale: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 16]> = weight_scale.to_dm(&mut ctx.tdma);
+    let weight_scale_vrf: VrfTensor<f32, Chip, Cluster, HiddenRows, m![H % 16]> = ctx
         .sub
         .begin(weight_scale.view())
-        .fetch::<m![1], m![H % 120]>()
+        .fetch::<m![1], m![H % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .collect::<m![H / 8 % 2], m![H % 8]>()
         .to_vrf();
 
     ctx.main
         .begin(x.view())
-        .fetch::<m![1], m![H % 120]>()
+        .fetch::<m![1], m![H % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .collect::<m![H / 8 % 2], m![H % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![H / 4 % 30], m![H % 4]>()
+        .vector_narrow_split::<m![H / 4 % 4], m![H % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_scale_vrf)
-        .vector_widen_concat::<m![H / 8 % 15], m![H % 8]>()
+        .vector_widen_concat::<m![H / 8 % 2], m![H % 8]>()
         .vector_final()
         .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
