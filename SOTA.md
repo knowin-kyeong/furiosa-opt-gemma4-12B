@@ -10,11 +10,11 @@
 |---|---|
 | 브랜치 | `V0_baseline` |
 | 커밋 | (아래 이력 참조) |
-| `sliding_project_qkv` | 측정 대기 |
-| `sliding_attention_output` | 측정 대기 |
-| `decoder_feedforward` | 측정 대기 |
+| `sliding_project_qkv` | makespan 116,583 (RNGD 실측 대기) |
+| `sliding_attention_output` | makespan 194,020 (RNGD 실측 대기) |
+| `decoder_feedforward` | makespan 1,693,200 (RNGD 실측 대기) |
 | **기하평균 speedup** | 1.000 (기준) |
-| 측정일 | — |
+| 측정일 | 2026-09-09 (makespan) |
 
 ## 갱신 이력
 

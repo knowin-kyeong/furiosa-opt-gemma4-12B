@@ -4,3 +4,5 @@ Cargo.lock
 **/__pycache__
 # oh-my-claudecode local state
 .omc/
+# local schedule dumps (numbers go to RESULTS.md)
+.schedules/
