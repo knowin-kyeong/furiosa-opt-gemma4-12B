@@ -2,3 +2,5 @@ target
 Cargo.lock
 /ref
 **/__pycache__
+# oh-my-claudecode local state
+.omc/

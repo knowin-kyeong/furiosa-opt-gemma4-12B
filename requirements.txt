@@ -1,0 +1,15 @@
+# Python deps for scripts/generate_references.py (ref/fixtures.safetensors 생성용).
+#
+# 이 대회의 연산 타깃은 FuriosaAI RNGD NPU이고 실측은 Arena 원격 서버에서 이루어진다.
+# 여기 torch는 레퍼런스 픽스처를 만드는 데만 쓰이고 48개 레이어를 돌리지 않으므로
+# CPU 빌드로 충분하다. GPU 빌드를 설치할 이유가 없다.
+#
+# 설치 (CPU wheel 권장):
+#   pip3 install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# 생성:
+#   python3 scripts/generate_references.py     # -> ref/fixtures.safetensors (~120KB)
+
+numpy>=1.24
+torch>=2.2
+safetensors>=0.4
