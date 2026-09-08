@@ -231,10 +231,9 @@ pub fn decoder_feedforward(
     // (54k cycles), an HBM-to-DM replicated load at ~3x that.
     let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::mlp::feedforward(
         ctx,
-        x,
+        &x_hbm,
         up_weight_packed,
         gate_weight_packed,
         down_weight_packed,
