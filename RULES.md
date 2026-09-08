@@ -210,6 +210,30 @@ cargo furiosa-opt compile ops::decoder_feedforward --exact \
 > GPU를 고를 때 봐야 할 것은 VRAM이 아니라 **함께 딸려오는 RAM/디스크/vCPU**다.
 > 반드시 x86_64 Ubuntu 22.04+ 이미지를 고를 것 (ARM 인스턴스는 툴체인 미지원).
 
+**확정 인스턴스 (2026-09-09):** RunPod CPU pod / Ubuntu 22.04 / 8 vCPU / 32GB RAM / 80GB disk.
+
+RunPod에서 반드시 확인할 것:
+
+1. **아키텍처가 x86_64인지.** RunPod에는 ARM(Ampere/Graviton 계열) CPU pod도 있다.
+   ARM에 걸리면 `cargo-furiosa-opt`가 아예 설치되지 않는다. 접속 직후 `uname -m`이
+   `x86_64`인지 먼저 확인하고, 아니면 인스턴스를 갈아탄다.
+2. **80GB가 어떻게 쪼개지는지.** RunPod은 디스크를 *container disk*(휘발성)와
+   *volume disk*(`/workspace`, 영속)로 나눈다. 컨테이너 디스크에 작업물을 두면
+   pod을 stop/start할 때 전부 날아간다. **모든 것을 `/workspace` 아래에 둔다:**
+
+   ```sh
+   export CARGO_HOME=/workspace/.cargo
+   export RUSTUP_HOME=/workspace/.rustup
+   echo 'export CARGO_HOME=/workspace/.cargo'   >> ~/.bashrc
+   echo 'export RUSTUP_HOME=/workspace/.rustup' >> ~/.bashrc
+   echo 'export PATH=$CARGO_HOME/bin:$PATH'     >> ~/.bashrc
+   cd /workspace && git clone <repo>
+   ```
+
+   대략적인 용량: rustup 툴체인 ~2GB, cargo registry ~3GB, `target/release` 5~15GB,
+   CPU torch ~1GB. 80GB면 여유 있지만 volume 쪽에 최소 50GB는 잡아야 한다.
+   부족해지면 `cargo clean` 대신 `rm -rf target/debug`부터 한다.
+
 ### 6.3 원격 서버 초기 셋업
 
 ```sh
