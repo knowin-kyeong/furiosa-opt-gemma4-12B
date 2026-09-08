@@ -15,7 +15,7 @@ RNGD cycles만 점수다.
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
-| `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 `rows % 256`으로 슬라이스에 교차 배치해 HBM→DM DMA를 DMN/슬라이스 인터리빙 (580 → ~2,000 B/cycle 목표) | — | — | — | — | — | — | 설계됨 |
+| `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V9_ffn_x_via_hbm` | `V8` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, ~18k)으로 | — | — | — | — | — | — | 설계됨 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
@@ -199,6 +199,25 @@ Qs=4096이면 16 × 256. L=15360이면 60 × 256.
 - **리스크:** DMA 엔진이 디스크립터를 어떻게 병렬화하는지 모른다 — 효과가 0일 수 있다.
   출력 벡터가 블록 permutation된 채 나오므로 `to_dm` relayout이 8 B 조각 960개를 옮겨야 한다.
 - **예상:** attn_out weight DMA 26.7k → 10k 이하면 성공.
+
+### 측정 (attn_out만 프로브)
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_attention_output` | 58,015 → 59,225 | — | 0.980 |
+
+- weight DmaLoad: **26,734 → 26,734, util 0.433 → 0.433 (완전히 동일)**. 출력 permutation 때문에
+  `contraction.to_dm` relayout만 952 → 2,162로 늘었다.
+- **측정 방식:** makespan only
+
+### 판정: **기각** (스케줄러의 DMA 비용 모델은 슬라이스 배치 순서를 보지 않는다)
+
+- **이유:** 정적 스케줄에서 DmaLoad 비용은 바이트 수와 디스크립터 형태로만 정해지는 듯하다.
+  실물 RNGD에서는 DMN 인터리빙이 영향을 줄 수 있으나 지금은 검증 수단이 없고, 코드 복잡도만 는다.
+  Arena 실측이 가능해지면 V7 vs V8 브랜치를 그대로 A/B 제출해 확인할 가치는 있다(둘 다 push됨).
+- **배운 것:** DMA 노드의 `util`은 attn_out weight 로드에서 0.43, x 청크 로드에서 0.18 — 큰
+  연속 로드일수록 높다. makespan 최적화 관점에서 DMA는 **바이트 수**로만 줄일 수 있다.
+- **다음 후보:** DMA 바이트 자체를 줄이는 것 — x 복제(FFN 54k → V9), 불필요한 relayout 제거.
 
 ## V7_qkv_x_replicate_via_hbm
 

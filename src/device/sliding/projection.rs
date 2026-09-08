@@ -192,31 +192,31 @@ pub(crate) fn project_output(
         .collect::<m![Qs / 16 % 64], m![Qs % 16]>()
         .to_trf();
 
-    let weight_f8: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H % 60, Qs % 1024]> =
+    let weight_f8: DmTensor<f8e4m3, Chip, Cluster, HiddenRowsByColumns, m![H / 256, H % 4, Qs % 1024]> =
         weight.to_dm(&mut ctx.tdma);
-    let weight_dm: DmTensor<bf16, Chip, Cluster, HiddenRowsByColumns, m![H % 60, Qs % 1024]> = ctx
+    let weight_dm: DmTensor<bf16, Chip, Cluster, HiddenRowsByColumns, m![H / 256, H % 4, Qs % 1024]> = ctx
         .main
         .begin(weight_f8.view())
-        .fetch::<m![H % 60, Qs / 32 % 32], m![Qs % 32]>()
+        .fetch::<m![H / 256, H % 4, Qs / 32 % 32], m![Qs % 32]>()
         .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
+        .collect::<m![H / 256, H % 4, Qs / 16 % 64], m![Qs % 16]>()
         .commit_trim::<m![Qs % 16]>()
         .commit();
 
-    let contraction: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H % 60]> = ctx
+    let contraction: DmTensor<bf16, Chip, Cluster, HiddenRows, m![H / 256, H % 4]> = ctx
         .main
         .begin(weight_dm.view())
-        .fetch::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
-        .collect::<m![H % 60, Qs / 16 % 64], m![Qs % 16]>()
-        .contract_outer::<m![H % 60, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
+        .fetch::<m![H / 256, H % 4, Qs / 16 % 64], m![Qs % 16]>()
+        .collect::<m![H / 256, H % 4, Qs / 16 % 64], m![Qs % 16]>()
+        .contract_outer::<m![H / 256, H % 4, Qs / 32 % 32], m![Qs % 32], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 60]>()
-        .contract_lane::<m![H % 60], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H / 256, H % 4]>()
+        .contract_lane::<m![H / 256, H % 4], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<HiddenRows, m![H % 60]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<HiddenRows, m![H / 256, H % 4]>(InterSliceReduceOpF32::Add)
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H / 4 % 15], m![H % 4 # 16]>()
+        .transpose::<m![H / 256], m![H % 4 # 16]>()
         .commit_trim::<m![H % 4]>()
         .commit();
 
@@ -226,8 +226,10 @@ pub(crate) fn project_output(
     apply_output_channel_scale(ctx, &contraction, weight_scale)
 }
 
-type HiddenRows = m![H / 60, 1 # 4];
-type HiddenRowsByColumns = m![H / 60, Qs / 1024];
+// Rows are dealt to slices in 4-row blocks (block b -> slice b % 64) so the HBM stream of
+// the weight lands on consecutive slices instead of filling one slice at a time.
+type HiddenRows = m![H / 4 % 64, 1 # 4];
+type HiddenRowsByColumns = m![H / 4 % 64, Qs / 1024];
 
 fn apply_output_channel_scale(
     ctx: &mut Context,
