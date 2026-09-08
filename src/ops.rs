@@ -227,7 +227,11 @@ pub fn decoder_feedforward(
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = residual_hbm.to_dm(&mut ctx.tdma);
     let x = shared::rmsnorm::normalize(ctx, &residual, pre_ff_rms_weight);
 
-    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = x.to_dm(&mut ctx.tdma);
+    // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
+    // (54k cycles), an HBM-to-DM replicated load at ~3x that.
+    let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
+    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::mlp::feedforward(
         ctx,
         x,
