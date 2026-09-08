@@ -8,6 +8,8 @@ pub(crate) type Cluster = m![1 # 2];
 pub(crate) type Slice = m![1 # 256];
 
 pub(crate) type Replicated = m![Dummy256];
+/// Cluster mapping that replicates a tensor onto both clusters.
+pub(crate) type BothClusters = m![Dummy2];
 
 pub(crate) fn broadcast_hidden(
     ctx: &mut Context,

@@ -63,7 +63,7 @@ pub fn sliding_project_qkv(
     // staging the 7.5 KB vector in HBM and loading it back replicated runs at HBM DMA speed.
     let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let x: DmTensor<bf16, Chip, Cluster, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<bf16, Chip, layout::BothClusters, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
 
     let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
         sliding::projection::project_query(ctx, &x, q_weight, q_weight_scale);
