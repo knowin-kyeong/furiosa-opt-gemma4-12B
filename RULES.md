@@ -271,14 +271,59 @@ cargo install furiosa-schedule-viewer
 
 # Arena CLI
 cargo binstall -y furiosa-arena-cli
-rngd login          # 등록 참가자 계정
-export RNGD_URL=...  # ~/.bashrc 에 export 해두면 rngd_test.sh가 자동으로 읽음
 
 # Python (픽스처 생성용, CPU only)
-pip3 install -r requirements.txt
+pip3 install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 `requirements.txt`는 저장소 루트에 있다. 새 원격 서버를 띄울 때마다 이 절차를 따른다.
+현재 pod에는 위 절차를 자동화한 `/root/setup_pod.sh`가 있고, 로그는 `/root/setup.log`다.
+
+#### 6.3.1 실제로 걸린 함정 (2026-09-09, RunPod Ubuntu 22.04 이미지에서 확인)
+
+**① `rngd`라는 바이너리는 없다.** `furiosa-arena-cli` 0.8.0은 `furiosa-arena`로 설치된다.
+README와 `scripts/rngd_test.sh`는 `rngd`를 부르므로 심링크가 필요하다. 서브커맨드
+(`login/submit/status/logs/list/cancel`)와 `submit --name/--entrypoint/--timeout` 플래그는
+스크립트와 일치하므로 심링크만으로 동작한다.
+
+```sh
+ln -sf ~/.cargo/bin/furiosa-arena ~/.cargo/bin/rngd
+```
+
+**② URL 환경변수가 두 개다.** `rngd_test.sh`는 `RNGD_URL`이 *설정되어 있는지만* 검사하고,
+실제 바이너리는 `FURIOSA_ARENA_URL`(또는 `--url`)을 읽는다. 둘 다 같은 값으로 둔다.
+URL은 이전 README 버전에 있던 `https://arena.furiosa.ai`.
+
+**③ `python3`과 `pip3`가 다른 파이썬이다.** RunPod 이미지에서 `/usr/bin/python3`은 3.10,
+`/usr/local/bin/pip3`는 3.12의 pip다. `pip3 install`한 torch는 3.12에만 들어가므로
+`python3 scripts/generate_references.py`가 `ModuleNotFoundError: torch`로 죽는다.
+시스템 `python3`을 바꾸지 말고(apt가 의존) PATH 앞에 3.12 심링크를 둔다.
+
+**④ 로그인은 사람이 해야 한다.** `furiosa-arena login`은 GitHub device flow(브라우저에서
+코드 입력)라 자동화가 안 된다. 로그인 전에는 `health`조차 실패한다.
+
+위 ①~③은 `/root/env.sh`에 모아두었고 `~/.bashrc`가 이를 source한다.
+**비대화형 ssh 명령은 `.bashrc`를 읽지 않으므로** 원격 명령 앞에 항상 `. /root/env.sh`를 붙인다.
+
+```sh
+# /root/env.sh
+. "$HOME/.cargo/env"
+export PATH="$HOME/.local/bin:$PATH"     # ~/.local/bin/python3 -> /usr/bin/python3.12
+export RNGD_URL=https://arena.furiosa.ai
+export FURIOSA_ARENA_URL=https://arena.furiosa.ai
+```
+
+#### 6.3.2 설치 확인된 버전
+
+| 도구 | 버전 |
+|---|---|
+| rustc | 1.97.0-nightly (2026-04-30) = `nightly-2026-05-01` |
+| cargo-furiosa-opt | 0.7.0 (crate 의존성은 `furiosa-opt-std 0.6.0`) |
+| furiosa-arena-cli | 0.8.0 |
+| python3 (env.sh 적용 후) | 3.12.13 |
+| torch | 2.14.0+cpu |
+
+원격 작업 디렉터리: `/root/furiosa-opt-gemma4-12B` (origin clone, `V0_baseline` 체크아웃).
 
 ### 6.4 로컬(Windows)에서 하는 일 / 안 하는 일
 
