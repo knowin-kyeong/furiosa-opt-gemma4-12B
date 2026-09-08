@@ -10,34 +10,37 @@ pub(crate) fn add(
     x: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
     residual: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    const TILES: usize = H::SIZE / 480;
+    // 1920-wide tiles (7.5 KB of f32 in the VRF, under its 8 KB) halve the number of
+    // preload + add pairs on the tail of every kernel that ends with a residual add.
+    const TILE: usize = 1920;
+    const TILES: usize = H::SIZE / TILE;
 
     let mut output: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = DmTensor::new();
 
     for i in 0..TILES {
-        let x_tile = x.view().tile::<m![H], 480, m![H = 480 # 3840]>(480 * i);
-        let residual_tile = residual.view().tile::<m![H], 480, m![H = 480 # 3840]>(480 * i);
+        let x_tile = x.view().tile::<m![H], 1920, m![H = 1920 # 3840]>(TILE * i);
+        let residual_tile = residual.view().tile::<m![H], 1920, m![H = 1920 # 3840]>(TILE * i);
 
-        let residual_vrf: VrfTensor<f32, Chip, Cluster, Slice, m![H = 480]> = ctx
+        let residual_vrf: VrfTensor<f32, Chip, Cluster, Slice, m![H = 1920]> = ctx
             .sub
             .begin(residual_tile)
-            .fetch::<m![1], m![H = 480]>()
+            .fetch::<m![1], m![H = 1920]>()
             .fetch_cast::<f32>()
-            .collect::<m![H = 480 / 8], m![H = 480 % 8]>()
+            .collect::<m![H = 1920 / 8], m![H = 1920 % 8]>()
             .to_vrf();
 
         ctx.main
             .begin(x_tile)
-            .fetch::<m![1], m![H = 480]>()
+            .fetch::<m![1], m![H = 1920]>()
             .fetch_cast::<f32>()
-            .collect::<m![H = 480 / 8], m![H = 480 % 8]>()
+            .collect::<m![H = 1920 / 8], m![H = 1920 % 8]>()
             .vector_init()
             .vector_intra_slice_tag(TagMode::Zero)
             .vector_clip(ClipBinaryOpF32::Add, &residual_vrf)
             .vector_final()
-            .cast::<bf16, m![H = 480 % 8 # 16]>()
-            .commit_trim::<m![H = 480 % 8]>()
-            .commit_view(output.view_mut().tile::<m![H], 480, m![H = 480 #{!} 3840]>(480 * i));
+            .cast::<bf16, m![H = 1920 % 8 # 16]>()
+            .commit_trim::<m![H = 1920 % 8]>()
+            .commit_view(output.view_mut().tile::<m![H], 1920, m![H = 1920 #{!} 3840]>(TILE * i));
     }
 
     output
