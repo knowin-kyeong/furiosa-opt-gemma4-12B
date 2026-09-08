@@ -75,17 +75,17 @@ pub fn sliding_project_qkv(
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
-    let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
-        sliding::projection::project_query(ctx, &x, &q_weight, q_weight_scale);
+    // q, k and v come back one head per slice; the head-wise RMSNorms and RoPE stay in that
+    // layout (no transposes in or broadcasts out) and the outputs are written from it.
+    let q = sliding::projection::project_query(ctx, &x, &q_weight, q_weight_scale);
     let (k, v) =
         sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight, k_weight_scale, v_weight_scale);
 
-    let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
-        sliding::rmsnorm::normalize_query(ctx, &q, q_rms_weight);
-    let k: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Ds]> = sliding::rmsnorm::normalize_key(ctx, &k, k_rms_weight);
-    let v: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Ds]> = sliding::rmsnorm::normalize_value(ctx, &v);
+    let q = sliding::rmsnorm::normalize_query_heads(ctx, &q, q_rms_weight);
+    let k = sliding::rmsnorm::normalize_key_heads(ctx, &k, k_rms_weight);
+    let v = sliding::rmsnorm::normalize_value_heads(ctx, &v);
 
-    let (q, k) = sliding::rope::apply_rope(ctx, &q, &k, rope_offset, cos, sin);
+    let (q, k) = sliding::rope::apply_rope_heads(ctx, &q, &k, rope_offset, cos, sin);
 
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
     k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);

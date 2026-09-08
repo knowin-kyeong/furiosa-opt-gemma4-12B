@@ -10,6 +10,8 @@ pub(crate) type Slice = m![1 # 256];
 pub(crate) type Replicated = m![Dummy256];
 /// Cluster mapping that replicates a tensor onto both clusters.
 pub(crate) type BothClusters = m![Dummy2];
+/// One KV head per slice within a ring of eight slices (the layout RoPE works in).
+pub(crate) type HeadSlices = m![1 # 32, Ns];
 
 pub(crate) fn broadcast_hidden(
     ctx: &mut Context,

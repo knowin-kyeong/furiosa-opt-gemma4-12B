@@ -3,7 +3,7 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Gs, H, Ns, Ps, Qs};
-use crate::device::layout::{BothClusters, Cluster, Replicated, Slice};
+use crate::device::layout::{BothClusters, Cluster, HeadSlices, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
 // 256 slices per cluster, 8 rows each.
@@ -32,7 +32,7 @@ pub(crate) fn project_query(
     x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
     weight_f8: &QueryWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> {
+) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Gs, Ds]> {
     // x is replicated onto every slice of both clusters.
     let x: DmTensorView<'_, bf16, Chip, QueryClusters, QueryRows, m![H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<bf16, Chip, QueryClusters, QueryRows, m![1], m![H]> = ctx
@@ -91,11 +91,12 @@ pub(crate) fn project_query(
         .collect::<m![Qs / 8 % 256], m![Qs % 8 # 16]>()
         .commit_trim::<m![Qs % 8]>()
         .commit();
-    let mut q_hbm: HbmTensor<bf16, Chip, m![Qs]> = HbmTensor::new();
-    halves.view().to_hbm_view(&mut ctx.tdma, q_hbm.view_mut());
-    let output: DmTensor<bf16, Chip, Cluster, Slice, m![Qs]> = q_hbm.to_dm(&mut ctx.tdma);
-
-    unsafe { output.reshape() }
+    // ...and load the joined vector back one head per slice, the layout the query RMSNorm
+    // and RoPE work in, so no transposes are needed downstream.
+    let halves: DmTensorView<'_, bf16, Chip, m![Ns / 4], Slice, m![Ns % 4, Gs, Ds]> = unsafe { halves.view().reshape() };
+    let mut q_hbm: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = HbmTensor::new();
+    halves.to_hbm_view(&mut ctx.tdma, q_hbm.view_mut());
+    q_hbm.to_dm(&mut ctx.tdma)
 }
 
 // Both clusters do real work on the K/V projections: rows split across the clusters, then
@@ -116,7 +117,7 @@ fn project_one_kv_matrix(
     x_trf: &TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]>,
     weight_f8: &KvWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![Ps]> {
+) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]> {
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
         .main
         .begin(weight_f8.view())
@@ -165,8 +166,9 @@ fn project_one_kv_matrix(
         .collect::<m![Ps / 4 % 256], m![Ps % 4 # 16]>()
         .commit_trim::<m![Ps % 4]>()
         .commit();
-    let mut kv_hbm: HbmTensor<bf16, Chip, m![Ps]> = HbmTensor::new();
-    halves.view().to_hbm_view(&mut ctx.tdma, kv_hbm.view_mut());
+    let halves: DmTensorView<'_, bf16, Chip, m![Ns / 4], Slice, m![Ns % 4, Ds]> = unsafe { halves.view().reshape() };
+    let mut kv_hbm: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
+    halves.to_hbm_view(&mut ctx.tdma, kv_hbm.view_mut());
     kv_hbm.to_dm(&mut ctx.tdma)
 }
 
@@ -178,8 +180,8 @@ pub(crate) fn project_key_value(
     k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
     v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> (
-    DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Ds]>,
-    DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Ds]>,
+    DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
+    DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
 ) {
     let x: DmTensorView<'_, bf16, Chip, KvClusters, KvRows, m![H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]> = ctx
@@ -189,10 +191,10 @@ pub(crate) fn project_key_value(
         .collect::<m![H / 16], m![H % 16]>()
         .to_trf();
 
-    let k: DmTensor<bf16, Chip, Cluster, Slice, m![Ps]> = project_one_kv_matrix(ctx, &x_trf, k_weight, k_weight_scale);
-    let v: DmTensor<bf16, Chip, Cluster, Slice, m![Ps]> = project_one_kv_matrix(ctx, &x_trf, v_weight, v_weight_scale);
+    let k = project_one_kv_matrix(ctx, &x_trf, k_weight, k_weight_scale);
+    let v = project_one_kv_matrix(ctx, &x_trf, v_weight, v_weight_scale);
 
-    (unsafe { k.reshape() }, unsafe { v.reshape() })
+    (k, v)
 }
 
 pub(crate) fn project_output(
