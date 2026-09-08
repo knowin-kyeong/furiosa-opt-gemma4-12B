@@ -17,6 +17,7 @@ RNGD cycles만 점수다.
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
+| `V13_ffn_dma_trims` | `V12` | FFN DMA 바이트·디스크립터 절감: (a) geglu 출력을 HBM 경유로 ByColumns 로드(DM→DM 11.7k 대체), (b) scale을 pass 타일 대신 행렬당 1회 로드(51k → ~27k) | — | — | — | — | — | — | 설계됨 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
@@ -126,6 +127,19 @@ L=15360이면 60 × 256.
 - **배운 것:**
 - **다음 후보:**
 ======================================================================= -->
+
+## V13_ffn_dma_trims
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V12_ffn_rows_per_pass_12`
+- **가설:** V12에서 down 구간은 타일당 DMA 9.5k(weight 6.3k + scale 2.4k + `?` 0.8k) vs Main 7.75k로 DMA-bound.
+  DMA 큐에서 줄일 수 있는 것: (a) geglu 출력의 DM→DM relayout 11,687(mlp.rs:364, down 타일 로드 사이에 끼어
+  Main을 5k 멈춤) → V7처럼 HBM에 30 KB 쓰고 ByColumns로 로드(예상 ~3k); (b) scale 타일 로드 20×2,716 + 10×2,394
+  = 51k — 120~240 B 행이라 300~540 B/cycle. 행렬당 한 번(14 KB/슬라이스)이면 V0 실측 8.3k×2 + V6c 19k = 36k.
+  단, 큰 로드가 첫 타일 앞에 오면 head가 늘 수 있다(V6d에서 4행 타일 때는 상쇄됨).
+- **변경 파일:** `src/device/shared/mlp.rs`
+- **공유 코드 영향:** vision/audio MLP 경로
+- **예상:** (a) −7k, (b) −10k~−15k.
 
 ## V12_ffn_rows_per_pass_12
 
