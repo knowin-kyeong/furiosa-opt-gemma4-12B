@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V19_qkv_tail_heads_layout` | `V18` | qkv 후처리(q/k/v rmsnorm·rope·저장)를 헤드별 슬라이스 분산 레이아웃에서 수행 — HBM hop에서 직접 그 레이아웃으로 로드, rope의 InterTranspose·Broadcast1 제거, pass당 데이터 1/8 | — | — | — | — | — | — | 설계됨 |
 | `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개 제거 | 59,216 | **31,113** | 186,976 | **4.822** | — | — | makespan 측정 |
 | `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q weight의 LUT pass를 rmsnorm 앞에 발행해 Q 로드가 DMA 큐 선두로 (K/V까지 같은 방식은 무효) | **59,216** | 34,776 | 186,976 | **4.649** | — | — | makespan 측정 |
 | `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
@@ -215,6 +216,22 @@ L=15360이면 60 × 256.
   DMA를 앞당기려면 **그 DMA를 소비하는 명령이 의존성 그래프상 일찍 필요해져야** 한다. qkv의 잔여
   59k는 DMA 36k(Q 13.5 + x 5.4 + K 7 + V 7 + 소량) + 마지막 로드 뒤 tail(V pass·normalize·scatter ≈ 8k)
   + 스케줄러 slack(~10k: q/k/v rmsnorm·rope 소형 pass들이 직렬). 하한은 ~50k.
+
+## V19_qkv_tail_heads_layout
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V18_attnout_scale_in_epilogue`
+- **동기:** qkv가 기하평균상 가장 뒤처짐(1.97×). V17 타임라인의 마지막 로드 뒤 tail 13k는 q/k/v 후처리 pass
+  10여 개(각 0.3~1.3k)가 **슬라이스 1개**(Slice 레이아웃)에서 직렬로 도는 것 + K의 HBM hop이 V 로드 뒤에 막힌 것.
+- **가설:** rope는 이미 `KvHeadsAcrossSlices = m![1 # 32, Ns]`(헤드당 슬라이스 1개)로 옮겨서 계산한다.
+  투영 결과를 HBM hop에서 곧장 그 레이아웃으로 로드하고, q/k/v rmsnorm을 그 레이아웃용으로 다시 쓰고
+  (`normalize_*_heads`; Ds 축약이 슬라이스 안에서 끝남), rope의 앞 InterTranspose(q 2.3k, k 1.3k)와 뒤 Broadcast1을
+  없애며, q 저장·k/v scatter를 그 레이아웃에서 직접 하면 pass당 데이터가 1/8이 되고 전환 pass 4개가 사라진다.
+- **부수 실험:** V19a — K/V 투영 순서를 바꿔 tail 길이를 조정하려 했으나 스케줄이 완전히 동일(스케줄러는 소스
+  순서 무시). 기각.
+- **변경 파일:** `src/device/layout.rs`(`HeadSlices`), `src/device/sliding/rmsnorm.rs`(함수 추가),
+  `src/device/sliding/rope.rs`(`apply_rope_heads` 추가), `src/device/sliding/projection.rs`(반환 레이아웃), `src/ops.rs`
+- **예상:** qkv −6k ~ −8k.
 
 ## V18_attnout_scale_in_epilogue
 
