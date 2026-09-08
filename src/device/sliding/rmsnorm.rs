@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::axes::{Ds, Gs, Ns};
-use crate::device::layout::{Cluster, HeadSlices, Slice};
+use crate::device::layout::{Cluster, Slice};
 use crate::{Chip, EPS};
 
 const DS_F32: f32 = Ds::SIZE as f32;
@@ -197,12 +197,12 @@ pub(crate) fn normalize_value(
 
 /// `normalize_query` for q sitting one head per slice: the Ds reduction never leaves a slice
 /// and the two group rows are handled as two scalar packets.
-pub(crate) fn normalize_query_heads(
+pub(crate) fn normalize_query_heads<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, HeadSlices, m![Gs, Ds]>,
+    x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
     rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
-) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Gs, Ds]> {
-    let mean_square: DmTensor<f32, Chip, Cluster, HeadSlices, m![Gs, 1 # 8]> = ctx
+) -> DmTensor<bf16, Chip, C, S, m![Gs, Ds]> {
+    let mean_square: DmTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
         .main
         .begin(x.view())
         .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
@@ -221,7 +221,7 @@ pub(crate) fn normalize_query_heads(
         .commit_trim::<m![1 # 8]>()
         .commit();
 
-    let rms: DmTensor<f32, Chip, Cluster, HeadSlices, m![Gs, 1 # 8]> = ctx
+    let rms: DmTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
         .main
         .begin(mean_square.view())
         .fetch::<m![Gs], m![1 # 8]>()
@@ -235,9 +235,9 @@ pub(crate) fn normalize_query_heads(
         .commit_trim::<m![1 # 8]>()
         .commit();
 
-    let weight_vrf = load_norm_weight::<Cluster, HeadSlices>(ctx, rms_weight);
+    let weight_vrf = load_norm_weight::<C, S>(ctx, rms_weight);
 
-    let rms_vrf: VrfTensor<f32, Chip, Cluster, HeadSlices, m![Gs, 1 # 8]> = ctx
+    let rms_vrf: VrfTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
         .sub
         .begin(rms.view())
         .fetch::<m![Gs], m![1 # 8]>()
@@ -262,11 +262,11 @@ pub(crate) fn normalize_query_heads(
 }
 
 /// 1 / rms of one head-row per slice, as a scalar packet in the VRF.
-fn root_mean_square_heads(
+fn root_mean_square_heads<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
-) -> VrfTensor<f32, Chip, Cluster, HeadSlices, m![1 # 8]> {
-    let mean_square: DmTensor<f32, Chip, Cluster, HeadSlices, m![1 # 8]> = ctx
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+) -> VrfTensor<f32, Chip, C, S, m![1 # 8]> {
+    let mean_square: DmTensor<f32, Chip, C, S, m![1 # 8]> = ctx
         .main
         .begin(x.view())
         .fetch::<m![Ds / 16], m![Ds % 16]>()
@@ -285,7 +285,7 @@ fn root_mean_square_heads(
         .commit_trim::<m![1 # 8]>()
         .commit();
 
-    let rms: DmTensor<f32, Chip, Cluster, HeadSlices, m![1 # 8]> = ctx
+    let rms: DmTensor<f32, Chip, C, S, m![1 # 8]> = ctx
         .main
         .begin(mean_square.view())
         .fetch::<m![1], m![1 # 8]>()
@@ -306,13 +306,13 @@ fn root_mean_square_heads(
         .to_vrf()
 }
 
-pub(crate) fn normalize_key_heads(
+pub(crate) fn normalize_key_heads<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
     rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
-) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]> {
-    let rms_vrf = root_mean_square_heads(ctx, x);
-    let weight_vrf = load_norm_weight::<Cluster, HeadSlices>(ctx, rms_weight);
+) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
+    let rms_vrf = root_mean_square_heads::<C, S>(ctx, x);
+    let weight_vrf = load_norm_weight::<C, S>(ctx, rms_weight);
 
     ctx.main
         .begin(x.view())
@@ -331,11 +331,11 @@ pub(crate) fn normalize_key_heads(
         .commit()
 }
 
-pub(crate) fn normalize_value_heads(
+pub(crate) fn normalize_value_heads<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
-) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]> {
-    let rms_vrf = root_mean_square_heads(ctx, x);
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
+    let rms_vrf = root_mean_square_heads::<C, S>(ctx, x);
 
     ctx.main
         .begin(x.view())

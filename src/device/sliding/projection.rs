@@ -3,7 +3,7 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Gs, H, Ns, Ps, Qs};
-use crate::device::layout::{BothClusters, Cluster, HeadSlices, Replicated, Slice};
+use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
 // 256 slices per cluster, 8 rows each.
@@ -32,7 +32,7 @@ pub(crate) fn project_query(
     x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
     weight_f8: &QueryWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
-) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Gs, Ds]> {
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
     // x is replicated onto every slice of both clusters.
     let x: DmTensorView<'_, bf16, Chip, QueryClusters, QueryRows, m![H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<bf16, Chip, QueryClusters, QueryRows, m![1], m![H]> = ctx
@@ -81,22 +81,18 @@ pub(crate) fn project_query(
         .commit_trim::<m![Qs % 8]>()
         .commit();
 
-    // Gather each cluster's half onto its Slice layout through the switch, then join the two
-    // halves through HBM (two descriptors; storing straight from 512 slices of 16 B costs 37k).
-    let halves: DmTensor<bf16, Chip, QueryClusters, Slice, m![Qs % 2048]> = ctx
-        .main
-        .begin(scaled.view())
-        .fetch::<m![1], m![Qs % 8 # 16]>()
-        .switch::<Slice, m![Qs / 8 % 256]>(SwitchConfig::Broadcast1 { slice1: 256, slice0: 1 })
-        .collect::<m![Qs / 8 % 256], m![Qs % 8 # 16]>()
-        .commit_trim::<m![Qs % 8]>()
-        .commit();
-    // ...and load the joined vector back one head per slice, the layout the query RMSNorm
-    // and RoPE work in, so no transposes are needed downstream.
-    let halves: DmTensorView<'_, bf16, Chip, m![Ns / 4], Slice, m![Ns % 4, Gs, Ds]> = unsafe { halves.view().reshape() };
-    let mut q_hbm: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = HbmTensor::new();
-    halves.to_hbm_view(&mut ctx.tdma, q_hbm.view_mut());
-    q_hbm.to_dm(&mut ctx.tdma)
+    // Each cluster holds four heads spread over 64 slices x 8 rows each; a ring-64 gather
+    // puts every head on one slice, the layout the query RMSNorm and RoPE work in, without
+    // leaving the cluster (the two clusters then post-process their four heads in parallel).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 8], m![Ds % 8]> =
+        unsafe { scaled.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 8 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Gs, Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Gs, Ds / 8], m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
 }
 
 // Both clusters do real work on the K/V projections: rows split across the clusters, then
@@ -117,7 +113,7 @@ fn project_one_kv_matrix(
     x_trf: &TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]>,
     weight_f8: &KvWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
-) -> DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]> {
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
         .main
         .begin(weight_f8.view())
@@ -158,18 +154,16 @@ fn project_one_kv_matrix(
         .commit_trim::<m![Ps % 4]>()
         .commit();
 
-    let halves: DmTensor<bf16, Chip, KvClusters, Slice, m![Ps % 1024]> = ctx
-        .main
-        .begin(scaled.view())
-        .fetch::<m![1], m![Ps % 4 # 16]>()
-        .switch::<Slice, m![Ps / 4 % 256]>(SwitchConfig::Broadcast1 { slice1: 256, slice0: 1 })
-        .collect::<m![Ps / 4 % 256], m![Ps % 4 # 16]>()
-        .commit_trim::<m![Ps % 4]>()
-        .commit();
-    let halves: DmTensorView<'_, bf16, Chip, m![Ns / 4], Slice, m![Ns % 4, Ds]> = unsafe { halves.view().reshape() };
-    let mut kv_hbm: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
-    halves.to_hbm_view(&mut ctx.tdma, kv_hbm.view_mut());
-    kv_hbm.to_dm(&mut ctx.tdma)
+    // Ring-64 gather to one head per slice within the cluster (see project_query).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 4], m![Ds % 4]> =
+        unsafe { scaled.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 4 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Ds / 4]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Ds / 4], m![Ds % 4 # 16]>()
+        .commit_trim::<m![Ds % 4]>()
+        .commit()
 }
 
 pub(crate) fn project_key_value(
@@ -180,8 +174,8 @@ pub(crate) fn project_key_value(
     k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
     v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> (
-    DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
-    DmTensor<bf16, Chip, Cluster, HeadSlices, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
 ) {
     let x: DmTensorView<'_, bf16, Chip, KvClusters, KvRows, m![H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]> = ctx

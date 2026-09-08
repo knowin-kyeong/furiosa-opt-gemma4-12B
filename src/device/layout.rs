@@ -12,6 +12,9 @@ pub(crate) type Replicated = m![Dummy256];
 pub(crate) type BothClusters = m![Dummy2];
 /// One KV head per slice within a ring of eight slices (the layout RoPE works in).
 pub(crate) type HeadSlices = m![1 # 32, Ns];
+/// Four KV heads per cluster, one per live slice, after a ring-64 gather of the projection rows.
+pub(crate) type HeadClusters = m![Ns / 4];
+pub(crate) type HeadSlicesPerCluster = m![Ns % 4, 1 # 64];
 
 pub(crate) fn broadcast_hidden(
     ctx: &mut Context,
