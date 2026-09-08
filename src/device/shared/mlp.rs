@@ -35,27 +35,46 @@ pub(crate) fn project_up_and_gate(
     // The block scales are streamed per pass as well (a whole-matrix scale load would sit on
     // the DMA queue ahead of the first tile), and x is staged into the TRF only after the
     // first tiles are on their way so its load does not delay them either.
+    // The first two dequant passes need only their tiles, so they run while x is still being
+    // replicated; x reaches the TRF (a Sub-context op, ordered after their scale preloads)
+    // just before the first contraction.
     let first_up = load_up_gate_rows(ctx, up_weight_packed, 0);
     let first_up_scale = load_up_gate_scale(ctx, up_weight_scale, 0);
     let first_gate = load_up_gate_rows(ctx, gate_weight_packed, 0);
     let first_gate_scale = load_up_gate_scale(ctx, gate_weight_scale, 0);
+    let first_up_weight = dequant_up_gate_rows(ctx, &first_up, &first_up_scale);
+    let first_gate_weight = dequant_up_gate_rows(ctx, &first_gate, &first_gate_scale);
     let x_trf: TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]> = ctx
         .sub
         .begin(x.view())
         .fetch::<m![H / 16], m![H % 16]>()
         .collect::<m![H / 16], m![H % 16]>()
         .to_trf();
-    project_up_gate_rows(ctx, &x_trf, &first_up, &first_up_scale, 0, &mut up);
-    project_up_gate_rows(ctx, &x_trf, &first_gate, &first_gate_scale, 0, &mut gate);
-    const REST: usize = PASSES - 1;
-    for k in 0..REST {
-        let i = k + 1;
-        let cur_up = load_up_gate_rows(ctx, up_weight_packed, i);
-        let cur_up_scale = load_up_gate_scale(ctx, up_weight_scale, i);
-        project_up_gate_rows(ctx, &x_trf, &cur_up, &cur_up_scale, i, &mut up);
-        let cur_gate = load_up_gate_rows(ctx, gate_weight_packed, i);
-        let cur_gate_scale = load_up_gate_scale(ctx, gate_weight_scale, i);
-        project_up_gate_rows(ctx, &x_trf, &cur_gate, &cur_gate_scale, i, &mut gate);
+    contract_up_gate_rows(ctx, &x_trf, &first_up_weight, 0, &mut up);
+    contract_up_gate_rows(ctx, &x_trf, &first_gate_weight, 0, &mut gate);
+    // Two passes (four tiles) are loaded per iteration before any of them is dequantized:
+    // with only two buffers in flight the next loads waited for the previous contraction to
+    // free a buffer, stretching each pair of passes from 10.7k to 16k cycles.
+    const PAIRS: usize = (PASSES - 1) / 2;
+    for k in 0..PAIRS {
+        let i = 2 * k + 1;
+        let i2 = 2 * k + 2;
+        let up_a = load_up_gate_rows(ctx, up_weight_packed, i);
+        let up_a_scale = load_up_gate_scale(ctx, up_weight_scale, i);
+        let gate_a = load_up_gate_rows(ctx, gate_weight_packed, i);
+        let gate_a_scale = load_up_gate_scale(ctx, gate_weight_scale, i);
+        let up_b = load_up_gate_rows(ctx, up_weight_packed, i2);
+        let up_b_scale = load_up_gate_scale(ctx, up_weight_scale, i2);
+        let gate_b = load_up_gate_rows(ctx, gate_weight_packed, i2);
+        let gate_b_scale = load_up_gate_scale(ctx, gate_weight_scale, i2);
+        let w = dequant_up_gate_rows(ctx, &up_a, &up_a_scale);
+        contract_up_gate_rows(ctx, &x_trf, &w, i, &mut up);
+        let w = dequant_up_gate_rows(ctx, &gate_a, &gate_a_scale);
+        contract_up_gate_rows(ctx, &x_trf, &w, i, &mut gate);
+        let w = dequant_up_gate_rows(ctx, &up_b, &up_b_scale);
+        contract_up_gate_rows(ctx, &x_trf, &w, i2, &mut up);
+        let w = dequant_up_gate_rows(ctx, &gate_b, &gate_b_scale);
+        contract_up_gate_rows(ctx, &x_trf, &w, i2, &mut gate);
     }
 
     (up, gate)
@@ -85,15 +104,12 @@ fn load_up_gate_scale(
         .to_dm(&mut ctx.tdma)
 }
 
-/// Dequantizes `ROWS_PER_PASS` rows of one up/gate matrix and contracts them with `x_trf`.
-fn project_up_gate_rows(
+/// Dequantizes `ROWS_PER_PASS` rows of one up/gate matrix to bf16.
+fn dequant_up_gate_rows(
     ctx: &mut Context,
-    x_trf: &TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, Cluster, UpGateRows, m![L % 60 = 4, H]>,
     scale: &DmTensor<f8e4m3, Chip, Cluster, UpGateRows, m![L % 60 = 4, H / 16]>,
-    pass: usize,
-    out: &mut DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
-) {
+) -> DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60 = 4, H]> {
     let scale_vrf: VrfTensor<f32, Chip, Cluster, UpGateRows, m![L % 60 = 4, H / 16]> = ctx
         .sub
         .begin(scale.view())
@@ -119,6 +135,17 @@ fn project_up_gate_rows(
         .commit_trim::<m![H % 8]>()
         .commit();
 
+    weight
+}
+
+/// Contracts `ROWS_PER_PASS` dequantized rows with `x_trf` into `out`.
+fn contract_up_gate_rows(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<bf16, Chip, Cluster, UpGateRows, m![1], m![H]>,
+    weight: &DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60 = 4, H]>,
+    pass: usize,
+    out: &mut DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
+) {
     ctx.main
         .begin(weight.view())
         .fetch::<m![L % 60 = 4, H / 16], m![H % 16]>()
@@ -331,23 +358,36 @@ pub(crate) fn project_down(
     let first_scale_a = load_down_scale(ctx, down_weight_scale, 0);
     let first_b = load_down_rows(ctx, down_weight_packed, 1);
     let first_scale_b = load_down_scale(ctx, down_weight_scale, 1);
+    let first_weight_a = dequant_down_rows(ctx, &first_a, &first_scale_a);
+    let first_weight_b = dequant_down_rows(ctx, &first_b, &first_scale_b);
     let x_trf: TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]> = ctx
         .sub
         .begin(x.view())
         .fetch::<m![L / 16 % 120], m![L % 16]>()
         .collect::<m![L / 16 % 120], m![L % 16]>()
         .to_trf();
-    project_down_rows(ctx, &x_trf, &first_a, &first_scale_a, 0, &mut down);
-    project_down_rows(ctx, &x_trf, &first_b, &first_scale_b, 1, &mut down);
-    const REST_PAIRS: usize = PASSES / 2 - 1;
-    for k in 0..REST_PAIRS {
-        let j = k + 1;
-        let tile_a = load_down_rows(ctx, down_weight_packed, 2 * j);
-        let scale_a = load_down_scale(ctx, down_weight_scale, 2 * j);
-        let tile_b = load_down_rows(ctx, down_weight_packed, 2 * j + 1);
-        let scale_b = load_down_scale(ctx, down_weight_scale, 2 * j + 1);
-        project_down_rows(ctx, &x_trf, &tile_a, &scale_a, 2 * j, &mut down);
-        project_down_rows(ctx, &x_trf, &tile_b, &scale_b, 2 * j + 1, &mut down);
+    contract_down_rows(ctx, &x_trf, &first_weight_a, 0, &mut down);
+    contract_down_rows(ctx, &x_trf, &first_weight_b, 1, &mut down);
+    // Four tiles per iteration, all loaded before any is dequantized (see project_up_and_gate).
+    const QUADS: usize = (PASSES - 2) / 4;
+    for k in 0..QUADS {
+        let p0 = 4 * k + 2;
+        let t0 = load_down_rows(ctx, down_weight_packed, p0);
+        let s0 = load_down_scale(ctx, down_weight_scale, p0);
+        let t1 = load_down_rows(ctx, down_weight_packed, p0 + 1);
+        let s1 = load_down_scale(ctx, down_weight_scale, p0 + 1);
+        let t2 = load_down_rows(ctx, down_weight_packed, p0 + 2);
+        let s2 = load_down_scale(ctx, down_weight_scale, p0 + 2);
+        let t3 = load_down_rows(ctx, down_weight_packed, p0 + 3);
+        let s3 = load_down_scale(ctx, down_weight_scale, p0 + 3);
+        let w = dequant_down_rows(ctx, &t0, &s0);
+        contract_down_rows(ctx, &x_trf, &w, p0, &mut down);
+        let w = dequant_down_rows(ctx, &t1, &s1);
+        contract_down_rows(ctx, &x_trf, &w, p0 + 1, &mut down);
+        let w = dequant_down_rows(ctx, &t2, &s2);
+        contract_down_rows(ctx, &x_trf, &w, p0 + 2, &mut down);
+        let w = dequant_down_rows(ctx, &t3, &s3);
+        contract_down_rows(ctx, &x_trf, &w, p0 + 3, &mut down);
     }
 
     down.to_dm(&mut ctx.tdma)
@@ -377,15 +417,12 @@ fn load_down_scale(
         .to_dm(&mut ctx.tdma)
 }
 
-/// Dequantizes four rows' column chunk, contracts with `x_trf`, and sums the eight chunks.
-fn project_down_rows(
+/// Dequantizes four rows' column chunk of the down matrix to bf16.
+fn dequant_down_rows(
     ctx: &mut Context,
-    x_trf: &TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]>,
     packed: &DmTensor<f4e2m1, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]>,
     down_weight_scale: &DmTensor<f8e4m3, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]>,
-    pass: usize,
-    down: &mut DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]>,
-) {
+) -> DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]> {
     let down_weight_scale_vrf: VrfTensor<f32, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L / 16 % 120]> =
         ctx.sub
             .begin(down_weight_scale.view())
@@ -412,6 +449,17 @@ fn project_down_rows(
         .commit_trim::<m![L % 8]>()
         .commit();
 
+    down_weight
+}
+
+/// Contracts four dequantized rows with `x_trf` and sums the eight column chunks into `down`.
+fn contract_down_rows(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<bf16, Chip, Cluster, DownRowsByColumns, m![1], m![L % 1920]>,
+    down_weight: &DmTensor<bf16, Chip, Cluster, DownRowsByColumns, m![H % 120 = 4, L % 1920]>,
+    pass: usize,
+    down: &mut DmTensor<bf16, Chip, Cluster, DownRows, m![H % 120]>,
+) {
     ctx.main
         .begin(down_weight.view())
         .fetch::<m![H % 120 = 4, L / 16 % 120], m![L % 16]>()

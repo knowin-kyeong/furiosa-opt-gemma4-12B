@@ -16,18 +16,18 @@ RNGD cycles만 점수다.
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 `rows % 256`으로 슬라이스에 교차 배치해 HBM→DM DMA를 DMN/슬라이스 인터리빙 (580 → ~2,000 B/cycle 목표) | — | — | — | — | — | — | 설계됨 |
-| `V9_ffn_x_via_hbm` | `V8` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, ~18k)으로 | — | — | — | — | — | — | 설계됨 |
+| `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
 | `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | 설계됨 |
-| `V6_ffn_upgate_overlap` | SOTA | up/gate 루프 인터리브 + ROWS_PER_PASS 튜닝으로 DMA/Main 오버랩 | — | — | — | — | — | — | 설계됨 |
+| `V6_ffn_upgate_overlap` | `V9` | FFN weight를 4행 타일로 스트리밍(LUT+cast를 fetch 단계에 융합), up/gate 인터리브, down 더블버퍼, geglu 직접 relayout, scale 타일화 | 95,433 | 58,015 | **412,304** | **2.559** | — | — | makespan 측정 |
 
 > 단위: cycle. `—` 미측정. `FAIL(accuracy)` tolerance 위반. 상태 전이는 RULES §2.1.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V7_qkv_x_replicate_via_hbm`**
-(V1+V2+V7 누적, 기하평균 2.250×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V6_ffn_upgate_overlap`**
+(V1+V2+V7+V9+V6 누적, 기하평균 2.559×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -127,15 +127,46 @@ Qs=4096이면 16 × 256. L=15360이면 60 × 256.
 
 ## V6_ffn_upgate_overlap
 
-- **상태:** 설계됨 (2026-09-09)
-- **분기점:** 당시 SOTA
-- **가설:** V0에서 up과 gate는 완전히 직렬이다 — gate weight DMA(49k)는 up 경로가 끝나야
-  시작하고, 각각 LUT 18k + scale pass 15×4.1k = 62k가 뒤따른다. 두 루프를 pass 단위로
-  인터리브하면 gate DMA가 up의 Main 작업과 겹친다. 또 `ROWS_PER_PASS=4`(15 pass)는 슬라이스당
-  bf16 타일 30KB만 쓰므로 8~12로 올려 instruction 수를 줄일 여지가 있다.
-- **변경 파일:** `src/device/shared/mlp.rs` (`project_up_and_gate`)
-- **공유 코드 영향:** `shared/mlp.rs` → vision/audio MLP 경로 동시 영향. 세 커널 makespan 모두 기록.
-- **예상:** ffn −50k ~ −100k.
+- **상태:** makespan 측정 (2026-09-09). 브랜치 안에서 단계별로 누적.
+- **분기점:** `V9_ffn_x_via_hbm` (`5258498`)
+- **가설(원문):** up/gate 직렬화 해소 + ROWS_PER_PASS 튜닝. 실제로는 "FFN의 DMA와 Main을 겹치게
+  만드는 모든 것"으로 확장됐다.
+- **변경 파일:** `src/device/shared/mlp.rs` (`project_up_and_gate`, `project_down`, `feedforward`)
+- **공유 코드 영향:** vision/audio MLP 경로 동시 영향 (Stage 1 세 커널 중 ffn만 변함, qkv/attn_out 불변 확인)
+
+### 단계별 측정 (ffn makespan)
+
+| 단계 | 변경 | ffn | Δ |
+|---|---|---:|---:|
+| V9 | (출발점) | 574,845 | |
+| V6-b | 행렬 전체 f8 사본 제거 + `fetch_table_lookup → fetch_cast` 융합 체인, 두 행렬 동시 상주, 인터리브 | 578,083 | +3k (DMA 138k가 Main 앞에 통째로) |
+| V6-(0,1,4) | weight를 pass별 4행 타일로 로드 + up/gate 인터리브 | 522,379 | −56k |
+| V6-c | down: 반복당 타일 2개(더블버퍼) + geglu 출력 → ByColumns 직접 relayout + down scale 선발행 | 465,394 | −57k |
+| V6-d | scale도 pass별 타일, 첫 반복 peel | 462,004 | −3k |
+| V6-e | dequant/contract 분리, x_trf를 첫 dequant 뒤에 생성 (head 38k→8k) | 462,004 | 0 (임계 경로가 버퍼 사이클) |
+| V6-f | 반복당 4타일 선로드 | 412,304 | |
+
+### 컴파일러/스케줄러 제약 (추가 발견)
+
+| 시도 | 결과 |
+|---|---|
+| 캐리 텐서 프리페치 (`next = load(i+1)` 루프 밖으로 전달, 마지막에 `DmTensor::new()` 더미) | `V1-Modulo failed for all operator schedule heuristics` |
+| `Vec<DmTensor>` | `unsupported type in device function: *const u8` |
+| `std::array::from_fn(\|i\| ...)` | `internal compiler error: not yet implemented: closure` |
+| `for i in 1..PASSES` | `A loop was not rewritten to for` → `0..CONST`만 허용 (`const REST = PASSES-1; for k in 0..REST`) |
+| `ROWS_PER_PASS = 12` | scale VRF 11,520 B > 8 KB. 60의 약수·4의 배수·VRF 한도 → 4만 가능 |
+| `fetch → fetch_table_lookup::<f8> → fetch_cast::<f32> → vector` (f4 weight) | **컴파일됨.** f8 사본 pass(18k×2 + 26k) 제거 |
+| DMA 발행 순서 | 스케줄러가 소비 시점 기준으로 재배치 — 소스에서 앞당겨 발행해도 무의미. 소비자를 앞당겨야 함 |
+| 같은 DM 버퍼 재사용 | WAR로 다음 로드가 이전 contract 뒤로 밀림 → 반복 안에 타일 여러 개를 동시에 살려 다른 주소를 받게 함 |
+
+### 판정: makespan 측정 (실측 대기)
+
+- **정확도:** dequant 수식 동일(LUT→f32→×scale→bf16), 누산 순서 동일. geglu 직접 relayout은 데이터 이동만.
+- **지배 context (V6-e):** DMA 74% / Main 56% / Vector 56%. DMA busy 342k 중 pass당 `DmaLoad ?`(설명 없음, 4 KB, 838 cycle)가
+  90개 ≈ 75k — LUT/엔진 설정 테이블로 추정, pass 수에 비례.
+- **배운 것:** FFN은 이제 DMA-bound. 남은 레버는 (1) 버퍼 깊이(4타일), (2) pass 수 자체(ROWS_PER_PASS 제약에 막힘),
+  (3) Sub 컨텍스트로 scale pass 절반 이전(LUT는 Main 전용이라 LUT를 별도 pass로 되돌려야 함 — 순이득 불확실).
+- **다음 후보:** V5(attn_out/qkv LUT 융합, tail 단축) · attn_out/qkv weight 타일화(tail 단축) · Sub 오프로드.
 
 ## V5_lut_in_contract_chain
 

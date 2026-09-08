@@ -20,7 +20,8 @@
 
 | 브랜치 | qkv | attn_out | ffn | 기하평균 |
 |---|---:|---:|---:|---:|
-| `V7_qkv_x_replicate_via_hbm` (V1+V2+V7 누적) | 95,433 | 58,015 | 609,223 | **2.250×** |
+| `V7_qkv_x_replicate_via_hbm` (V1+V2+V7 누적) | 95,433 | 58,015 | 609,223 | 2.250× |
+| `V6_ffn_upgate_overlap` (V1+V2+V7+V9+V6 누적) | 95,433 | 58,015 | 412,304 | **2.559×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
