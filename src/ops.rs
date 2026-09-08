@@ -150,10 +150,9 @@ pub fn sliding_attention_output(
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
         sliding::projection::project_output(ctx, x, o_weight, o_weight_scale);
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::rmsnorm::normalize(ctx, &x, post_attn_rms_weight);
-
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = residual_hbm.to_dm(&mut ctx.tdma);
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::residual::add(ctx, &x, &residual);
+    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
+        shared::rmsnorm::normalize_add(ctx, &x, post_attn_rms_weight, &residual);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
@@ -248,10 +247,8 @@ pub fn decoder_feedforward(
         down_global_scale,
     );
 
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::rmsnorm::normalize(ctx, &x, post_ff_rms_weight);
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::residual::add(ctx, &x, &residual);
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::residual::scale_by_layer_gate(ctx, &residual, layer_scalar);
+        shared::rmsnorm::normalize_add_gate(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
