@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드(7.7 MB, 420 B/cycle)가 같은 7.5 KB HBM 구간을 512번 읽는 패턴 → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본을 읽게 해 채널 인터리빙 | — | — | — | — | — | — | 설계됨 |
 | `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
@@ -152,6 +153,20 @@ L=15360이면 60 × 256.
 - **컴파일 교훈:** 이미 행 타일된 뷰에 열 타일을 다시 걸 때는 매핑에 바깥 패딩을 함께 적는다
   (`m![L % 60 = 12 # 60, H / 16 = 120 # 240]`), 아니면 `Output shape mismatch for IndexAccess`.
 - **판정:** makespan 측정 (실측 대기), 누적 기하평균 2.866.
+
+## V15_x_replicate_hbm_copies
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V14_two_clusters`
+- **가설:** qkv의 `x_hbm.to_dm()`(Replicated, 512 슬라이스)는 7.7 MB를 18,400 cycle에 옮겨 420 B/cycle —
+  같은 바이트 수의 down 타일 로드(930 B/cycle)의 절반이다. 디스크립터 수는 같으므로 원인은 **512개
+  디스크립터가 전부 같은 7.5 KB HBM 구간을 읽는 것**(book: "channel interleaving: spread across 32 channels";
+  7.5 KB는 채널 몇 개에만 걸친다)으로 추정. x를 `HbmTensor<bf16, Chip, m![Dummy8, H]>`에 8부 쓰고
+  (8 디스크립터), DM 슬라이스 매핑 `m![Dummy32, Dummy8]`로 슬라이스마다 다른 사본을 읽게 하면 채널이
+  분산된다.
+- **변경 파일:** `src/ops.rs` (qkv 본문), 필요 시 `layout.rs`
+- **리스크:** HBM 쪽 Dummy 축과 DM 쪽 Dummy 축의 대응을 DSL이 "사본 선택"으로 해석하는지 미지수.
+- **예상:** qkv −9k (18.4k → ~9k).
 
 ## V14_two_clusters
 
