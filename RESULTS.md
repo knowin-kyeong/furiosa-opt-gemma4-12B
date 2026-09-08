@@ -12,9 +12,10 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | — | — | **기준** |
-| `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | — | — | — | — | — | — | 설계됨 |
-| `V2_attnout_rows_over_256_slices` | `V0_baseline` | O proj: 32→256 슬라이스 (15행/슬라이스), Qs 청킹·partial add 제거 | — | — | — | — | — | — | 설계됨 |
-| `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 설계됨 |
+| `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
+| `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
+| `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA(54k) 대신 HBM 경유 로드(~7k)로 | — | — | — | — | — | — | 설계됨 |
+| `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
 | `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | 설계됨 |
 | `V6_ffn_upgate_overlap` | SOTA | up/gate 루프 인터리브 + ROWS_PER_PASS 튜닝으로 DMA/Main 오버랩 | — | — | — | — | — | — | 설계됨 |
@@ -37,6 +38,43 @@ RNGD cycles만 점수다.
 - **contract_lane으로 reduction 축 일부를 미축약 상태로 남기기** (per-block scale을
   contraction 뒤에 적용하려는 시도) — book(Lane Folder): "reduction axes cannot be
   partially preserved". FFN f4의 16-블록 scale은 contraction 전에 곱해야 한다.
+
+- **슬라이스 축에 패딩(예: `m![H / 16 # 256]` = 240 실제 + 16 패딩)** — DMA `to_dm`가
+  `internal compiler error: split (inner_size: 64) is not valid on shape([H_16=240])`로 죽는다.
+  DMA는 슬라이스 축을 64 단위로 쪼개므로 **실제 슬라이스 수가 64의 배수(사실상 256)** 여야 한다.
+  `1 # 8`, `1 # 32` 같은 패딩은 곱해서 256이 되니 괜찮다. 행 수를 슬라이스에 나눌 때는
+  H=3840 → 15행 × 256, Qs=4096 → 16행 × 256, L=15360 → 60행 × 256 처럼 정확히 나눠야 한다.
+  (V2 1차 시도에서 확인, 2026-09-09)
+
+- **"rmsnorm 출력(`Slice = m![1 # 256]`)이 이미 256 슬라이스에 복제되어 있으니
+  `broadcast_hidden`을 `unsafe reshape`로 대체"** (0909_baseline.md 축 A 관찰 1) — 근거가
+  반대다. FFN은 같은 `Slice → Replicated` 변환을 `x.to_dm(tdma)`로 하는데 512 슬라이스 전부에
+  쓰느라 54,432 cycle을 쓴다(ops.rs:227). 패딩 슬라이스에 유효 데이터가 있었다면 컴파일러가
+  복사를 생략했을 것이다. rmsnorm의 마지막 `Broadcast1{slice1: 8}`는 ring 8 안에서만 모은다
+  (attn_out에서 744 cycle). 즉 x는 8개 슬라이스에만 있다. Arena 없이 정확도 검증이 불가능한
+  변경이므로 실측 전에는 시도하지 않는다.
+
+## 컴파일러가 강제하는 매핑 제약 (V2 구현 중 확인, 2026-09-09)
+
+한 번씩 다 부딪힌 것들이다. 새 레이아웃을 설계할 때 먼저 대조할 것.
+
+| 제약 | 에러 메시지 | 의미 |
+|---|---|---|
+| 슬라이스 축 live 개수는 **2의 거듭제곱** | `split (inner_size: 64) is not valid on shape([H_16=240])`; 192는 `cannot find the across_index` (`[H_1280=3, H_20=64]`) | `m![H / 16 # 256]`(240), `m![H / 20 # 256]`·`m![H / 60, H / 20 % 3 # 4]`(192) 모두 불가. 패딩을 안쪽 인자로 써도 정규화되면 같다. 베이스라인 live 수는 전부 256/32/8 |
+| DmTensor 슬라이스당 element 크기는 8 B 배수 | `in-slice element extent is 30 B, not a multiple of the SRAM access width 8` | 15 × bf16 = 30 B 불가 |
+| VRF는 슬라이스당 8 KB | `VRF data (15360 bytes) exceeds register file capacity (8192 bytes per slice)` | f32 [H] 벡터는 통째로 못 올림 → 1920 단위 타일 |
+| transpose 패킷의 실제 행은 최대 4 | `output packet beyond max_in_rows (4) must be 1 # n pure padding` | 행 수는 4의 배수로 시간축 분해 (`H / 4 % k`, `H % 4 # 16`) |
+| transpose 입력 시간축은 패딩 없는 축이어야 일관 | `cannot place in_rows in Time (H % 15) consistently with OutTime (H % 15 # 16 / 4)` | 15처럼 4로 안 나뉘는 행 수는 transpose 불가 |
+| fetch는 패딩된 행 축을 stride 못 함 | `lower_fetch_unit: failed to stride_exact` | 2-D 타일의 행 축을 `# 16`으로 패딩해 fetch 불가 |
+| DMA relayout은 패딩된 패킷을 stride 못 함 | `Condition failed: points ... b % a == 0` | `m![H / 3 % 5, H % 3 # 4]` → Slice `m![H]` DMA 불가 |
+| collect 출력 패킷은 정확히 32 B | `Collect output packet must be exactly 32 bytes (one flit)` | bf16 16개 / f32 8개 / f8 32개 |
+| collect 시간축은 switch가 만든 축까지 합친 형태 | `Collect time mismatch. Expected: H / 15, got: H / 3` | `fetch::<m![1], big>` → switch → `collect::<합쳐진 축, 32 B>` (rmsnorm gather 패턴) |
+| commit_trim 패킷은 8/16/24/32 B | `commit_trim output packet must be one of [8, 16, 24, 32] bytes, got 6` | bf16 4/8/12/16개 |
+| `m![H % 15 # 16 / 4]` 같은 패딩 축 분해는 **파싱은 됨** | (위 transpose 에러가 그 표현을 정상 출력) | 엔진별 지원 여부는 따로 확인 |
+
+결론: 행 수를 슬라이스에 나눌 때 **행/슬라이스가 4의 배수**이고 **live 슬라이스 수가 64의 배수**인
+조합을 고른다. H=3840이면 20행 × 192, 60행 × 64, 120행 × 32 (60·120은 8의 배수라 vector pass도 됨).
+Qs=4096이면 16 × 256. L=15360이면 60 × 256.
 
 ## V0에서 측정된 하드웨어 상수 (슬라이스당, 스케줄 기준)
 
@@ -141,25 +179,64 @@ RNGD cycles만 점수다.
   switch 비용 증가 가능. 스케줄의 DMA util로 확인.
 - **예상:** qkv 116k → ~60k.
 
-## V2_attnout_rows_over_256_slices
+## V7_qkv_x_replicate_via_hbm
 
 - **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V0_baseline`
-- **가설:** `project_output`의 `HiddenRows = m![H/120, 1#8]`는 32개 행그룹 × 8 패딩 슬라이스다.
-  스케줄 JSON에서 weight 타일이 512 슬라이스 전체에 할당되지만 슬라이스당 120행 × 1024열을
-  처리하고 있다(LUT pass 19,463 = qkv Q pass(16행×3840)의 정확히 2배 → 슬라이스당 122,880 elem).
-  즉 **행이 32개 슬라이스에만 실질 분배**되어 Qs를 4×1024로 청킹해야 했고(120×4096 bf16 =
-  983KB > DM 512KB), 4번의 LUT(78k) + 4번의 contract(32k) + 3번의 partial add가 생겼다.
-  `m![H/15]`(256 슬라이스 × 15행)로 바꾸면 슬라이스당 15×4096 f8 = 61KB, bf16 123KB로
-  청킹 불필요 → LUT 1회(~10k) + contract 1회(~4k), add_partials 삭제.
-- **변경 파일:** `src/device/sliding/projection.rs` (`project_output`, `output_partial`,
-  `apply_output_channel_scale`; `HiddenRows` 타입)
-- **공유 코드 영향:** 없음 (`sliding/`만; `full/projection.rs`는 별도 구현)
-- **예상:** attn_out 194k → ~98k. 브로드캐스트 66k는 V4에서.
+- **분기점:** `V2`
+- **가설:** x를 256 슬라이스에 복제하는 비용이 세 방식 모두 비싸다 — switch 61k(하한),
+  DM→DM DMA 54k(FFN, ~70 B/cycle). 그런데 HBM→DM DmaLoad는 실측 ~580 B/cycle이다.
+  rmsnorm 출력 x(7.5 KB)를 HBM에 한 번 쓰고(`to_hbm_view`, ~500 cycle) HBM에서 Replicated
+  레이아웃으로 로드하면 3.9 MB / 580 ≈ 7k cycle. 스크래치 HBM은 (a) 커널 내 `HbmTensor::new()`가
+  되면 그것, (b) 안 되면 qkv는 `q_out`(8 KB, 마지막에 전부 덮어씀)을 빌려 쓴다. attn_out의
+  x[Qs]=8 KB는 `residual_hbm`(7.5 KB)에 안 들어가므로 (a)가 안 되면 별도 설계 필요.
+- **변경 파일:** `src/ops.rs` 본문 (`sliding_project_qkv`, `sliding_attention_output`),
+  필요 시 `src/device/layout.rs`에 헬퍼 추가
+- **공유 코드 영향:** 없음 (layout.rs의 기존 함수는 그대로 둠)
+- **리스크:** HBM WAR 해저드(스크래치 읽기 전에 q_out 쓰기가 앞당겨지면 오답) — 스케줄러가
+  HBM 의존성도 추적한다고 book이 명시. 정확도는 Arena에서 확인.
+- **예상:** qkv 116k → ~60k, attn_out 106k → ~45k (둘 다 이후 weight DMA-bound).
+
+## V2_attnout_rows_over_256_slices
+
+- **상태:** makespan 측정 (2026-09-09)
+- **분기점:** `V1_ffn_down_chunked_dequant` (`f588d2a`) — attn_out은 mlp.rs를 쓰지 않으므로 V0 분기와 동일
+- **가설:** 원문은 위 요약 보드. 최종 구현은 15행×256이 아니라 **H/60 × Qs/1024 = 64 × 4 슬라이스**
+  (슬라이스당 60행 × 1024열, 4-way `vector_inter_slice_reduce`). 8번의 컴파일 실패를 거쳐 도달했고
+  그 제약들은 "컴파일러가 강제하는 매핑 제약" 표에 정리했다.
+- **변경 파일:** `src/device/sliding/projection.rs` (`project_output` 재작성, `output_partial`·
+  `add_partials` 삭제, `apply_output_channel_scale`은 Slice 레이아웃 1920-타일 2회로)
+- **공유 코드 영향:** 없음
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup (makespan) |
+|---|---|---|---:|
+| `sliding_project_qkv` | 116,583 → 116,583 | — | 1.000 |
+| `sliding_attention_output` | 194,020 → **106,461** | — | **1.822** |
+| `decoder_feedforward` | 609,223 → 609,223 | — | 1.000 |
+| **기하평균 (V0 대비 누적)** | | | **1.723** |
+
+- **정확도:** — (Arena 대기). 수치 변화: Qs 합산이 bf16 partial 3회 add(f32 왕복)에서 f32
+  inter-slice reduce 1회로 → 오히려 정밀해짐.
+- **측정 방식:** makespan only
+- **지배 context (변경 후):** Main 81.4% / DMA 45.5% / Vector 9.9%. 잔여 상위:
+  broadcast_sliding_heads 66,311 / weight DmaLoad 26,734 (브로드캐스트와 겹침) /
+  x.to_dm 16,128 / LUT 9,863 / contract 4,105.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** (1) live 슬라이스 수는 2의 거듭제곱, 행/슬라이스는 4의 배수 — H=3840에서는
+  60·120만 가능. (2) 두 축을 함께 슬라이스에 나누고 inter-slice reduce로 합치는 것이
+  "행 수가 안 나눠지는" 문제의 정답. (3) DM→DM 분배 DMA는 ~65-70 B/cycle — x 분배 16k는
+  V7에서 HBM 경유로 줄일 것. (4) attn_out은 이제 x 분배(82k)가 makespan의 77%.
+- **다음 후보:** V7 → V5(LUT 체인 융합; LUT 9.9k) → V6.
 
 ## V1_ffn_down_chunked_dequant
 
-- **상태:** 설계됨 (2026-09-09)
+- **상태:** makespan 측정 (2026-09-09) — ffn 1,693,200 → **609,223** (2.779×). 첫 컴파일 통과.
+  잔여 상위: x→Replicated DmaStos 54,432 / up·gate weight DmaLoad 49,157×2 / down scale DmaLoad 18,998 /
+  down weight DmaLoad 30×2,473=74k / down scale pass 30×2,201=66k / up·gate scale pass 61,815×2.
+  이제 ffn은 Main 52.9% / DMA 51.0% — DMA와 Main이 대등. 정확도: 누산 순서 불변(같은 8-way reduce).
 - **분기점:** `V0_baseline`
 - **가설:** ffn makespan 1.69M 중 **down projection이 ~1.2M**이다:
   - mlp.rs:393 scale pass 60 × 7,961 = 477,660 (28%) — 슬라이스당 2행 × L=15360 전체를 dequant.
