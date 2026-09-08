@@ -15,7 +15,8 @@ RNGD cycles만 점수다.
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
-| `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 `rows % 256`으로 슬라이스에 교차 배치해 HBM→DM DMA를 DMN/슬라이스 인터리빙 (580 → ~2,000 B/cycle 목표) | — | — | — | — | — | — | 설계됨 |
+| `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
+| `V10_attn_weight_tiles_fused_lut` | `V6` | qkv/attn_out weight를 행 타일로 스트리밍해 LUT·contract를 DMA와 겹치고, f8→bf16 LUT를 contraction 체인에 융합(V5 흡수) | — | — | — | — | — | — | 설계됨 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
@@ -44,10 +45,8 @@ RNGD cycles만 점수다.
 
 - **슬라이스 축에 패딩(예: `m![H / 16 # 256]` = 240 실제 + 16 패딩)** — DMA `to_dm`가
   `internal compiler error: split (inner_size: 64) is not valid on shape([H_16=240])`로 죽는다.
-  DMA는 슬라이스 축을 64 단위로 쪼개므로 **실제 슬라이스 수가 64의 배수(사실상 256)** 여야 한다.
-  `1 # 8`, `1 # 32` 같은 패딩은 곱해서 256이 되니 괜찮다. 행 수를 슬라이스에 나눌 때는
-  H=3840 → 15행 × 256, Qs=4096 → 16행 × 256, L=15360 → 60행 × 256 처럼 정확히 나눠야 한다.
-  (V2 1차 시도에서 확인, 2026-09-09)
+  이후 192(=3×64)도 실패해 결론은 **live 슬라이스 수가 2의 거듭제곱**(아래 제약 표 참조).
+  `1 # 8`, `1 # 32` 같은 패딩은 곱해서 256이 되니 괜찮다. (V2 시도에서 확인, 2026-09-09)
 
 - **"rmsnorm 출력(`Slice = m![1 # 256]`)이 이미 256 슬라이스에 복제되어 있으니
   `broadcast_hidden`을 `unsafe reshape`로 대체"** (0909_baseline.md 축 A 관찰 1) — 근거가
@@ -75,9 +74,10 @@ RNGD cycles만 점수다.
 | commit_trim 패킷은 8/16/24/32 B | `commit_trim output packet must be one of [8, 16, 24, 32] bytes, got 6` | bf16 4/8/12/16개 |
 | `m![H % 15 # 16 / 4]` 같은 패딩 축 분해는 **파싱은 됨** | (위 transpose 에러가 그 표현을 정상 출력) | 엔진별 지원 여부는 따로 확인 |
 
-결론: 행 수를 슬라이스에 나눌 때 **행/슬라이스가 4의 배수**이고 **live 슬라이스 수가 64의 배수**인
-조합을 고른다. H=3840이면 20행 × 192, 60행 × 64, 120행 × 32 (60·120은 8의 배수라 vector pass도 됨).
-Qs=4096이면 16 × 256. L=15360이면 60 × 256.
+결론: 행 수를 슬라이스에 나눌 때 **행/슬라이스가 4의 배수**이고 **live 슬라이스 수가 2의 거듭제곱**인
+조합을 고른다. H=3840이면 60행 × 64, 120행 × 32 (둘 다 8의 배수라 vector pass도 됨) — 256 슬라이스를
+다 쓰려면 다른 축(Qs, L)과 함께 나눠 inter-slice reduce로 합친다(V2가 그 예). Qs=4096이면 16 × 256.
+L=15360이면 60 × 256.
 
 ## V0에서 측정된 하드웨어 상수 (슬라이스당, 스케줄 기준)
 
@@ -124,6 +124,22 @@ Qs=4096이면 16 × 256. L=15360이면 60 × 256.
 - **배운 것:**
 - **다음 후보:**
 ======================================================================= -->
+
+## V10_attn_weight_tiles_fused_lut
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V6_ffn_upgate_overlap`
+- **가설:** V7 이후 attn_out(58k)은 weight DmaLoad 26.7k 뒤에 LUT 9.9k + contract 4.1k + scale/rmsnorm/
+  residual ~10k가 **직렬로** 붙어 있고, qkv(95k)도 마지막 V weight 로드(83k) 뒤에 LUT 5k + contract 2.2k +
+  rmsnorm/rope가 붙는다. FFN(V6)에서 확인된 대로 weight를 행 타일로 나눠 로드하면 타일 k의 LUT/contract가
+  타일 k+1의 DMA와 겹쳐 DMA 뒤 tail이 타일 하나분으로 준다. 또 f8 weight는 `fetch → fetch_table_lookup::<bf16>
+  → collect → contract_outer` 한 체인(V5 가설)으로 bf16 사본 없이 contraction할 수 있을 것이다(FFN에서
+  `fetch_table_lookup → fetch_cast` 체인이 컴파일된 것과 같은 원리).
+- **변경 파일:** `src/device/sliding/projection.rs` (`project_query`, `project_one_kv_matrix`, `project_output`)
+- **공유 코드 영향:** 없음
+- **리스크:** 타일 수만큼 `DmaLoad ?`(4 KB, 838 cycle) 고정비가 늘 수 있다. attn_out 60행은 12행 × 5타일
+  (12 = 4의 배수 ✓), qkv Q 16행은 4행 × 4타일, K/V 8행은 4행 × 2타일.
+- **예상:** attn_out −12k, qkv −6k.
 
 ## V6_ffn_upgate_overlap
 
@@ -230,6 +246,23 @@ Qs=4096이면 16 × 256. L=15360이면 60 × 256.
 - **리스크:** DMA 엔진이 디스크립터를 어떻게 병렬화하는지 모른다 — 효과가 0일 수 있다.
   출력 벡터가 블록 permutation된 채 나오므로 `to_dm` relayout이 8 B 조각 960개를 옮겨야 한다.
 - **예상:** attn_out weight DMA 26.7k → 10k 이하면 성공.
+
+### 측정 (attn_out만 프로브)
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_attention_output` | 58,015 → 59,225 | — | 0.980 |
+
+- weight DmaLoad: **26,734 → 26,734, util 0.433 → 0.433 (완전히 동일)**. 출력 permutation 때문에
+  `contraction.to_dm` relayout만 952 → 2,162로 늘었다.
+- **측정 방식:** makespan only
+
+### 판정: **기각** (스케줄러의 DMA 비용 모델은 슬라이스 배치 순서를 보지 않는다)
+
+- **이유:** 정적 스케줄에서 DmaLoad 비용은 바이트 수와 디스크립터 형태로만 정해진다. 실물에서는
+  DMN 인터리빙이 영향을 줄 수 있으나 검증 수단이 없다. Arena 실측이 되면 V7 vs V8 브랜치를 그대로
+  A/B 제출할 가치는 있다(둘 다 push됨). 코드는 `V8_weight_rows_interleaved_dma` 브랜치에만 있다.
+- **배운 것:** makespan 관점에서 DMA는 **바이트 수**와 **겹침**으로만 줄어든다.
 
 ## V7_qkv_x_replicate_via_hbm
 
