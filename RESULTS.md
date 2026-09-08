@@ -16,19 +16,20 @@ RNGD cycles만 점수다.
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
-| `V10_attn_weight_tiles_fused_lut` | `V6` | qkv/attn_out weight를 행 타일로 스트리밍해 LUT·contract를 DMA와 겹치고, f8→bf16 LUT를 contraction 체인에 융합(V5 흡수) | — | — | — | — | — | — | 설계됨 |
+| `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
+| `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
 | `V3_qkv_hsplit_no_broadcast` | `V0_baseline` | QKV: H를 8슬라이스로 분할해 x 전체 브로드캐스트(62k) 제거, inter-slice reduce | — | — | — | — | — | — | 보류 (V7 우선; 아래 참조) |
 | `V4_attnout_qsplit_no_broadcast` | `V2` | O proj: Qs를 8슬라이스로 분할해 x 브로드캐스트(66k) 제거 | — | — | — | — | — | — | 설계됨 |
-| `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | 설계됨 |
+| `V5_lut_in_contract_chain` | SOTA | f8→bf16 table lookup을 별도 pass 없이 contraction 체인 안에서 수행 | — | — | — | — | — | — | V10에 흡수 |
 | `V6_ffn_upgate_overlap` | `V9` | FFN weight를 4행 타일로 스트리밍(LUT+cast를 fetch 단계에 융합), up/gate 인터리브, down 더블버퍼, geglu 직접 relayout, scale 타일화 | 95,433 | 58,015 | **412,304** | **2.559** | — | — | makespan 측정 |
 
 > 단위: cycle. `—` 미측정. `FAIL(accuracy)` tolerance 위반. 상태 전이는 RULES §2.1.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V6_ffn_upgate_overlap`**
-(V1+V2+V7+V9+V6 누적, 기하평균 2.559×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V11_residual_1920_tiles`**
+(V1+V2+V7+V9+V6+V10+V11 누적, 기하평균 2.716×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -125,21 +126,61 @@ L=15360이면 60 × 256.
 - **다음 후보:**
 ======================================================================= -->
 
+## V11_residual_1920_tiles
+
+- **상태:** makespan 측정 (2026-09-09)
+- **분기점:** `V10_attn_weight_tiles_fused_lut`
+- **가설:** attn_out과 ffn 모두 `shared::residual::add`로 끝나는데, 480 원소 × 8 타일마다 Sub 프리로드(383) +
+  Main add(341)가 붙어 ~5.8k. 1920 × 2 타일(f32 7.5 KB < VRF 8 KB)이면 ~1.5k.
+- **변경 파일:** `src/device/shared/residual.rs` (`add`만; `add_vision`은 그대로)
+- **공유 코드 영향:** full attention 경로(`full_attention_output`)도 `residual::add`를 쓴다 — Stage 2에서 같이 이득.
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_project_qkv` | 93,127 → 93,127 | — | 1.000 |
+| `sliding_attention_output` | 53,848 → **50,110** | — | 1.075 |
+| `decoder_feedforward` | 412,304 → **408,566** | — | 1.009 |
+| **기하평균 (V0 대비 누적)** | | | **2.716** |
+
+- **정확도:** 수치 동일(타일 폭만 변경).
+- **측정 방식:** makespan only
+
+### 판정: makespan 측정 (실측 대기)
+
 ## V10_attn_weight_tiles_fused_lut
 
-- **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V6_ffn_upgate_overlap`
-- **가설:** V7 이후 attn_out(58k)은 weight DmaLoad 26.7k 뒤에 LUT 9.9k + contract 4.1k + scale/rmsnorm/
-  residual ~10k가 **직렬로** 붙어 있고, qkv(95k)도 마지막 V weight 로드(83k) 뒤에 LUT 5k + contract 2.2k +
-  rmsnorm/rope가 붙는다. FFN(V6)에서 확인된 대로 weight를 행 타일로 나눠 로드하면 타일 k의 LUT/contract가
-  타일 k+1의 DMA와 겹쳐 DMA 뒤 tail이 타일 하나분으로 준다. 또 f8 weight는 `fetch → fetch_table_lookup::<bf16>
-  → collect → contract_outer` 한 체인(V5 가설)으로 bf16 사본 없이 contraction할 수 있을 것이다(FFN에서
-  `fetch_table_lookup → fetch_cast` 체인이 컴파일된 것과 같은 원리).
-- **변경 파일:** `src/device/sliding/projection.rs` (`project_query`, `project_one_kv_matrix`, `project_output`)
+- **상태:** makespan 측정 (2026-09-09)
+- **분기점:** `V6_ffn_upgate_overlap` (`14b428d`)
+- **가설:** 위 요약 보드 참조. V5(LUT 융합)를 흡수.
+- **변경 파일:** `src/device/sliding/projection.rs` (`project_output`, `project_query`, `project_one_kv_matrix`)
 - **공유 코드 영향:** 없음
-- **리스크:** 타일 수만큼 `DmaLoad ?`(4 KB, 838 cycle) 고정비가 늘 수 있다. attn_out 60행은 12행 × 5타일
-  (12 = 4의 배수 ✓), qkv Q 16행은 4행 × 4타일, K/V 8행은 4행 × 2타일.
-- **예상:** attn_out −12k, qkv −6k.
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_project_qkv` | 95,433 → **93,127** | — | 1.025 |
+| `sliding_attention_output` | 58,015 → **53,848** | — | 1.077 |
+| `decoder_feedforward` | 412,304 → 412,304 | — | 1.000 |
+| **기하평균 (V0 대비 누적)** | | | **2.646** |
+
+- **변형 비교 (attn_out):** 12행×5타일을 루프 안에서 로드 61,787(버퍼 재사용으로 DMA 직렬화) → 5타일
+  선로드 + LUT 융합 **53,848** → 5타일 선로드 + LUT 분리 54,969. 융합 pass는 타일당 2,183 (분리 2,800).
+- **변형 비교 (qkv):** Q 4×4행 + K/V 2×4행 타일 + 융합 = **97,866 (악화)** — DMA 93% busy라 타일당
+  `DmaLoad ?` 838이 큐만 늘림. 융합만 적용 = 93,127.
+- **정확도:** 수치 동일(LUT 결과를 DM에 쓰지 않고 바로 contraction).
+- **측정 방식:** makespan only
+- **지배 context:** attn_out DMA 71.8% (x 2.1k + 타일 5×5,785 + `?` 5×838) / Main 32%; qkv DMA 90.6%.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** (1) `fetch → fetch_table_lookup::<bf16> → collect → contract_outer` 한 체인은 **컴파일된다**
+  (V5 확인). (2) 타일화는 Main이 임계일 때만 이득; DMA-bound 커널에서는 타일당 고정 DMA 비용(838)이 손해.
+  (3) attn_out tail 15k(relayout, scale, rmsnorm, residual)는 별도 표적 → V11.
+- **다음 후보:** FFN ROWS_PER_PASS=12(scale VRF를 반으로 나눠 로드) · FFN scale pass Sub 오프로드 ·
+  rmsnorm 경량화(공유) · qkv x 복제 18.4k.
 
 ## V6_ffn_upgate_overlap
 
