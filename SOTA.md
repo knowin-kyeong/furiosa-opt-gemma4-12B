@@ -29,7 +29,8 @@
 | `V15_x_replicate_hbm_copies` (…+V15 누적) | 60,412 | 38,240 | 191,122 | 4.434× |
 | `V16_rmsnorm_fused_residual` (…+V16 누적) | 60,412 | 34,776 | 186,976 | 4.618× |
 | `V17_qkv_hoist_weight_loads` (…+V17 누적) | 59,216 | 34,776 | 186,976 | 4.649× |
-| `V18_attnout_scale_in_epilogue` (…+V18 누적) | 59,216 | 31,113 | 186,976 | **4.822×** |
+| `V18_attnout_scale_in_epilogue` (…+V18 누적) | 59,216 | 31,113 | 186,976 | 4.822× |
+| `V19_qkv_tail_heads_layout` (…+V19 누적) | 55,811 | 31,113 | 186,976 | **4.919×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 

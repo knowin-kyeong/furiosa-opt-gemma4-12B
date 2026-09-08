@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V19_qkv_tail_heads_layout` | `V18` | qkv 후처리(q/k/v rmsnorm·rope·저장)를 헤드별 슬라이스 분산 레이아웃에서 수행 — HBM hop에서 직접 그 레이아웃으로 로드, rope의 InterTranspose·Broadcast1 제거, pass당 데이터 1/8 | — | — | — | — | — | — | 설계됨 |
+| `V20_qkv_tail_per_cluster` | `V19` | q/k/v의 HBM hop 제거: 클러스터별 ring-64 switch gather로 헤드/슬라이스 레이아웃을 만들고 후처리·저장·scatter를 두 클러스터에서 병렬 수행 | — | — | — | — | — | — | 설계됨 |
+| `V19_qkv_tail_heads_layout` | `V18` | qkv 후처리(q/k/v rmsnorm·rope·저장)를 헤드별 슬라이스 분산 레이아웃에서 수행 — HBM hop에서 직접 그 레이아웃으로 로드, rope의 InterTranspose·Broadcast1 제거 | **55,811** | 31,113 | 186,976 | **4.919** | — | — | makespan 측정 |
 | `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개 제거 | 59,216 | **31,113** | 186,976 | **4.822** | — | — | makespan 측정 |
 | `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q weight의 LUT pass를 rmsnorm 앞에 발행해 Q 로드가 DMA 큐 선두로 (K/V까지 같은 방식은 무효) | **59,216** | 34,776 | 186,976 | **4.649** | — | — | makespan 측정 |
 | `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
@@ -36,8 +37,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V18_attnout_scale_in_epilogue`**
-(…+V18 누적, 기하평균 4.822×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V19_qkv_tail_heads_layout`**
+(…+V19 누적, 기하평균 4.919×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -232,6 +233,35 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/device/layout.rs`(`HeadSlices`), `src/device/sliding/rmsnorm.rs`(함수 추가),
   `src/device/sliding/rope.rs`(`apply_rope_heads` 추가), `src/device/sliding/projection.rs`(반환 레이아웃), `src/ops.rs`
 - **예상:** qkv −6k ~ −8k.
+
+### 측정
+
+| 커널 | makespan (before → after) | RNGD cycles | speedup |
+|---|---|---|---:|
+| `sliding_project_qkv` | 59,216 → **55,811** | — | 1.061 |
+| **기하평균 (V0 대비 누적)** | | | **4.919** |
+
+- 첫 컴파일 통과. 후처리 pass들이 1,304/1,287 → 345~409 cycle로 줄었고 InterTranspose 2개·Broadcast1 2개가
+  사라졌다. 남은 tail(V 로드 종료 45.5k → 55.8k)은 V contract 2.7k + V scale 1k + **K/V의 HBM hop이 V weight
+  로드 뒤에 DMA 큐에서 막혀** k 후처리가 48.4k에야 시작하는 것 + scatter 2개.
+- **정확도:** 연산 동일(레이아웃만 변경).
+
+### 판정: makespan 측정 (실측 대기)
+
+## V20_qkv_tail_per_cluster
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V19_qkv_tail_heads_layout`
+- **가설:** q/k/v 결과를 한 클러스터로 모으는 HBM hop(각 store+load ≈ 1.5k, 그리고 DMA 큐에서 큰 weight 로드
+  뒤에 막힘)을 없앤다. 각 클러스터는 이미 4개 헤드(2048/1024 = 4 × Ds)를 갖고 있으므로, 클러스터 안에서
+  ring-64 `Broadcast1{slice1: 64}` switch(64 슬라이스 × 8행 → 슬라이스당 1헤드, ~64 cycle)로 헤드/슬라이스
+  레이아웃 `(m![Ns / 4], m![Ns % 4, 1 # 64])`을 만들고, `normalize_*_heads`·`apply_rope_heads`를 (C, S) 제네릭으로
+  바꿔 두 클러스터에서 4헤드씩 병렬 처리한 뒤, q 저장·k/v scatter를 그 레이아웃에서 직접 한다. cos/sin은
+  HBM 스크래치를 거쳐 양 클러스터에 복제.
+- **변경 파일:** `src/device/sliding/{projection,rmsnorm,rope}.rs`, `src/ops.rs`
+- **리스크:** 두 클러스터 레이아웃에서의 `dma_scatter`/`to_hbm_view`; padded `1 # 64` 슬라이스 축에서의 vector pass.
+- **예상:** qkv −5k (~50k).
+
 
 ## V18_attnout_scale_in_epilogue
 
