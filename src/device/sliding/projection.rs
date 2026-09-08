@@ -200,9 +200,23 @@ pub(crate) fn project_output(
     // Both clusters do real work: the hidden rows are split across the two clusters and
     // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
     // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
-    // eight chunk partials are summed across slices within a cluster.
-    let weight_f8: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60, Qs % 512]> =
-        weight.to_dm(&mut ctx.tdma);
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the fused
+    // lookup + contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster and the per-channel scale is
+    // applied in the same epilogue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 20, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 20, m![H / 60, H % 60 = 20 # 60, Qs]>(20 * 0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 20, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 20, m![H / 60, H % 60 = 20 # 60, Qs]>(20 * 1)
+        .to_dm(&mut ctx.tdma);
+    let tile2: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 20, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 20, m![H / 60, H % 60 = 20 # 60, Qs]>(20 * 2)
+        .to_dm(&mut ctx.tdma);
+
     let x: DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
     let x_trf: TrfTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Qs % 512]> = ctx
         .sub
@@ -210,38 +224,90 @@ pub(crate) fn project_output(
         .fetch::<m![Qs / 16 % 32], m![Qs % 16]>()
         .collect::<m![Qs / 16 % 32], m![Qs % 16]>()
         .to_trf();
-    // The per-channel scale rides along the contraction epilogue: one value per row, staged
-    // as a padded packet per time step in the VRF.
     let weight_scale: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = weight_scale.to_dm(&mut ctx.tdma);
-    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows, m![H % 60, 1 # 8]> = ctx
-        .sub
-        .begin(weight_scale.view())
-        .fetch::<m![H % 60], m![1 # 8]>()
-        .fetch_cast::<f32>()
-        .collect::<m![H % 60], m![1 # 8]>()
-        .to_vrf();
 
-    let contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = ctx
-        .main
-        .begin(weight_f8.view())
-        .fetch::<m![H % 60, Qs / 32 % 16], m![Qs % 32]>()
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows, m![H % 60 = 20, 1 # 8]> = ctx
+        .sub
+        .begin(weight_scale.view().tile::<m![H % 60], 20, m![H % 60 = 20 # 60]>(20 * 0))
+        .fetch::<m![H % 60 = 20], m![1 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60 = 20], m![1 # 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
         .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60, Qs / 16 % 32], m![Qs % 16]>()
-        .contract_outer::<m![H % 60, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 60]>()
-        .contract_lane::<m![H % 60], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H % 60 = 20]>()
+        .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<HiddenRows, m![H % 60]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 20]>(InterSliceReduceOpF32::Add)
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![H % 60, 1 # 2], m![1 # 4]>()
+        .vector_narrow_split::<m![H % 60 = 20, 1 # 2], m![1 # 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
-        .vector_widen_concat::<m![H % 60], m![1 # 8]>()
+        .vector_widen_concat::<m![H % 60 = 20], m![1 # 8]>()
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H / 4 % 15], m![H % 4 # 16]>()
-        .commit_trim::<m![H % 4]>()
-        .commit();
+        .transpose::<m![H % 60 = 20 / 4], m![H % 60 = 20 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 20 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 20, m![H % 60 = 20 #{!} 60]>(20 * 0));
+    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows, m![H % 60 = 20, 1 # 8]> = ctx
+        .sub
+        .begin(weight_scale.view().tile::<m![H % 60], 20, m![H % 60 = 20 # 60]>(20 * 1))
+        .fetch::<m![H % 60 = 20], m![1 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60 = 20], m![1 # 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 20]>()
+        .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 20]>(InterSliceReduceOpF32::Add)
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H % 60 = 20, 1 # 2], m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
+        .vector_widen_concat::<m![H % 60 = 20], m![1 # 8]>()
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 20 / 4], m![H % 60 = 20 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 20 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 20, m![H % 60 = 20 #{!} 60]>(20 * 1));
+    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows, m![H % 60 = 20, 1 # 8]> = ctx
+        .sub
+        .begin(weight_scale.view().tile::<m![H % 60], 20, m![H % 60 = 20 # 60]>(20 * 2))
+        .fetch::<m![H % 60 = 20], m![1 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60 = 20], m![1 # 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(tile2.view())
+        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 20]>()
+        .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 20]>(InterSliceReduceOpF32::Add)
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H % 60 = 20, 1 # 2], m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
+        .vector_widen_concat::<m![H % 60 = 20], m![1 # 8]>()
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 20 / 4], m![H % 60 = 20 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 20 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 20, m![H % 60 = 20 #{!} 60]>(20 * 2));
 
     // Gather the [H] vector from both clusters through HBM (each cluster writes its half,
     // then the Slice layout is loaded back); the channel scale is already applied.
