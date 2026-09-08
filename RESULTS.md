@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V21_qkv_rope_tables_early` | `V20` | cos/sin gather·HBM hop·VRF 스테이징을 커널 맨 앞에서 수행해 q/k rope가 V 로드와 겹치게 | — | — | — | — | — | — | 설계됨 |
+| `V21_qkv_rope_tables_early` | `V20` | cos/sin gather·HBM hop·VRF 스테이징을 커널 맨 앞에서 수행해 q/k rope가 V 로드와 겹치게 | 51,631 | — | — | — | — | — | **기각** (불변; 스케줄러가 gather 하나만 앞당김) |
 | `V20_qkv_tail_per_cluster` | `V19` | q/k/v의 HBM hop 제거: 클러스터별 ring-64 switch gather로 헤드/슬라이스 레이아웃을 만들고 후처리·저장·scatter를 두 클러스터에서 병렬 수행 | **51,631** | 31,113 | 186,976 | **5.048** | — | — | makespan 측정 |
 | `V19_qkv_tail_heads_layout` | `V18` | qkv 후처리(q/k/v rmsnorm·rope·저장)를 헤드별 슬라이스 분산 레이아웃에서 수행 — HBM hop에서 직접 그 레이아웃으로 로드, rope의 InterTranspose·Broadcast1 제거 | **55,811** | 31,113 | 186,976 | **4.919** | — | — | makespan 측정 |
 | `V18_attnout_scale_in_epilogue` | `V17` | attn_out 채널 scale을 contraction 체인 epilogue(inter-slice reduce 뒤 vector 곱)로 접어 넣어 tail의 scale pass 2개 제거 | 59,216 | **31,113** | 186,976 | **4.822** | — | — | makespan 측정 |
@@ -286,6 +286,15 @@ L=15360이면 60 × 256.
   Main 소비자가 DMA를 앞당긴 것과 같은 원리) q/k rope가 V 로드 중에 끝나 tail이 V 경로만 남는다.
 - **변경 파일:** `src/device/sliding/rope.rs`(`stage_rope_tables`/`RopeTables`), `src/ops.rs`
 - **예상:** qkv −2k ~ −3k.
+
+### 측정: **51,631 → 51,631 (불변) — 기각**
+
+- cos gather는 18k로 앞당겨졌으나 sin gather는 여전히 43.7k(V 로드 뒤). 순서를 바꿔도(sin 먼저) 첫 번째 것만
+  앞당겨진다 — 스케줄러가 weight 로드 앞에 두는 소형 DMA를 하나로 제한하는 듯. 코드는 되돌렸다.
+- **부수 발견:** device 함수 안에서 **사용자 struct 생성은 ICE**(`not yet implemented: RopeTables { .. }`) —
+  여러 값을 돌려줄 때는 튜플을 쓴다.
+- V20 커밋의 rope.rs에 `HeadSlices` import 정리로 생긴 컴파일 오류가 있었다 → 이 브랜치와 V20 브랜치에 수정 커밋.
+
 
 
 
