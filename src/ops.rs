@@ -61,9 +61,12 @@ pub fn sliding_project_qkv(
 
     // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
     // staging the 7.5 KB vector in HBM and loading it back replicated runs at HBM DMA speed.
-    let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    // Eight HBM copies of x, each read by a different eighth of the slices: 512 descriptors
+    // all reading the same 7.5 KB ran at half the DMA rate of a normal tile load.
+    let mut x_hbm: HbmTensor<bf16, Chip, m![Dummy8, H]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let x: DmTensor<bf16, Chip, layout::BothClusters, Replicated, m![H]> = x_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<bf16, Chip, layout::BothClusters, m![Dummy256 / 8, Dummy8], m![H]> = x_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<bf16, Chip, layout::BothClusters, Replicated, m![H]> = unsafe { x.reshape() };
 
     let q: DmTensor<bf16, Chip, Cluster, Slice, m![Ns, Gs, Ds]> =
         sliding::projection::project_query(ctx, &x, q_weight, q_weight_scale);
