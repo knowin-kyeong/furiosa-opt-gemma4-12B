@@ -17,8 +17,8 @@ RNGD cycles만 점수다.
 | `V168_ffn_gather_before_store` | `V167` | V167과 같은 기전을 ffn down 출력 hop store(DownRows `1 # 8`, 64 디스크립터)에: switch gather(ring 256) 후 클러스터당 1 디스크립터 store. 정적 중립(157,766) | — | — | 157,766 (v168) | — | — | ? | 구현됨 (`d108d2b`), Arena 2잡 큐 |
 | `V167_attnout_gather_before_store` | `V162` | attn_out 투영 출력 store를 64 디스크립터(패딩 `1 # 8` 레이아웃)에서 **클러스터당 switch gather(ring 256, `Broadcast1 { slice1: 32, slice0: 8 }`, 12원소 패킷) 후 2 디스크립터 store**로. V24(a)의 실물 A/B: 정적 중립(28,180 vs 28,223), 실물은 패딩 레이아웃 store가 V146에서 +4k/store였으므로 이득 가능. 컴파일 교훈: switch OutTime에 fetch의 패킷 시간축을 함께 적는다 | — | 28,180 (v167) | — | — | — | ? | 구현됨 (`V167`), Arena 2잡 큐 |
 | `V166_ffn_down_three_tiles` | `V165` | ffn down DMA 타일 5(16/16/16/8/4) → 3(28/28/4; V40(a) `7c4abaa`를 cherry-pick, pass A 큰 타일 + pass B 16/12행 뷰). 정적 +3k이지만 실물 타일당 ~2k(attn_out 근거) → 디스크립터 −1,024 | 44,792 | 28,173 | **160,809** | — | — | ? | 구현됨 (`6ae8355`), Arena cold 2잡 큐 |
-| `V165_qkv_broadcast_attnout_two_tiles` | `V158` | **프로덕션 후보.** V158 + attn_out O-weight 타일 20×3 → 48/12 (V136의 diff). tests/는 cold/warm 7회 | 44,792 | 28,173 | 157,763 | — | — | — | 구현됨, Arena cold 3잡 큐 |
-| `V160b_qkv_weights_half_descriptors_contig` | `V160` | V160의 정확도 수정 시도: live 128 슬라이스를 연속(`m![1 # 2, Qs / 16 % 128]`)으로 두고 head gather를 ring 32(`slice0: 1`)로, head 레이아웃 `m![1 # 2, Ns % 4, 1 # 32]` | **71,140** (정적 +26k: 무언가 직렬화됨) | — | — | — | — | ? | 구현됨, Arena 1잡(실물 확인용) |
+| `V165_qkv_broadcast_attnout_two_tiles` | `V158` | **프로덕션 후보.** V158 + attn_out O-weight 타일 20×3 → 48/12 (V136의 diff). tests/는 cold/warm 7회 | 44,792 | 28,173 | 157,763 | — | job 15578/79/80 cold: qkv **109,572 / 107,318 / 109,408**, attn_out **54,009 / 51,513 / 54,919**, ffn 348,688 / 349,470 / 352,346 (warm qkv 103.6~109.1k, attn 51.8~55.0k) | **3/3 PASS ×3** | **채택 후보 (실측 SOTA)** — attn_out −3k(−5%) 확인; 리더보드 제출은 사용자 지시 대기 |
+| `V160b_qkv_weights_half_descriptors_contig` | `V160` | V160의 정확도 수정 시도: live 128 슬라이스를 연속(`m![1 # 2, Qs / 16 % 128]`)으로 두고 head gather를 ring 32(`slice0: 1`)로, head 레이아웃 `m![1 # 2, Ns % 4, 1 # 32]` | **71,140** (정적 +26k) | — | — | — | job 15581: v160 median **132,378** vs v157a 108,634 (+24k) | PASS | **기각** — 정확도는 잡혔지만 정적 예측대로 느림(연속 128 슬라이스 + ring-32 gather가 직렬화). weight 디스크립터 절반 방향 종료 |
 | `V162_attnout_two_tiles_broadcast` (V162 48/12, V163 40/20) | `V159` | attn_out O-weight DMA 타일 3 → 2(Phase C 단발 −2.5k)를 v161(x2 broadcast) 위에 얹어 base·v161·v162·v163을 한 잡에서 4회씩 | — | 28,223 (v162) / 27,900 (v163) | — | — | job 15574 (n=4): base **55,306** · v161 54,019 · v162 **53,600** (stdev 0.4k) · v163 53,017 (stdev 4.3k, 62k 이상치 1) | 전부 PASS | **2타일 −3~4% 확인** → 프로덕션 V165 (48/12) |
 | `V160_qkv_weights_half_descriptors` | `V157` | **weight 스트림이 디스크립터 발행에 묶였는지 검증.** Q를 클러스터당 128 live 슬라이스 × 16행(`m![Qs / 16 % 128, 1 # 2]`), K/V를 128 × 8행으로 → weight당 디스크립터 512 → 256, 슬라이스당 바이트 2배. head gather는 stride-2 ring-64(`Broadcast1 { slice1: 64, slice0: 2 }`). v157a와 같은 잡에서 비교 | 45,791 | 27,424 | 157,763 | — | job 15571: v160 **median 103,023** (stdev 0.7k) vs v157a 107,207 → −4k | v160 **FAIL** (55% tol 안 — stride-2 `1 # 2` 슬롯의 ring gather가 패딩 슬롯을 섞는 듯) | 타이밍 −4% 확인, 정확도 → V160b(연속 live 슬라이스 + ring-32 gather) |
 | `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | job 15566: qkv **cold 107,552** / warm 108,556 · 110,686; attn_out 58,474 / 57,830; ffn 353,628 / 351,700 | **3/3 PASS** | **채택 후보 (실측 SOTA)** — 리더보드 제출은 사용자 지시 대기 |
@@ -341,6 +341,21 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 - 정확도 PASS(형태는 옳다). 이득이 없으므로 **"디스크립터 수"가 일반 법칙은 아니다**: qkv의 x2 로드가 특별했던 이유는 512개
   디스크립터가 **같은 7.7 KB 한 영역**을 읽는 것(HBM 채널 직렬화)이고, ffn(영역당 256개)·attn_out(영역당 64개)은 그 문턱 아래다.
 - 부수 관찰: 이 잡의 ffn base warm median 342k는 평소 cold 350k보다 낮다(ffn도 cold 페널티 ~8k가 있다).
+
+## V165_qkv_broadcast_attnout_two_tiles — 프로덕션 후보 (2026-09-09 16:05~16:09 UTC, job 15578~15580)
+
+- **분기점:** `V158` + attn_out O-weight 타일 20×3 → 48/12 (`V136`의 projection.rs diff). 커밋 `0704eda`.
+- **실측 (3잡, 모두 3/3 PASS):**
+
+| job | qkv cold | qkv warm | attn_out cold | attn_out warm | ffn |
+|---|---:|---|---:|---:|---|
+| 15578 | 109,572 | 104,670 · 105,568 | **54,009** | 51,824 | 348,688 · 347,166 |
+| 15579 | 107,318 | 109,074 · 103,630 | **51,513** | 55,049 | 349,470 · 347,838 |
+| 15580 | 109,408 | 104,582 · 104,798 | **54,919** | 53,994 | 352,346 · 344,516 |
+
+- **V158 대비:** attn_out cold median 56,870 → **54,009** (−5%); qkv·ffn 불변. 공식 baseline 기준 추정 기하평균
+  (2.29 × 7.49 × 10.60)^(1/3) ≈ **5.67**, 최고 draw 기준 ≈5.71 (1위 5.667).
+- **판정:** 채택 후보(실측 SOTA). 남은 후보(V166 ffn 3타일, V167/V168 store 전 gather)가 이기면 그 위에 얹어 최종 프로덕션으로.
 
 ## V158_qkv_x_ring32_broadcast — 프로덕션 (2026-09-09 15:48 UTC, job 15566)
 
