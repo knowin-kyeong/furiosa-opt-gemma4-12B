@@ -629,7 +629,9 @@ macro_rules! down_reduce_fns {
                 .collect::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
                 .to_vrf();
 
-            ctx.main
+            // On the sub context: pass A of the next tile (main context, lookup + contraction)
+            // then overlaps this pass's vector work instead of queueing behind it.
+            ctx.sub
                 .begin(partials.view().tile::<m![H % 60], $rows, m![H % 60 = $rows # 60, L / 16 % 120]>(offset))
                 .fetch::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
                 .collect::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
