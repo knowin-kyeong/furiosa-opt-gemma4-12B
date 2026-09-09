@@ -163,12 +163,12 @@ pub fn sliding_attention_output(
     // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
     // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
-    let x_hbm = sliding::projection::project_output(ctx, x, o_weight, o_weight_scale);
+    let x_hbm = sliding::projection::project_output(ctx, x, o_weight);
     // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
     let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::rmsnorm::normalize_add_reduced::<Cluster, Slice>(ctx, &x, post_attn_rms_weight, &residual);
+        shared::rmsnorm::normalize_add_scaled_reduced::<Cluster, Slice>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
