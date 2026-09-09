@@ -421,6 +421,31 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
 - **정확도:** f32 나눗셈 순서만 변경; eps 항 동일.
 - **예상:** ffn −0.4k.
 
+## V44–V48 실현 가능성 조사 (2026-09-09, V50 위에서)
+
+설계 슬롯 5개를 구현하려고 상류 API와 매핑 제약을 확인한 결과, **3개는 막혀 있고 2개는 구현 가능하지만
+검증 수단이 없다.** 근거를 남긴다 — 다음 세션이 같은 벽을 다시 확인하지 않도록.
+
+| 슬롯 | 기대 | 상태 | 근거 |
+|---|---:|---|---|
+| **V44** ffn scale 세그먼트 | ffn −9.6k | **막힘** | 기존 분석대로 (a) 30행은 4의 배수가 아니라 pass B transpose 불가 (b) `TagMode::AxisToggle`은 `Ident` 인자 (c) down은 full row가 슬라이스당 57.6 KB. full row를 읽고 절반만 쓰는 길은 fetch view가 전 슬라이스 공통이라 불가. |
+| **V45** post-norm을 생산자 레이아웃에서 | attn_out −1k, ffn −1k | 구현 가능, **검증 불가** | 합산 순서(f32)가 바뀌므로 실측 검증이 필요한데 Arena 예산이 3회. |
+| **V46** ffn 스칼라 broadcast 병합 | ffn −1.2k | **막힘** | 두 스칼라를 한 패킷에 담으려면 `m![Dummy2, 1 # 8]` f32 = **64 B**인데 collect 출력 패킷은 정확히 32 B여야 한다. `m![2 # 8]`(32 B)로 담으면 두 소비자가 레인을 따로 못 집는다. HBM 로드만 합치면 −521. |
+| **V47** global scale을 eps로 접기 | ffn −0.4k | 구현 가능, **검증 불가** | `FpBinaryOp::DivF`와 VRF 피연산자 `vector_clip`은 존재한다(`attention.rs:284`, `projection.rs:211`). 다만 `DivF`의 피연산자 순서(`acc/operand` vs 반대)를 실측으로 확인해야 하고, eps 산술이 바뀌므로 정확도 검증이 필수. |
+| **V48** qkv 인덱스 공유 | qkv −0.5~1k | **절반 막힘** | `dma_scatter_unscaled`가 상류에서 `todo!("unscaled dma_scatter (SPM-resident raw index) is not implemented yet")` — k/v scatter는 불가. gather 절반은 `dma_gather_unscaled`가 구현돼 있으나 `rope_offset`을 바이트 오프셋에서 **행 번호**로 바꿔야 해서 커널 입력의 의미를 건드린다(§4). |
+
+### 이 조사가 남기는 판단
+
+다섯 슬롯을 다 살려도 합계는 대략 **−2.4k**(기하평균 +1.5% 남짓)다. 반면 qkv의 x 로드 하나가
+**18,400 cycle을 util 0.157로** 쓰고 있고(V50 스케줄), 이걸 절반만 회수해도 기하평균 +5% 이상이다.
+**남은 레버리지는 V44–V48이 아니라 x 로드에 있다.**
+
+그리고 이 조사에서 반복해서 걸린 것은 구현이 아니라 **검증**이다. CPU 에뮬레이터는 attn_out을
+`carve` 패닉으로 아예 못 돌리고(V0조차), qkv의 k/v도 오판한다. 즉 **수치를 건드리는 변경은 Arena
+없이는 판정할 수 없다.** V15~V41을 통째로 날린 것이 정확히 이 구멍이었으므로, Arena 예산이 적을 때는
+**데이터 이동만 바꾸는 변경**(사본 수, 타일 형상)에 실험을 몰아야 한다 — makespan이 스크리닝해 주고
+정확도 위험이 없다.
+
 ## V49_hbm_copies_real_stores
 
 분기점: `V41_x2_hbm_copies` (문서 계보의 끝; 코드는 V41의 사본 확대를 포함한다)
