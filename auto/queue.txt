@@ -144,3 +144,6 @@ V172_stream_ceiling_probes#r2
 V181_ffn_upgate_full_rows
 # V181_ffn_upgate_full_rows#r2 (dropped: first job FAIL, order fix follows)
 V181_ffn_upgate_full_rows#fix1
+V182_ffn_full_rows_production#c1
+V182_ffn_full_rows_production#c2
+V182_ffn_full_rows_production#c3
