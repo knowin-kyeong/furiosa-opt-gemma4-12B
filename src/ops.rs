@@ -77,13 +77,28 @@ pub fn sliding_project_qkv(
 
     // q, k and v come back one head per slice; the head-wise RMSNorms and RoPE stay in that
     // layout (no transposes in or broadcasts out) and the outputs are written from it.
-    let q = sliding::projection::project_query(ctx, &x, &q_weight, q_weight_scale);
-    let (k, v) =
-        sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight, k_weight_scale, v_weight_scale);
+    let q = sliding::projection::project_query(ctx, &x, &q_weight);
+    let (k, v) = sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight);
 
-    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &q, q_rms_weight);
-    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &k, k_rms_weight);
-    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &v);
+    // The projections' per-channel weight scales are folded into the head RMSNorms (their
+    // loads are eight descriptors in the head layout instead of 512 in the projection layout).
+    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &q,
+        q_weight_scale,
+        q_rms_weight,
+    );
+    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &k,
+        k_weight_scale,
+        k_rms_weight,
+    );
+    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &v,
+        v_weight_scale,
+    );
 
     let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,

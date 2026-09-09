@@ -23,7 +23,6 @@ pub(crate) fn project_query(
     ctx: &mut Context,
     x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     weight_f8: &QueryWeight,
-    weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
     // x (two f8 pieces whose sum is bf16 x times a power of two) is replicated onto every
     // slice of both clusters. Each weight packet is streamed twice (the Dummy2 time axis) so
@@ -50,36 +49,13 @@ pub(crate) fn project_query(
         .commit_trim::<m![Qs % 4]>()
         .commit();
 
-    let weight_scale: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = weight_scale.to_dm(&mut ctx.tdma);
-    let weight_scale_vrf: VrfTensor<f32, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
-        .sub
-        .begin(weight_scale.view())
-        .fetch::<m![1], m![Qs % 8]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![Qs % 8]>()
-        .to_vrf();
-
-    let scaled: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
-        .main
-        .begin(contraction.view())
-        .fetch::<m![1], m![Qs % 8]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![Qs % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Qs / 4 % 2], m![Qs % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_scale_vrf)
-        .vector_widen_concat::<m![1], m![Qs % 8]>()
-        .vector_final()
-        .cast::<bf16, m![Qs % 8 # 16]>()
-        .commit_trim::<m![Qs % 8]>()
-        .commit();
-
+    // The per-channel weight scale is applied by the query RMSNorm that follows (loaded there
+    // in the head layout with eight descriptors instead of 512 here).
     // Each cluster holds four heads spread over 64 slices x 8 rows each; a ring-64 gather
     // puts every head on one slice, the layout the query RMSNorm and RoPE work in, without
     // leaving the cluster (the two clusters then post-process their four heads in parallel).
     let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 8], m![Ds % 8]> =
-        unsafe { scaled.view().reshape() };
+        unsafe { contraction.view().reshape() };
     ctx.main
         .begin(scaled)
         .fetch::<m![1], m![Ds % 8 # 16]>()
@@ -105,7 +81,6 @@ fn project_one_kv_matrix(
     ctx: &mut Context,
     x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]>,
     weight_f8: &KvWeight,
-    weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
         .main
@@ -121,34 +96,10 @@ fn project_one_kv_matrix(
         .commit_trim::<m![Ps % 4]>()
         .commit();
 
-    let weight_scale: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = weight_scale.to_dm(&mut ctx.tdma);
-    let weight_scale_vrf: VrfTensor<f32, Chip, KvClusters, KvRows, m![Ps % 4 # 8]> = ctx
-        .sub
-        .begin(weight_scale.view())
-        .fetch::<m![1], m![Ps % 4 # 8]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![Ps % 4 # 8]>()
-        .to_vrf();
-
-    let scaled: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
-        .main
-        .begin(contraction.view())
-        .fetch::<m![1], m![Ps % 4 # 8]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![Ps % 4 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![1], m![Ps % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_scale_vrf)
-        .vector_widen_concat::<m![1], m![Ps % 4 # 8]>()
-        .vector_final()
-        .cast::<bf16, m![Ps % 4 # 16]>()
-        .commit_trim::<m![Ps % 4]>()
-        .commit();
-
+    // The per-channel weight scale is applied by the head RMSNorm that follows.
     // Ring-64 gather to one head per slice within the cluster (see project_query).
     let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 4], m![Ds % 4]> =
-        unsafe { scaled.view().reshape() };
+        unsafe { contraction.view().reshape() };
     ctx.main
         .begin(scaled)
         .fetch::<m![1], m![Ds % 4 # 16]>()
@@ -163,8 +114,6 @@ pub(crate) fn project_key_value(
     x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     k_weight: &KvWeight,
     v_weight: &KvWeight,
-    k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
-    v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> (
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
@@ -177,8 +126,8 @@ pub(crate) fn project_key_value(
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .to_trf();
 
-    let k = project_one_kv_matrix(ctx, &x_trf, k_weight, k_weight_scale);
-    let v = project_one_kv_matrix(ctx, &x_trf, v_weight, v_weight_scale);
+    let k = project_one_kv_matrix(ctx, &x_trf, k_weight);
+    let v = project_one_kv_matrix(ctx, &x_trf, v_weight);
 
     (k, v)
 }
