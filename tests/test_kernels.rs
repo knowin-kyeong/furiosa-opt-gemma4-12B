@@ -381,14 +381,22 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const TESTS: &[Test] = &[
     t("sliding_project_qkv", "", 0.04),
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "v154", 0.04),
-    t("sliding_project_qkv", "v154", 0.04),
+    t("sliding_project_qkv", "v157a", 0.04),
+    t("sliding_project_qkv", "v157a", 0.04),
+    t("sliding_project_qkv", "v157b", 0.04),
+    t("sliding_project_qkv", "v157b", 0.04),
+    t("sliding_project_qkv", "v157e", 0.04),
+    t("sliding_project_qkv", "v157e", 0.04),
     t("sliding_attention_output", "", 0.05),
     t("decoder_feedforward", "", 0.01),
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "v154", 0.04),
+    t("sliding_project_qkv", "v157a", 0.04),
+    t("sliding_project_qkv", "v157b", 0.04),
+    t("sliding_project_qkv", "v157e", 0.04),
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "v154", 0.04),
+    t("sliding_project_qkv", "v157a", 0.04),
+    t("sliding_project_qkv", "v157b", 0.04),
+    t("sliding_project_qkv", "v157e", 0.04),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
@@ -451,6 +459,66 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture, variant: &str
                 &mut v_cache,
                 &mut q_out,
             ),).await,
+        "v157a" => launch(ops::sliding_project_qkv_v157a, (
+                ctx,
+                &x,
+                &q_weight,
+                &k_weight,
+                &v_weight,
+                &q_weight_scale,
+                &k_weight_scale,
+                &v_weight_scale,
+                &input_rms_weight,
+                &q_rms_weight,
+                &k_rms_weight,
+                &kv_offset,
+                &rope_offset,
+                &cos,
+                &sin,
+                &mut k_cache,
+                &mut v_cache,
+                &mut q_out,
+            )).await,
+        "v157b" => launch(ops::sliding_project_qkv_v157b, (
+                ctx,
+                &x,
+                &q_weight,
+                &k_weight,
+                &v_weight,
+                &q_weight_scale,
+                &k_weight_scale,
+                &v_weight_scale,
+                &input_rms_weight,
+                &q_rms_weight,
+                &k_rms_weight,
+                &kv_offset,
+                &rope_offset,
+                &cos,
+                &sin,
+                &mut k_cache,
+                &mut v_cache,
+                &mut q_out,
+            )).await,
+        "v157e" => launch(ops::sliding_project_qkv_v157e, (
+                ctx,
+                &x,
+                &q_weight,
+                &k_weight,
+                &v_weight,
+                &q_weight_scale,
+                &k_weight_scale,
+                &v_weight_scale,
+                &input_rms_weight,
+                &q_rms_weight,
+                &k_rms_weight,
+                &kv_offset,
+                &rope_offset,
+                &cos,
+                &sin,
+                &mut k_cache,
+                &mut v_cache,
+                &mut q_out,
+            )).await,
         "v154" => launch(ops::sliding_project_qkv_v154, (
                 ctx,
                 &x,
@@ -615,6 +683,7 @@ fn compare(label: &str, expected: &[f32], actual: &[f32], atol: f32, rtol: f32) 
     let mut sum_diff = 0.0f64;
     let mut within = 0usize;
 
+    let mut bad: Vec<usize> = Vec::new();
     for (index, (&want, &got)) in expected.iter().zip(actual).enumerate() {
         if !got.is_finite() {
             println!("[{label:34}] FAIL -- non-finite device output at {index}");
@@ -623,6 +692,8 @@ fn compare(label: &str, expected: &[f32], actual: &[f32], atol: f32, rtol: f32) 
         let diff = (want - got).abs();
         if diff <= atol + rtol * want.abs() {
             within += 1;
+        } else {
+            bad.push(index);
         }
         if diff > max_diff {
             max_diff = diff;
@@ -633,6 +704,16 @@ fn compare(label: &str, expected: &[f32], actual: &[f32], atol: f32, rtol: f32) 
 
     let count = expected.len();
     let ok = within == count;
+    if !ok {
+        // Diagnostic (measurement only): which 256-element rows / 64-element groups fail, as a
+        // histogram, so a broadcast that misses some slices can be located.
+        let mut rows = std::collections::BTreeMap::<usize, usize>::new();
+        for &i in &bad {
+            *rows.entry(i / 64).or_insert(0) += 1;
+        }
+        let summary: Vec<String> = rows.iter().map(|(r, n)| format!("{r}:{n}")).collect();
+        println!("    bad groups (index/64 : count) = {}", summary.join(" "));
+    }
     let relative = if expected[max_index].abs() > 1e-12 {
         max_diff / expected[max_index].abs() * 100.0
     } else {
@@ -757,6 +838,7 @@ async fn main() {
     );
 
     let mut failures = Vec::new();
+    let mut samples: Vec<(String, u64)> = Vec::new();
     for test in TESTS {
         if profile {
             println!("==> {} {}", test.name, test.variant);
@@ -791,7 +873,10 @@ async fn main() {
 
         if profile {
             match cycles {
-                Some(c) => println!("    cycles={c}"),
+                Some(c) => {
+                    println!("    cycles={c}");
+                    samples.push((format!("{} {}", test.name, test.variant), c));
+                }
                 None => println!("    cycles=none observed"),
             }
             println!();
@@ -800,6 +885,30 @@ async fn main() {
         if !ok {
             failures.push(test.name);
         }
+    }
+
+    // Summary per (kernel, variant): first launch is cold; median/stdev over the rest.
+    let mut keys: Vec<String> = samples.iter().map(|(k, _)| k.clone()).collect();
+    keys.dedup();
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+    println!("\nsummary (cold = first launch; median/stdev over the later launches)");
+    for key in keys {
+        let vals: Vec<u64> = samples.iter().filter(|(k, _)| *k == key).map(|(_, c)| *c).collect();
+        let cold = vals[0];
+        let mut warm: Vec<u64> = vals[1..].to_vec();
+        warm.sort_unstable();
+        let (median, stdev) = if warm.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let n = warm.len();
+            let median = if n % 2 == 1 { warm[n / 2] as f64 } else { (warm[n / 2 - 1] + warm[n / 2]) as f64 / 2.0 };
+            let mean = warm.iter().sum::<u64>() as f64 / n as f64;
+            let var = warm.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / n as f64;
+            (median, var.sqrt())
+        };
+        println!("    {key:40} n={} cold={cold} median={median:.0} stdev={stdev:.0} min={} max={}",
+            vals.len(), warm.first().copied().unwrap_or(cold), warm.last().copied().unwrap_or(cold));
     }
 
     println!();
