@@ -107,8 +107,13 @@ pub fn sliding_project_qkv(
     );
 
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
-    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
-    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+    // V146 ablation: the two ring-cache scatters (index-dependent DMAs) become plain stores of
+    // the same bytes into HBM scratch, so that their hardware cost can be read off the cycle
+    // count (accuracy fails by design: the caches are never written).
+    let mut k_scratch: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
+    k.view().to_hbm_view(&mut ctx.tdma, k_scratch.view_mut());
+    let mut v_scratch: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
+    v.view().to_hbm_view(&mut ctx.tdma, v_scratch.view_mut());
 }
 
 #[device(chip = 1)]
@@ -147,8 +152,13 @@ pub fn full_project_qkv(
     let (q, k) = full::rope::apply_rope(ctx, &q, &k, rope_offset, cos, sin);
 
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
-    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
-    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+    // V146 ablation: the two ring-cache scatters (index-dependent DMAs) become plain stores of
+    // the same bytes into HBM scratch, so that their hardware cost can be read off the cycle
+    // count (accuracy fails by design: the caches are never written).
+    let mut k_scratch: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
+    k.view().to_hbm_view(&mut ctx.tdma, k_scratch.view_mut());
+    let mut v_scratch: HbmTensor<bf16, Chip, m![Ns, Ds]> = HbmTensor::new();
+    v.view().to_hbm_view(&mut ctx.tdma, v_scratch.view_mut());
 }
 
 #[device(chip = 1)]
