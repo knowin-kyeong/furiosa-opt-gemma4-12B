@@ -46,14 +46,26 @@ ensure_worktree() {
         fi
     fi
     [ -d "$WT/auto" ] || { log "worktree has no auto/ dir"; return 1; }
-    git -C "$WT" pull -q --rebase origin "$RB" 2>>"$LOG" || log "worktree pull failed (continuing with local copy)"
+    # The worktree is never merged with origin (a rebase can stall on identity or conflicts and
+    # would silently stop the chain): results accumulate on the local branch, and the queue is
+    # always read straight from origin (see read_queue).
+    git -C "$WT" config user.name auto-driver
+    git -C "$WT" config user.email auto-driver@runpod
+    git -C "$WT" rebase --abort >/dev/null 2>&1 || true
     mkdir -p "$WT/auto/results" "$WT/auto/logs"
+}
+
+# The queue as last pushed to origin (people append lines there); falls back to the local copy.
+read_queue() {
+    git -C "$REPO" show "origin/$RB:auto/queue.txt" > "$STATE/queue.txt.new" 2>/dev/null && mv "$STATE/queue.txt.new" "$STATE/queue.txt"
+    [ -f "$STATE/queue.txt" ] || cp "$WT/auto/queue.txt" "$STATE/queue.txt" 2>/dev/null
+    grep -v '^[[:space:]]*#' "$STATE/queue.txt" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$'
 }
 
 publish() {
     git -C "$WT" add -A auto >>"$LOG" 2>&1
-    git -C "$WT" -c user.name=auto-driver -c user.email=auto-driver@runpod commit -q -m "auto: $1" >>"$LOG" 2>&1 || true
-    git -C "$WT" push -q origin "$RB" >>"$LOG" 2>&1 || { log "push failed for $1 (kept locally)"; git -C "$WT" pull -q --rebase origin "$RB" >>"$LOG" 2>&1; git -C "$WT" push -q origin "$RB" >>"$LOG" 2>&1 || log "push retry failed for $1"; }
+    git -C "$WT" commit -q -m "auto: $1" >>"$LOG" 2>&1 || true
+    git -C "$WT" push -q origin "$RB" >>"$LOG" 2>&1 || log "push failed for $1 (kept in $WT; needs a deploy key, RULES §11)"
 }
 
 # id = entry with characters outside [A-Za-z0-9_] replaced (Arena job names, file names)
@@ -120,7 +132,7 @@ run_entry() {
 log "driver start (deadline $(date -u -d @"$(deadline)" +%FT%TZ 2>/dev/null))"
 while ! past_deadline; do
     if ! ensure_worktree; then log "worktree unavailable, retrying in $POLL_SECONDS s"; sleep "$POLL_SECONDS"; continue; fi
-    mapfile -t QUEUE < <(grep -v '^[[:space:]]*#' "$WT/auto/queue.txt" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$')
+    mapfile -t QUEUE < <(read_queue)
     did=0
     for entry in "${QUEUE[@]}"; do
         id=$(entry_id "$entry")
