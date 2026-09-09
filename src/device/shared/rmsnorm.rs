@@ -34,6 +34,25 @@ pub(crate) fn normalize_reduced<Cluster: M, Slice: M>(
     x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
     rms_weight: &HbmTensor<bf16, Chip, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+    let normalized = normalize_reduced_f32::<Cluster>(ctx, x, rms_weight);
+
+    ctx.main
+        .begin(normalized.view())
+        .fetch::<m![1], m![H % 480]>()
+        .switch::<Slice, m![H / 480]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 1 })
+        .collect::<m![H / 8], m![H % 8]>()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit()
+}
+
+/// The normalized vector as f32, still in the reducing layout (before the gather onto one
+/// slice and the bf16 rounding), for consumers that continue in that layout.
+pub(crate) fn normalize_reduced_f32<Cluster: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> {
 
     let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .main
@@ -96,8 +115,7 @@ pub(crate) fn normalize_reduced<Cluster: M, Slice: M>(
         .collect::<m![1], m![1 # 8]>()
         .to_vrf();
 
-    let normalized: DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
-        .main
+    ctx.main
         .begin(x.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
@@ -109,15 +127,6 @@ pub(crate) fn normalize_reduced<Cluster: M, Slice: M>(
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
         .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
         .vector_final()
-        .commit_trim::<m![H % 8]>()
-        .commit();
-
-    ctx.main
-        .begin(normalized.view())
-        .fetch::<m![1], m![H % 480]>()
-        .switch::<Slice, m![H / 480]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 1 })
-        .collect::<m![H / 8], m![H % 8]>()
-        .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit()
 }

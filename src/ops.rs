@@ -245,23 +245,24 @@ pub fn decoder_feedforward(
     // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
     // the pre-FF normalization and the final residual add.
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    let x = shared::rmsnorm::normalize_reduced::<Cluster, Slice>(ctx, &residual, pre_ff_rms_weight);
+    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &residual, pre_ff_rms_weight);
 
     // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
-    // (54k cycles), an HBM-to-DM replicated load at ~3x that.
-    let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
+    // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
+    // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
+    let (x2_hbm, erf_scale, out_scale) =
+        shared::mlp::stage_x_hi_lo_hbm(ctx, &x, up_global_scale, gate_global_scale);
     let x = shared::mlp::feedforward(
         ctx,
-        &x_hbm,
+        &x2_hbm,
+        &erf_scale,
+        &out_scale,
         up_weight_packed,
         gate_weight_packed,
         down_weight_packed,
         up_weight_scale,
         gate_weight_scale,
         down_weight_scale,
-        up_global_scale,
-        gate_global_scale,
         down_global_scale,
     );
 
