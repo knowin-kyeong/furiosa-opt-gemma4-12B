@@ -97,3 +97,17 @@ V121_ffn_down_16_16_8_8_8_4
 V122_ffn_up12x5_down16_16_16_12
 V123_ffn_up16_12_12_12_8_down16_16_16_12
 V124_ffn_up12x5_down16_16_12_12_4
+
+# attn_out O-projection tile sweep (the third kernel, untouched so far)
+V125_attnout_tiles_60x1
+V126_attnout_tiles_12x5
+V127_attnout_tiles_4x15
+V128_attnout_tiles_16_16_16_12
+V129_attnout_tiles_16_16_12_8_8
+V130_attnout_tiles_8x7_4
+V131_attnout_tiles_40_20
+V132_attnout_tiles_24_20_16
+V133_attnout_tiles_28_16_16
+V134_attnout_tiles_32_16_12
+V135_attnout_tiles_20_20_12_8
+V136_attnout_tiles_48_12
