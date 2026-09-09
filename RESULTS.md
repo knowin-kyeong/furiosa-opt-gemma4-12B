@@ -12,12 +12,12 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
-| `V150_test_order_warm_repeat` | `V82` (tests/만 변경) | **측정 방법 탐침.** 채점 순서(qkv 첫 실행 = cold)가 qkv의 초과 비율·노이즈의 원인인지: 세 커널을 두 바퀴 + qkv 한 번 더 돌려 first-launch 비용과 프로세스 내 재현성을 한 잡에서 읽는다 | 61,381 | 27,424 | 157,763 | 5.244 | — | (V82와 동일 코드) | 설계됨 (2026-09-09 밤, 3차 체인) |
-| `V149_qkv_ablate_no_rope` | `V82` | **실물 ablation.** RoPE 단계(gather 2 + HBM hop + rotate pass)를 통째로 뺀다(head norm 유지). q/k FAIL이 정상; cycle만 읽는다 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
-| `V148_qkv_ablate_weights_only` | `V82` | **실물 ablation.** V145+V146: 투영과 store만 남긴 qkv — 옮겨야 하는 바이트의 하드웨어 하한 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
-| `V147_qkv_ablate_no_rope_gather` | `V82` | **실물 ablation.** cos/sin의 인덱스 gather 2개 + HBM hop을 같은 바이트의 평범한 [Ds] 로드(q/k norm weight를 대역)로 대체 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
-| `V146_qkv_ablate_no_scatter` | `V82` | **실물 ablation.** k/v ring-cache `dma_scatter` 2개(인덱스 의존 write)를 같은 바이트의 HBM 스크래치 store로 대체 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
-| `V145_qkv_ablate_no_tail` | `V82` | **실물 ablation.** head RMSNorm 3개 + RoPE를 빼고 ring-64 gather 직후의 raw 투영을 그대로 저장 — 후처리 tail 전체의 하드웨어 비용 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
+| `V150_test_order_warm_repeat` | `V82` (tests/만 변경) | **측정 방법 탐침.** 채점 순서(qkv 첫 실행 = cold)가 qkv의 초과 비율·노이즈의 원인인지: 세 커널을 두 바퀴 + qkv 한 번 더 돌려 first-launch 비용과 프로세스 내 재현성을 한 잡에서 읽는다 | 61,381 | 27,424 | 157,763 | 5.244 | cold 154,097 / 171,776 → **warm 145.6k~147.7k** | PASS | **측정 완료** — qkv 노이즈 = first-launch 비용 |
+| `V149_qkv_ablate_no_rope` | `V82` | **실물 ablation.** RoPE 단계(gather 2 + HBM hop + rotate pass)를 통째로 뺀다(head norm 유지). q/k FAIL이 정상; cycle만 읽는다 | 56,258 | 27,424 | 157,763 | — | qkv **141,431** (−7.7k) | FAIL(by design) | 측정 완료 |
+| `V148_qkv_ablate_weights_only` | `V82` | **실물 ablation.** V145+V146: 투영과 store만 남긴 qkv — 옮겨야 하는 바이트의 하드웨어 하한 | 53,583 | 27,424 | 157,763 | — | qkv **138,471** (−10.6k) | FAIL(by design) | 측정 완료 |
+| `V147_qkv_ablate_no_rope_gather` | `V82` | **실물 ablation.** cos/sin의 인덱스 gather 2개 + HBM hop을 같은 바이트의 평범한 [Ds] 로드(q/k norm weight를 대역)로 대체 | 58,583 | 27,424 | 157,763 | — | qkv **147,044** (−2.0k) | FAIL(by design) | 측정 완료 |
+| `V146_qkv_ablate_no_scatter` | `V82` | **실물 ablation.** k/v ring-cache `dma_scatter` 2개(인덱스 의존 write)를 같은 바이트의 HBM 스크래치 store로 대체 | 60,859 | 27,424 | 157,763 | — | qkv **157,677** (**+8.6k**) | FAIL(by design) | 측정 완료 — 스크래치 store가 scatter보다 비싸다 |
+| `V145_qkv_ablate_no_tail` | `V82` | **실물 ablation.** head RMSNorm 3개 + RoPE를 빼고 ring-64 gather 직후의 raw 투영을 그대로 저장 — 후처리 tail 전체의 하드웨어 비용 | 54,067 | 27,424 | 157,763 | — | qkv **132,646** (−16.4k) | FAIL(by design) | 측정 완료 |
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | 190,342 / 111,005 / 1,213,877 (**2.430**) | **PASS** | **채택** (실측) |
@@ -287,19 +287,41 @@ L=15360이면 60 × 256.
 
 (pod `auto/BOARD.md`에서 옮겨 적는다. 각 3회, 중앙값으로 판정.)
 
-| 브랜치 | qkv (3회) | attn_out | ffn | 비고 |
-|---|---|---|---|---|
-| V82 대조군 | | | | |
-| V150 (cold qkv / warm qkv ×2) | | | | |
-| V148 | | | | |
-| V145 | | | | |
-| V146 | | | | |
-| V147 | | | | |
-| V149 | | | | |
+(Arena job 15455~15500, 2026-09-09 13:00~14:00 UTC, 모두 cold = 프로세스의 첫 커널. 단위 cycle, 중앙값 굵게.)
 
-### 판정
+| 브랜치 | qkv 3회 | qkv 중앙값 | Δ vs V82 | attn_out 3회 | ffn 3회 | makespan qkv |
+|---|---|---:|---:|---|---|---:|
+| V82 대조군 (4회) | 150,492 · 140,555 · 147,672 · 156,864 | **149,082** | — | 55,916 · 52,318 · 56,206 · 55,822 | 351,138 · 352,482 · 349,646 · 352,936 | 61,381 |
+| V148 weights-only | 135,709 · 143,777 · 138,471 | **138,471** | −10.6k | 56,216 · 56,307 · 52,534 | 349,780 · 348,188 · 349,080 | 53,583 |
+| V145 no-tail | 132,646 · 139,224 · 132,350 | **132,646** | **−16.4k** | 54,409 · 55,428 · 56,540 | 346,588 · 365,610 · 346,594 | 54,067 |
+| V146 no-scatter | 159,780 · 157,574 · 157,677 | **157,677** | **+8.6k** | 57,772 · 57,862 · 53,878 | 349,480 · 351,422 · 347,102 | 60,859 |
+| V147 no-rope-gather | 147,044 · 149,296 · 145,743 | **147,044** | −2.0k | 55,788 · 57,506 · 54,960 | 345,320 · 349,248 · 346,728 | 58,583 |
+| V149 no-rope | 142,920 · 137,472 · 141,431 | **141,431** | −7.7k | 56,532 · 58,532 · 54,292 | 349,168 · 351,816 · 347,956 | 56,258 |
 
-- (측정 후 기록)
+V150 (같은 V82 코드, 한 프로세스에서 qkv·attn·ffn → qkv·attn·ffn → qkv):
+
+| job | qkv cold | qkv warm | qkv warm | attn cold → warm | ffn cold → warm |
+|---|---:|---:|---:|---|---|
+| 15474 | 154,097 | 145,593 | 147,681 | 60,994 → 57,260 | 352,174 → 351,350 |
+| 15492 | 171,776 | 145,775 | 146,687 | 58,350 → 57,044 | 352,124 → 350,930 |
+
+### 판정 (2026-09-09 밤)
+
+1. **qkv의 ±8% 노이즈는 전부 first-launch 비용이다.** warm qkv는 4회 모두 145.6k~147.7k(±0.7%)이고 cold는 140k~172k.
+   attn_out도 cold +1~4k, ffn은 차이 없음. 채점은 cold로 이뤄지므로 점수의 분산은 못 없애지만, **A/B 판정은 warm 반복으로 하면
+   1% 해상도가 나온다** → 앞으로 측정 바이너리는 V150식(같은 프로세스에서 2회 이상)으로 만든다.
+2. **qkv 실측의 89%는 weight 스트림 + x 스테이징이다** (V148 138k, V145 133k vs 149k). 후처리 tail 전체를 없애도 −16k(11%)이고,
+   RoPE 단계가 그중 −7.7k, gather+hop은 −2k, head norm ≈ −8k. 규칙 (c)에 가깝다: 남은 레버리지는 tail이 아니라
+   **weight/x 경로의 실물 비용**이다.
+3. **예상 밖의 발견: 스크래치(`HbmTensor::new()`)로의 store가 같은 바이트의 scatter보다 3~4k씩 비싸다.** V146(scatter 2개 →
+   스크래치 store 2개)이 +8.6k(3회 모두 157~160k, 분산 작음), V148도 V145 대비 +5.8k로 같은 방향. 정적 모델은 반대로 −0.5k를
+   예측한다. 스크래치는 컴파일러가 배치하므로 런타임 할당은 아니고("compiled program places its own buffers"), 남는 설명은
+   **컴파일러 배치 영역의 첫 접촉(page walk) 또는 배치 정렬**이다. 세 커널의 스크래치 store 수: qkv 4(x_hi·x_lo·cos·sin),
+   attn_out 3(x_hi·x_lo·gathered), ffn 8(x_hi·x_lo·erf·out·geglu hi·lo·inv_s·down). 각 3~4k라면 qkv 12~16k, attn_out 9~12k,
+   ffn 24~32k가 걸려 있다 — **세 커널 모두에 적용되는 가장 큰 단일 후보**다. 다음 실험(V151~)은 스크래치 대신 이미 접촉된
+   출력 버퍼(qkv `q_out`, attn_out/ffn `residual_hbm`)를 hop으로 쓴다.
+4. 사용자 지시(2026-09-09 밤): 공식 리더보드 제출은 **하루 5회로 간주**하고 확실한 개선만 올린다. Arena 잡도 남발하지 않는다 —
+   한 잡에 여러 변형을 warm 반복으로 담는 측정 바이너리(tests/ 변경은 채점에 무시됨)로 잡당 정보량을 최대화한다.
 
 ## 2026-09-09 야간 자동 체인 슬롯 (V40–V48) — 공통 근거
 
