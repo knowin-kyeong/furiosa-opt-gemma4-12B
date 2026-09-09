@@ -21,3 +21,13 @@ V57_attnout_x_copies_c8
 V58_ffn_upgate_x_copies_c8
 V59_ffn_down_geglu_copies_c8
 V60_all_x_copies_c8
+
+# copy-count sweep at the three non-qkv sites
+V61_attnout_x_copies_c2
+V62_attnout_x_copies_c4
+V63_ffn_upgate_copies_c2
+V64_ffn_upgate_copies_c4
+V65_ffn_down_copies_c2
+V66_ffn_down_copies_c4
+V67_all_x_copies_c4
+V68_all_x_copies_c2
