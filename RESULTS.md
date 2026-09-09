@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | — | — | — | — | — | — | 설계됨 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
 | `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
@@ -344,6 +345,22 @@ L=15360이면 60 × 256.
   **실측 검증 필요.**
 
 ### 판정: makespan 측정 (실측 대기)
+
+## V36_qkv_scales_in_head_norms
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V35_attnout_trunc_split`
+- **가설:** qkv makespan = DMA 큐 42.7k + 공백 2.2k + 1.6k. 큐의 비-weight 항목 중 `projection.rs:124` K/V weight-scale 로드가
+  각 838(2048 bf16을 512 슬라이스 × 4원소 = 8 B 디스크립터 512개), Q scale 로드 792(16 B × 512)가 Q weight 뒤·V weight 앞에
+  있다. head norm은 한 head가 한 슬라이스에 있는 레이아웃(HeadSlicesPerCluster, 클러스터당 4 슬라이스)이라 scale [Qs]/[Ps]를
+  `[Ns, Gs, Ds]`/`[Ns, Ds]`로 보고 그 레이아웃에 로드하면 디스크립터 8개(gamma 로드와 같은 ~555). mean-square pass는
+  `MulF(Mul1, scale)` → stash → `MulF(Mul0, Stash)`, normalize pass는 `MulF(Mul1, scale)` → DivF → MulF(Mul0, gamma)(V는 → div).
+  투영의 scale pass(Main 345 × 3, V 것은 tail)도 사라진다. 소비자가 tail(head norm)이라 스케줄러가 로드를 V weight 뒤에
+  둘 수 있다(그러면 −2.5k). 앞에 두더라도 −0.8k.
+- **변경 파일:** `src/device/sliding/projection.rs`(scale 제거), `src/device/sliding/rmsnorm.rs`(`*_heads`에 channel_scale), `src/ops.rs`
+- **정확도:** 지금은 bf16(f32(bf16 합)·scale) → norm; 바꾸면 bf16 합에 f32로 scale을 곱해 바로 norm(중간 bf16 반올림 1회 제거,
+  오히려 정확). 실측 검증 필요.
+- **예상:** qkv −0.8k ~ −2.5k.
 
 ## V35_attnout_trunc_split
 
