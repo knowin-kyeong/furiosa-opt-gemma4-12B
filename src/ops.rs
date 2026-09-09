@@ -1343,6 +1343,54 @@ pub fn decoder_feedforward_f174b(
 }
 
 #[device(chip = 1)]
+pub fn decoder_feedforward_v181(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
+    // the pre-FF normalization and the final residual add.
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &residual, pre_ff_rms_weight);
+
+    // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
+    // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
+    // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
+    let (x2_hbm, erf_scale, out_scale) =
+        shared::mlp::stage_x_hi_lo_hbm_full(ctx, &x, up_global_scale, gate_global_scale);
+    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    let x = shared::mlp::feedforward_v181(
+        ctx,
+        &x2_hbm,
+        &erf_scale,
+        &out_scale,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        down_global_scale,
+        &mut down_hbm,
+    );
+
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+#[device(chip = 1)]
 pub fn final_norm_and_logits(
     ctx: &mut Context,
     input: &HbmTensor<bf16, Chip, m![H]>,
