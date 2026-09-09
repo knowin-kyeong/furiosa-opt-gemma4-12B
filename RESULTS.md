@@ -14,7 +14,7 @@ RNGD cycles만 점수다.
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
 | `V162_attnout_two_tiles_broadcast` (V162 48/12, V163 40/20) | `V159` | attn_out O-weight DMA 타일 3 → 2(Phase C 단발 −2.5k)를 v161(x2 broadcast) 위에 얹어 base·v161·v162·v163을 한 잡에서 4회씩 | — | 28,223 (v162) / 27,900 (v163) | — | — | — | ? | 구현됨 (`29fa190`), Arena 2잡 큐 |
 | `V160_qkv_weights_half_descriptors` | `V157` | **weight 스트림이 디스크립터 발행에 묶였는지 검증.** Q를 클러스터당 128 live 슬라이스 × 16행(`m![Qs / 16 % 128, 1 # 2]`), K/V를 128 × 8행으로 → weight당 디스크립터 512 → 256, 슬라이스당 바이트 2배. head gather는 stride-2 ring-64(`Broadcast1 { slice1: 64, slice0: 2 }`). v157a와 같은 잡에서 비교 | 45,791 | 27,424 | 157,763 | — | — | ? | 구현됨 (`184f370`), Arena 2잡 큐 |
-| `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | — | — | 구현됨, Arena 3잡 큐 (리더보드 제출은 사용자 지시 대기) |
+| `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | job 15566: qkv **cold 107,552** / warm 108,556 · 110,686; attn_out 58,474 / 57,830; ffn 353,628 / 351,700 | **3/3 PASS** | **채택 후보 (실측 SOTA)** — 리더보드 제출은 사용자 지시 대기 |
 | `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | 44,792 (qkv v157a) | **27,663** (v161) | **155,561** (v159) | — | — | ? | 구현됨 (`2ac4b3c`), Arena 2잡 큐 |
 | `V157_qkv_x_ring_broadcast_both_clusters` | `V154` | V155의 진단: `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 **실제 클러스터 축 `Qs / 2048`** 위에서 하고 끝에 Replicated로 reshape. (a) 실축 직접 로드 + 32 B 패킷 ring 32, (b) 더미축 로드 후 reshape → switch, (e) 실축 16부 ring 16 | 44,792 (a·b) / 44,998 (e) | 27,424 | 157,763 | — | job 15563: qkv v157a **108,374** (cold 117,689, stdev 1.3k) · v157b 111,920 · v157e 108,641 vs base 151,163 (cold 163,293) | **3/3 PASS** (전 실행) | **채택 후보 — qkv −28%** → 프로덕션 V158 |
 | `V155_qkv_x_ring_broadcast_forms` | `V154` | V154의 기전을 유지하고 **매핑 표기만 바꾼 4형**: (a) 32 B 패킷 시간축을 switch에 통과, (f) `Dummy256 / 32, 1 # 32` → `Dummy256 / 32, Dummy256 % 32` 단일 축 인수분해 ring 32, (e) 16부 + ring 16(정적 3.8k), (d) 4부 + ring 64. 하네스에 실패 원소의 64-그룹 히스토그램과 변형별 cold/median/stdev 요약 추가 | 44,792 (a·g) / 44,998 (e) / 45,099 (d) | 27,424 | 157,763 | — | job 15559: v155a **106,734** (stdev 1.7k) · g 107,168 · e 108,295 (stdev 207) · d 108,393 vs base 150,823 (stdev 6.2k) | 네 형 모두 FAIL — **cluster 1만 틀림**(q 행 2048~4095, k/v head 4~7), cluster 0은 완전히 맞음 | **기전 확인, 원인 = 더미 클러스터 축** → V157 |
@@ -323,6 +323,13 @@ attn_out O-weight DMA 타일(각 1회):
 
 **설계 원칙(갱신):** DMA 디스크립터 수(그리고 같은 HBM 영역을 여러 디스크립터가 반복 읽는 패턴)를 먼저 센다. 큰 복제 로드는 "적은 디스크립터 +
 on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적은 슬라이스)로.
+
+## V158_qkv_x_ring32_broadcast — 프로덕션 (2026-09-09 15:48 UTC, job 15566)
+
+- **분기점:** `V82_ffn_up_tiles_12x5` (`07a187f`) + `src/ops.rs`의 qkv x 복제 17줄(V157 (a)형). 커밋 `ce9b659`. tests/만 cold/warm 7회 하네스.
+- **실측 (job 15566, 3/3 PASS):** qkv **107,552 (cold)** · 108,556 · 110,686; attn_out 58,474 · 57,830; ffn 353,628 · 351,700.
+- **공식 baseline 기준 예상:** qkv 250,514/107,552 = 2.33×, attn_out(공식 52.5k) 7.71×, ffn(350k) 10.58× → 기하평균 **≈5.7** (1위 5.667).
+- **판정:** 채택 후보(실측 SOTA). 리더보드 제출은 사용자 지시 후.
 
 ## V157_qkv_x_ring_broadcast_both_clusters — qkv −28%, 3/3 PASS (2026-09-09 15:38 UTC, job 15563)
 
