@@ -34,7 +34,8 @@
 | `V20_qkv_tail_per_cluster` (…+V20 누적) | 51,631 | 31,113 | 186,976 | 5.048× |
 | `V22_attnout_weight_tiles` (…+V22 누적) | 51,631 | 30,487 | 186,976 | 5.082× |
 | `V23_ffn_whole_scale_loads` (…+V23 누적) | 51,631 | 30,487 | 181,625 | 5.131× |
-| `V24_gather_before_hbm_store` (…+V24 누적) | 50,981 | 30,037 | 179,922 | **5.180×** |
+| `V24_gather_before_hbm_store` (…+V24 누적) | 50,981 | 30,037 | 179,922 | 5.180× |
+| `V25_ffn_geglu_two_clusters` (…+V25 누적) | 50,981 | 30,037 | 170,158 | **5.277×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
