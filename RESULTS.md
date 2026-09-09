@@ -12,6 +12,12 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
+| `V150_test_order_warm_repeat` | `V82` (tests/만 변경) | **측정 방법 탐침.** 채점 순서(qkv 첫 실행 = cold)가 qkv의 초과 비율·노이즈의 원인인지: 세 커널을 두 바퀴 + qkv 한 번 더 돌려 first-launch 비용과 프로세스 내 재현성을 한 잡에서 읽는다 | 61,381 | 27,424 | 157,763 | 5.244 | — | (V82와 동일 코드) | 설계됨 (2026-09-09 밤, 3차 체인) |
+| `V149_qkv_ablate_no_rope` | `V82` | **실물 ablation.** RoPE 단계(gather 2 + HBM hop + rotate pass)를 통째로 뺀다(head norm 유지). q/k FAIL이 정상; cycle만 읽는다 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
+| `V148_qkv_ablate_weights_only` | `V82` | **실물 ablation.** V145+V146: 투영과 store만 남긴 qkv — 옮겨야 하는 바이트의 하드웨어 하한 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
+| `V147_qkv_ablate_no_rope_gather` | `V82` | **실물 ablation.** cos/sin의 인덱스 gather 2개 + HBM hop을 같은 바이트의 평범한 [Ds] 로드(q/k norm weight를 대역)로 대체 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
+| `V146_qkv_ablate_no_scatter` | `V82` | **실물 ablation.** k/v ring-cache `dma_scatter` 2개(인덱스 의존 write)를 같은 바이트의 HBM 스크래치 store로 대체 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
+| `V145_qkv_ablate_no_tail` | `V82` | **실물 ablation.** head RMSNorm 3개 + RoPE를 빼고 ring-64 gather 직후의 raw 투영을 그대로 저장 — 후처리 tail 전체의 하드웨어 비용 | — | 27,424 | 157,763 | — | — | FAIL(by design) | 설계됨 |
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
 | `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | 190,342 / 111,005 / 1,213,877 (**2.430**) | **PASS** | **채택** (실측) |
@@ -248,6 +254,52 @@ L=15360이면 60 × 256.
 - **배운 것:**
 - **다음 후보:**
 ======================================================================= -->
+
+## 2026-09-09 밤 3차 체인 — qkv 실물 ablation 사다리 (V145–V150)
+
+- **상태:** 설계됨 → 구현됨 (브랜치 push 완료, 코드는 V82 위 한 곳씩 변경)
+- **분기점:** `V82_ffn_up_tiles_12x5` (`07a187f`)
+- **왜 ablation인가:** qkv는 정적 모델이 맞지 않는 유일한 커널이다 — 실측/makespan 비가 2.3~2.7(다른 둘은 2.05~2.2)이고
+  같은 바이너리가 ±8% 흔들린다. V138(x 바이트 절반, makespan −16%)이 실측에서 무변화였고 V52(사본)는 +10k였으므로,
+  "어느 구성요소가 실물에서 얼마인가"를 **정적 모델이 아니라 하드웨어에 직접 물어야** 한다. 각 브랜치는 qkv의 한 구성요소를
+  같은 바이트의 더 단순한 DMA로 바꾸거나 통째로 뺀다. 정확도는 설계상 FAIL이고 cycle만 읽는다(V138이 FAIL에서도 cycle을
+  보고함을 확인했다). 제출 제한이 없어졌으므로 **각 3회 반복**하고 V82 대조군을 사이사이에 넣어 세션 중 드리프트를 본다.
+- **qkv만 가진 것(다른 두 커널에는 없음):** 인덱스 의존 DMA 4개(`dma_gather_scaled` ×2, `dma_scatter` ×2), cos/sin의 HBM
+  hop(store 2 + load 2), 512 슬라이스가 같은 7.5 KB를 읽는 복제 로드, 그리고 **채점 순서상 첫 실행**(cold). 사다리는 이 넷을 하나씩 뗀다.
+- **판정 규칙 (사전 등록):** W = median(V148), B = median(V82 대조군), C = V150의 두 번째 qkv(warm).
+  (a) C ≈ 2.1 × makespan ≈ 125k이면 초과분의 상당 부분은 first-launch 비용이고 정적 모델은 복권된다 — V16~V37식 정적 최적화를
+  V82 위에 다시 쌓는 쪽으로 간다(단 채점은 cold라 이득은 125k 기준으로 잰다).
+  (b) B − W ≥ 25k이면 tail/gather/scatter가 표적이고, V145/146/147/149 중 어느 것이 그 몫을 설명하는지에 따라 다음 설계를 고른다.
+  (c) B − W < 10k이면 qkv는 실물에서 weight 스트림에 묶인 것이고, 남은 일은 대역폭 패턴(V8식 인터리브의 실물 A/B) 뿐이다.
+- **변경 파일:** `src/ops.rs` (V145/146/148/149), `src/device/sliding/rope.rs` + `src/ops.rs` (V147), `tests/test_kernels.rs`만 (V150).
+- **공유 코드 영향:** 없음 (V147은 `apply_rope_heads` 시그니처에 stub 인자 2개 추가 — 호출처는 sliding qkv뿐).
+
+| 브랜치 | 커밋 | 뺀 것 / 바꾼 것 | 남는 것 |
+|---|---|---|---|
+| `V145_qkv_ablate_no_tail` | `24a62a2` | head RMSNorm ×3, RoPE 전부 | 입력 norm, x 스테이징, weight 3개 + contract, ring-64 gather, q store, k/v scatter |
+| `V146_qkv_ablate_no_scatter` | `a69f041` | `dma_scatter` ×2 → `to_hbm_view` 스크래치 store ×2 | 나머지 전부 |
+| `V147_qkv_ablate_no_rope_gather` | `0877fec` | `dma_gather_scaled` ×2 + HBM hop → `[Ds]` 평범한 로드 ×2 (q/k norm weight를 대역) | RoPE 산술은 그대로 |
+| `V148_qkv_ablate_weights_only` | `f3d9e9f` | V145 + V146 | 투영 + store만 (바이트 하한) |
+| `V149_qkv_ablate_no_rope` | `b971cd8` | `apply_rope_heads` 호출 제거 | head norm 유지 |
+| `V150_test_order_warm_repeat` | `42a9dec` | tests/의 TESTS를 qkv·attn·ffn ×2 + qkv로 | 커널 코드 = V82 |
+
+### 측정
+
+(pod `auto/BOARD.md`에서 옮겨 적는다. 각 3회, 중앙값으로 판정.)
+
+| 브랜치 | qkv (3회) | attn_out | ffn | 비고 |
+|---|---|---|---|---|
+| V82 대조군 | | | | |
+| V150 (cold qkv / warm qkv ×2) | | | | |
+| V148 | | | | |
+| V145 | | | | |
+| V146 | | | | |
+| V147 | | | | |
+| V149 | | | | |
+
+### 판정
+
+- (측정 후 기록)
 
 ## 2026-09-09 야간 자동 체인 슬롯 (V40–V48) — 공통 근거
 
