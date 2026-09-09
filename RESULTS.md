@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 4-lane 곱, 91k) 제거: LUT를 contraction fetch에 융합하고 `contract_packet::<m![L / 16 % 2]>`로 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial(원소 1/16)에만 scale을 곱해 intra→inter reduce(pass B). 수치는 f32 합산 순서만 다름 | — | — | — | — | — | — | 설계됨 |
+| `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
 | `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
@@ -46,8 +46,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V28_ffn_tile_shapes`**
-(…+V28 누적, 기하평균 5.292×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V29_ffn_block_scale_after_contract`**
+(…+V29 누적, 기하평균 5.324×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -309,12 +309,63 @@ L=15360이면 60 × 256.
   MulF → `vector_intra_slice_reduce::<L, …>` → widen_pad → inter-slice reduce(8 chunk) → bf16 transpose commit.
   수학적으로 Σ_b s_b Σ_{j∈b} w_j x_j = 현재 Σ_j (w_j s_b) x_j; bf16(w·s)는 유효 6비트라 현재도 exact이므로 차이는
   f32 합산 순서뿐.
-- **예상:** VE 121k → ~45k (pass A는 LUT 속도 6~12 elem/cycle에 묶임, pass B는 원소 1/16). down 단계가 DMA-bound가
-  되어 makespan ≈ DMA 종료 150k + 4행 타일 ~2k + store/norm 8.5k ≈ 160k (−8k). 실물에서는 dequant pass가 사라진
-  만큼 확실히 이득.
-- **리스크:** `contract_lane` Sequential 모드·시간 무축약 조합의 lowering, 패딩 패킷 `m![L / 16 % 2 # 8]`의 commit_trim,
-  pass A 처리량(LUT-bound 값 미지).
-- **변경 파일:** `src/device/shared/mlp.rs`
+- **예상:** VE 121k → ~45k. down 단계가 DMA-bound가 되어 makespan ≈ 160k (−8k).
+- **변경 파일:** `src/device/shared/mlp.rs`(전면 재구성), `src/device/shared/rmsnorm.rs`(`normalize_reduced_f32` 추가), `src/ops.rs`
+
+### 실제 설계 (구현하며 바뀐 것)
+
+- fetch adapter는 f4→f8(paired LUT)과 f8→bf16(non-paired LUT)을 **한 fetch에 연달아 걸 수 없고**(`CanApplyFetchTableLookup`은
+  첫 fetch 위치에서만), `FetchCast<bf16> for f8`도 없다 → bf16 스트림은 DM 사본을 거쳐야 하고 그러면 LUT pass가 2개(`?` 838
+  DMA ×2). 대신 **f8 × f8 contraction**(`ContractionWeight<f8e4m3>`, f32 누산)을 쓴다: x = hi + lo, hi = f8e4m3(x·s),
+  lo = f8e4m3(x·s − hi). bf16 x(유효 8비트)·s(2^k)는 4비트짜리 두 조각으로 정확히 분해된다(|x·s| ≥ 2^-5, 즉 max|x|/4096
+  이상에서; 그 아래는 e4m3 subnormal이라 ≤ 2^-10·(1/s) 절대오차). TRF 원소는 `m![Dummy2, C % 1920]`, contraction fetch의
+  시간축에 `Dummy2`를 넣어 weight 패킷을 두 번 스트림하면(`fetch::<m![R, C / 64 % 30, Dummy2], m![C % 64]>`) `contract_time`이
+  Dummy2를 축약해 hi·w + lo·w를 f32로 더한다(accumulator 32 cell). LUT pass는 타일당 1개 그대로.
+- **동적 스케일 s**: 픽스처의 geglu 출력은 ~1e-3라 e4m3(정상 최소 2^-6)에 그대로 넣으면 정밀도가 무너진다. s = 2^⌊log2(128/√max x²)⌋
+  (max|x·s| ∈ (64, 128])를 벡터별로 계산: max x²(intra reduce Max → inter reduce Max), sqrt, `DivF Mode10 128`, `BitAnd +Inf`
+  (지수만 남김), `DivF Mode10 1`. head는 rmsnorm의 ReducingSlices(8슬라이스, inter reduce 가능)에서, down 입력은 geglu 출력의
+  gathered 레이아웃에서 슬라이스별 max를 ring-256 switch로 모아 클러스터별 s_c. 1/s는 geglu 스칼라(s_gate/(s√2), s_up·s_gate/(2s²))에,
+  1/s_c는 down pass B의 MulF(Mul1)에 접는다(HBM `[L / 7680, 1 # 8]` → 슬라이스 2개 로드 → 순열 broadcast switch).
+- pass A: `fetch(f4) → LUT f8 → collect 32 B → contract_outer(64 B 패킷) → contract_packet::<m![C / 16 % 4]> → contract_time(무축약, Dummy2만)
+  → contract_lane::<…, m![C / 16 % 4 # 8]>(Sequential) → commit_trim 16 B` → f32 partial `m![R, C / 16 % 120]` 조밀. 16행 타일 5,063
+  (LUT 12.1 elem/cycle, 스트림 2배). pass B: 기존 scale VRF 레이아웃 그대로 MulF → `intra_slice_reduce::<C>` → widen → inter-slice
+  reduce → transpose commit (16행 822).
+- x2 HBM 스크래치는 `[C / 1920, Dummy2, C % 1920]`로 두어 슬라이스당 1세그먼트 로드(`[Dummy2, C]`면 2세그먼트라 5,637).
+
+### 측정 (변형별, ffn)
+
+| 변형 | ffn | 비고 |
+|---|---:|---|
+| V28 | 168,757 | |
+| V29b (첫 설계, DM에서 hi/lo 조립) | 161,356* | 스케줄은 나오나 lir ICE(`no entry found for key`) — Dummy2 크기-1 tile에 `commit_view` |
+| V29e (HBM tile store로 조립, 스케일 없음) | 172,342* | lir ICE — Slice 레이아웃에서 f8 cast를 1920 tile에 commit |
+| E6 (down만 새 경로, up/gate 구 경로) | 164,900 | 통과. down 단계 VE-bound 해소 확인 |
+| V29f (head hi/lo를 ReducingSlices에서, 스케일 없음) | 166,587 | 통과. DMA +5.4k(x2 로드 2세그먼트 5,637, store 2회) |
+| **V29h (동적 스케일, `[C/1920, Dummy2, C%1920]`, 스칼라 switch broadcast)** | **165,733** | 채택. DMA 158.0k / Main 76k / VE 20k |
+| V29k (스칼라 2개를 DM tile-view DMA로 모아 switch 1회, inv_s 직접 로드) | 166,124 | DMA −1.1k인데 makespan +0.4k |
+| V29l (V29h + inv_s 512-desc 직접 로드) | 166,733 | +1k |
+| **기하평균 (V0 대비 누적)** | | **5.324** |
+
+\* ICE 전에 덤프된 스케줄의 값(유효 커널 아님).
+
+- **정확도:** 수학적으로 Σ_b s_b Σ_{j∈b} w_j x_j = 현재와 동일(f32 합산 순서만 다름). hi/lo 분해는 max|x|/4096 이상에서 exact,
+  그 아래 원소는 ≤ 2^-10/s 절대오차(픽스처 x∈[0,1.7], geglu 출력 ~1e-3 모두 s가 흡수). **실측 정확도 검증 필요**(hard gate).
+  s 계산의 padded 패킷(4/8 live)에서 padding lane이 0으로 채워진다는 가정(Max reduce)이 있다.
+- **측정 방식:** makespan only. 이득이 예상(−8k)보다 작은 이유: switch pass마다 `?` DmaLoad 838이 붙고(스칼라 broadcast·cluster
+  max·순열 broadcast 4개 = +3.4k), x2 store가 phase당 2회(head 553×2, down 1,653×2), 스칼라 store/load. DMA 152.7k → 158.0k.
+- **컴파일러 교훈 (신규):** (1) `commit_view`를 크기-1 tile(`m![Dummy2], 1`)에 쓰면 lir ICE; 같은 tile로의 **HBM store/load와
+  DM tile-view로의 DMA 로드는 된다**. (2) 다른 하위구조의 같은 축(`L % 3840 = 960` 스트림 → `L % 7680 = 960` tile)으로 commit 불가
+  (`StreamUnmatchedSegment`). (3) `HbmTensor<[Dummy2, 1 # 8]>`의 tile store는 lowering에서 버퍼 크기 검사 실패. (4)
+  `TagMode::AxisToggle`은 `Ident`(문자열 상수)라 device 함수에서 불가; pair API(`vector_intra_slice_unzip`)는 두 그룹을 zip해 하나로
+  합치는 용도. (5) `contract_packet` 입력은 32/64 B, `contract_lane`은 [Lane, Packet] 누산기 1024 cell. (6) fetch 시간축에 텐서에
+  없는 Dummy 축을 넣으면 복제 스트림. (7) `vector_fp_div_with_mode(BinaryArgMode::Mode10, c)` = c / stream;
+  `vector_logic(LogicBinaryOpF32::BitAnd, f32::INFINITY)` = 지수 마스크. (8) switch pass 하나당 `?` DmaLoad 838.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** VE 병목을 없애도 이 커널은 DMA 큐(158k)가 makespan을 정하고, 새 경로가 만든 소형 DMA(switch `?`, store 2회)가
+  이득을 갉아먹는다. 다음은 DMA 바이트/디스크립터 자체(scale 29k, hop 3.3k+2.5k)와 tail 10k.
+- **다음 후보:** down x2 store 2회 → 1회(조립 방법 필요), post-norm hop, 그리고 qkv(V26 H-split, 가장 뒤처진 커널).
 
 ## V13_ffn_dma_trims
 
