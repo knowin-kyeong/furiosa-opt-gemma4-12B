@@ -421,12 +421,14 @@ pub(crate) fn feedforward(
     let mut gate_partials: DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> = DmTensor::new();
     contract_up_gate_rows_60(ctx, &x_trf, &up0, 0, &mut up_partials);
     contract_up_gate_rows_60(ctx, &x_trf, &gate0, 0, &mut gate_partials);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 0, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 0, &mut gate);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 16, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 16, &mut gate);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 32, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 32, &mut gate);
+    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 12, &mut up);
+    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 12, &mut gate);
+    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 24, &mut up);
+    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 24, &mut gate);
+    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 36, &mut up);
+    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 36, &mut gate);
     reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 48, &mut up);
     reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 48, &mut gate);
 
