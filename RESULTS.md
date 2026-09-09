@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | — | — | — | — | — | — | 설계됨 |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
@@ -346,6 +347,19 @@ L=15360이면 60 × 256.
   **실측 검증 필요.**
 
 ### 판정: makespan 측정 (실측 대기)
+
+## V38_post_norm_store_from_reducing
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V37_ffn_upgate_pass_a_big_tiles`
+- **가설:** attn_out tail(V35): normalize pass 401 → switch pass 744 → store 434 → 600; ffn tail도 같은 switch 744(163,955)가
+  마지막에 있다. switch는 [H]를 `Slice`(한 슬라이스) 레이아웃으로 옮겨 1 디스크립터 store를 하기 위한 것인데, store는
+  ReducingSlices(8 슬라이스 × 960 B, 8 디스크립터)에서도 ~450이다(`load_reducing`의 역방향; qkv의 x2 store와 같은 급).
+  normalize pass의 `vector_final()` 뒤에 `cast::<bf16, m![H % 8 # 16]>`를 붙여 bf16 ReducingSlices 텐서를 내고 그대로 store.
+  switch config 로드(`?` 719)도 DMA 큐에서 빠진다.
+- **변경 파일:** `src/device/shared/rmsnorm.rs`(`normalize_add_scaled_reduced`·`normalize_add_gate_reduced`가 ReducingSlices bf16 반환), `src/ops.rs`
+- **정확도:** 데이터 이동만 변경(cast 위치 동일: f32 → bf16 1회).
+- **예상:** attn_out −0.7k ~ −0.9k, ffn −0.7k ~ −1.4k.
 
 ## V37_ffn_upgate_pass_a_big_tiles
 
