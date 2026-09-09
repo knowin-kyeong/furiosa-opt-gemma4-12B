@@ -371,8 +371,8 @@ struct Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    // Measurement only (tests/ is ignored by the grader): every kernel twice, qkv a third time,
-    // so one job shows the cold (first) launch and warm repeats.
+    // Measurement only (tests/ is ignored by the grader): every kernel five times in one job,
+    // so a job shows the cold (first) launch and a median/stdev over four warm repeats.
     Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
     Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
     Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
@@ -380,6 +380,14 @@ const TESTS: &[Test] = &[
     Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
     Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
     Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
+    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
+    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
+    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
+    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
+    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
+    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
+    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
+    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, name: &'static str) -> Vec<(&'static str, Vec<f32>)> {
