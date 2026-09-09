@@ -163,3 +163,5 @@ V190_attnout_x_on_chip#r2
 V191_production_rope_tiles#c1
 V191_production_rope_tiles#c2
 V191_production_rope_tiles#c3
+V192_rope_blend_fused
+V192_rope_blend_fused#r2
