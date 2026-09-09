@@ -61,4 +61,10 @@ V136_attnout_tiles_48_12
 # harness: each variant cold+warm in one job; three jobs for the cold draws.
 V151_hop_via_outputs_probe
 V151_hop_via_outputs_probe#r2
-V151_hop_via_outputs_probe#r3
+# V151_hop_via_outputs_probe#r3  (dropped: first job showed no gain, v152 FAIL)
+
+# Phase B2 - qkv x replication as 16 HBM descriptors + ring-32 CustomBroadcast (static 61.4k -> ~44.8k).
+# Harness: base/v154 alternating, cold then warm; three jobs.
+V154_qkv_x_ring32_broadcast
+V154_qkv_x_ring32_broadcast#r2
+V154_qkv_x_ring32_broadcast#r3
