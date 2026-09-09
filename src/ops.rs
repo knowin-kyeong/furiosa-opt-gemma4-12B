@@ -301,6 +301,97 @@ pub fn decoder_feedforward(
 }
 
 #[device(chip = 1)]
+pub fn sliding_project_qkv_q6(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H]>,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    q_weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+    k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    input_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    q_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    k_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    kv_offset: &HbmTensor<i32, Chip, m![1]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    k_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+) {
+    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
+
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
+    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &x, input_rms_weight);
+
+    // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
+    // staging the vector in HBM and loading it back replicated runs at HBM DMA speed. x goes as
+    // two f8 pieces of x times a power of two (their sum is exact), which the projections
+    // contract as f8 x f8 with no lookup pass; the head RMSNorms that follow are
+    // scale-invariant, so the factor is never undone.
+    // One copy, not sixteen: a copy axis the source lacks does not replicate the store (V50).
+    let x2_hbm = shared::mlp::stage_x_hi_lo_qkv_hbm(ctx, &x);
+    // Replicating x onto the 512 slices as one HBM load costs 512 DMA descriptors that all read
+    // the same 7.7 KB: on hardware that is ~45k cycles, not the 18k of the static model (V154).
+    // Instead eight copies per cluster come from HBM (16 descriptors) and a ring-32 switch
+    // broadcast fills each copy's 32 slices (V157: qkv 151k -> 108k, 3/3 PASS). The copies are
+    // loaded and switched on a real cluster axis: a pass on the dummy axis BothClusters serves
+    // one cluster only (V155).
+    let x8: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, 1 # 32], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
+        .main
+        .begin(x8.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
+    let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
+    let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
+
+    // q, k and v come back one head per slice; the head-wise RMSNorms and RoPE stay in that
+    // layout (no transposes in or broadcasts out) and the outputs are written from it.
+    let q = sliding::projection::project_query(ctx, &x, &q_weight);
+    let (k, v) = sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight);
+
+    // The projections' per-channel weight scales are folded into the head RMSNorms (their
+    // loads are eight descriptors in the head layout instead of 512 in the projection layout).
+    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &q,
+        q_weight_scale,
+        q_rms_weight,
+    );
+    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &k,
+        k_weight_scale,
+        k_rms_weight,
+    );
+    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &v,
+        v_weight_scale,
+    );
+
+    let (q, k) = sliding::rope::apply_rope_heads_q6::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &q,
+        &k,
+        rope_offset,
+        cos,
+        sin,
+    );
+
+    q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
+    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
+    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+}
+
+#[device(chip = 1)]
 pub fn final_norm_and_logits(
     ctx: &mut Context,
     input: &HbmTensor<bf16, Chip, m![H]>,
