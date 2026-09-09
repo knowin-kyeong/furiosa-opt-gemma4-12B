@@ -396,13 +396,14 @@ pub(crate) fn feedforward(
     let gate0 = load_up_gate_rows_60(ctx, gate_weight_packed, 0);
     let gate_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> =
         gate_weight_scale.to_dm(&mut ctx.tdma);
-    let down0 = load_down_rows_16(ctx, down_weight_packed, 0);
+    let down0 = load_down_rows_12(ctx, down_weight_packed, 0);
     let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
-    let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
-    let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
-    let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
-    let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
+    let down1 = load_down_rows_12(ctx, down_weight_packed, 12);
+    let down2 = load_down_rows_12(ctx, down_weight_packed, 24);
+    let down3 = load_down_rows_12(ctx, down_weight_packed, 36);
+    let down4 = load_down_rows_8(ctx, down_weight_packed, 48);
+    let down5 = load_down_rows_4(ctx, down_weight_packed, 56);
 
     // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA).
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![Dummy2, H % 1920]> = x2.to_dm(&mut ctx.tdma);
@@ -458,15 +459,17 @@ pub(crate) fn feedforward(
         .to_trf();
 
     let mut down: DmTensor<bf16, Chip, DownClusters, DownRows, m![H % 60]> = DmTensor::new();
-    let p = contract_down_rows_16(ctx, &x_trf, &down0);
-    reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
-    let p = contract_down_rows_16(ctx, &x_trf, &down1);
-    reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
-    let p = contract_down_rows_16(ctx, &x_trf, &down2);
-    reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let p = contract_down_rows_8(ctx, &x_trf, &down3);
+    let p = contract_down_rows_12(ctx, &x_trf, &down0);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down1);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 12, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down2);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 24, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down3);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 36, &mut down);
+    let p = contract_down_rows_8(ctx, &x_trf, &down4);
     reduce_down_rows_8(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
-    let p = contract_down_rows_4(ctx, &x_trf, &down4);
+    let p = contract_down_rows_4(ctx, &x_trf, &down5);
     reduce_down_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 56, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
@@ -641,5 +644,6 @@ macro_rules! down_tile_fns {
     };
 }
 down_tile_fns!(load_down_rows_16, contract_down_rows_16, reduce_down_rows_16, 16);
+down_tile_fns!(load_down_rows_12, contract_down_rows_12, reduce_down_rows_12, 12);
 down_tile_fns!(load_down_rows_8, contract_down_rows_8, reduce_down_rows_8, 8);
 down_tile_fns!(load_down_rows_4, contract_down_rows_4, reduce_down_rows_4, 4);
