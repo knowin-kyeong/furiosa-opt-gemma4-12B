@@ -317,6 +317,30 @@ pub(crate) fn apply_rope_heads_hop<C: M, S: M>(
     rope_heads_from_tables(ctx, q, k, &cos, &sin)
 }
 
+/// `apply_rope_heads` with the table rows gathered straight into the head layout: the byte
+/// offset is replicated eight times by a load (an axis absent from the source replicates), the
+/// [Ns] index lands in HBM with one descriptor, and each gather then fetches one row per head.
+/// No HBM hop (V50 restored it because a gather cannot replicate an absent destination axis;
+/// with a real [Ns] index there is nothing to replicate).
+pub(crate) fn apply_rope_heads_idx8<C: M, S: M>(
+    ctx: &mut Context,
+    q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+) -> (
+    DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    DmTensor<bf16, Chip, C, S, m![Ds]>,
+) {
+    let idx8: DmTensor<i32, Chip, Cluster, Slice, m![Ns]> = rope_offset.to_dm(&mut ctx.tdma);
+    let mut idx8_hbm: HbmTensor<i32, Chip, m![Ns]> = HbmTensor::new();
+    idx8.view().to_hbm_view(&mut ctx.tdma, idx8_hbm.view_mut());
+    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos.dma_gather_scaled(&idx8_hbm);
+    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin.dma_gather_scaled(&idx8_hbm);
+    rope_heads_from_tables(ctx, q, k, &cos, &sin)
+}
+
 /// RoPE on q and k (one head per slice) from cos/sin rows already in that layout.
 fn rope_heads_from_tables<C: M, S: M>(
     ctx: &mut Context,
