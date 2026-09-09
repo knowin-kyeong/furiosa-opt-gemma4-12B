@@ -113,7 +113,23 @@ run_entry() {
     timeout 3600 cargo furiosa-opt test --release --test test_kernels --no-run > "$STATE/logs/$id.build.log" 2>&1; build_rc=$?
     log "$id build rc=$build_rc"
 
-    # 3. Arena (only when logged in and the binary exists)
+    # 3. host CPU emulator accuracy run (advisory; see auto/BOARD.md header)
+    cpu=skip
+    if [ "$build_rc" -eq 0 ] && [ "${AUTO_CPU_TEST:-1}" = "1" ]; then
+        timeout 3600 bash "$STATE/cpu_test.sh" > "$STATE/logs/$id.cpu.log" 2>&1
+        crc=$?
+        if grep -q "all 3 tests passed\|3 passed" "$STATE/logs/$id.cpu.log" 2>/dev/null; then cpu=pass
+        elif grep -q "panicked at" "$STATE/logs/$id.cpu.log" 2>/dev/null; then cpu=panic
+        elif [ "$crc" -eq 124 ]; then cpu=timeout
+        else cpu=fail; fi
+        # the qkv verdicts alone, which the emulator does evaluate faithfully on the baseline
+        qkvv=$(grep -o "sliding_project_qkv [qkv] .*-> [A-Z]*" "$STATE/logs/$id.cpu.log" 2>/dev/null | grep -o "[A-Z]*$" | tr "
+" "/" )
+        [ -n "$qkvv" ] && cpu="$cpu(qkv ${qkvv%/})"
+        log "$id cpu=$cpu"
+    fi
+
+    # 4. Arena (only when logged in and the binary exists)
     arena=pending
     if [ "$build_rc" -ne 0 ]; then
         arena="n/a"
@@ -125,8 +141,8 @@ run_entry() {
         log "$id arena pending (not logged in)"
     fi
 
-    python3 "$STATE/record.py" "$WT" "$id" "$entry" "$dump_rc" "$build_rc" "$arena" "$STATE/logs" $V0 >>"$LOG" 2>&1
-    publish "$id dump=$dump_rc build=$build_rc arena=$arena"
+    python3 "$STATE/record.py" "$WT" "$id" "$entry" "$dump_rc" "$build_rc" "$arena" "$STATE/logs" $V0 "$cpu" >>"$LOG" 2>&1
+    publish "$id dump=$dump_rc build=$build_rc cpu=$cpu arena=$arena"
     log "=== $id end"
 }
 
