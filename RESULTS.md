@@ -13,7 +13,7 @@ RNGD cycles만 점수다.
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
 | `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | — | — | 구현됨, Arena 3잡 큐 (리더보드 제출은 사용자 지시 대기) |
-| `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | — | — | — | — | — | ? | 구현됨, 컴파일 검증 중 |
+| `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | 44,792 (qkv v157a) | **27,663** (v161) | **155,561** (v159) | — | — | ? | 구현됨 (`2ac4b3c`), Arena 2잡 큐 |
 | `V157_qkv_x_ring_broadcast_both_clusters` | `V154` | V155의 진단: `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 **실제 클러스터 축 `Qs / 2048`** 위에서 하고 끝에 Replicated로 reshape. (a) 실축 직접 로드 + 32 B 패킷 ring 32, (b) 더미축 로드 후 reshape → switch, (e) 실축 16부 ring 16 | 44,792 (a·b) / 44,998 (e) | 27,424 | 157,763 | — | job 15563: qkv v157a **108,374** (cold 117,689, stdev 1.3k) · v157b 111,920 · v157e 108,641 vs base 151,163 (cold 163,293) | **3/3 PASS** (전 실행) | **채택 후보 — qkv −28%** → 프로덕션 V158 |
 | `V155_qkv_x_ring_broadcast_forms` | `V154` | V154의 기전을 유지하고 **매핑 표기만 바꾼 4형**: (a) 32 B 패킷 시간축을 switch에 통과, (f) `Dummy256 / 32, 1 # 32` → `Dummy256 / 32, Dummy256 % 32` 단일 축 인수분해 ring 32, (e) 16부 + ring 16(정적 3.8k), (d) 4부 + ring 64. 하네스에 실패 원소의 64-그룹 히스토그램과 변형별 cold/median/stdev 요약 추가 | 44,792 (a·g) / 44,998 (e) / 45,099 (d) | 27,424 | 157,763 | — | job 15559: v155a **106,734** (stdev 1.7k) · g 107,168 · e 108,295 (stdev 207) · d 108,393 vs base 150,823 (stdev 6.2k) | 네 형 모두 FAIL — **cluster 1만 틀림**(q 행 2048~4095, k/v head 4~7), cluster 0은 완전히 맞음 | **기전 확인, 원인 = 더미 클러스터 축** → V157 |
 | `V154_qkv_x_ring32_broadcast` | `V82` (하네스는 V151 브랜치 것) | **x 복제 로드(512 디스크립터, 정적 18.4k, util 0.157) → HBM에서 클러스터당 8부(16 디스크립터) + ring-32 `CustomBroadcast`(32 × 240 flit).** 책의 문서화된 형태(`1 # 32` 패딩 슬롯 → live 축). V138이 "바이트가 아니다"를 보였으므로 디스크립터 수를 512 → 16으로 | **44.8k** (v154; switch pass 7,943) | 27,424 | 157,763 | — | job 15555/15556/15557: qkv v154 **104,968 / 111,154 / 107,652** (base 152,427 / 144,741 / 151,148) | qkv **FAIL** (q/k/v 원소 54~57%만 tol 안, max\|Δ\| 6~7) | **−40k(−28%) 확인, 정확도만 남음** → V155 |
@@ -310,7 +310,8 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 | v157b | 더미축 로드 → reshape → switch | 105,642 | 111,920 | 2,222 |
 | v157e | 실축 16부/클러스터, ring 16 | 107,985 | 108,641 | 1,435 |
 
-- **정확도:** 세 변형 모두 매 실행 PASS(q/k/v, 잡 exit 0).
+- **두 번째 잡(15564):** base cold 149,240 / median 149,991 (stdev 2.3k); v157a cold 104,162 / **median 105,874** (stdev 668); v157b 107,432; v157e 108,435.
+- **정확도:** 두 잡 모두 세 변형 매 실행 PASS(q/k/v, 잡 exit 0).
 - **판정:** **채택 후보.** qkv 151k → 108k(−28%)는 attn_out 52.5k·ffn 350k와 합쳐 기하평균 5.09 → **≈5.6** (1위 5.667과 동급).
   프로덕션 브랜치 V158에 (a)형을 적용해 cold 3회를 잰 뒤 사용자 지시로 리더보드에 낸다.
 
