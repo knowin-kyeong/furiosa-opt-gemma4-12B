@@ -18,13 +18,14 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | — | — | — | — | — | — | 설계됨 |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
 | `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
 | `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
 | `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
-| `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
+| `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | V34로 대체 |
 | `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
 | `V25_ffn_geglu_two_clusters` | `V24` | up/gate의 HBM hop(store 4,535×2 + load 1,328×2 = 11.7k)을 없앤다: geglu를 두 클러스터 reduce 출력 레이아웃(슬라이스당 60행, V18식 패딩 패킷)에서 직접 수행; 출력 store 앞 ring-16 gather로 4,535 → 1,870 | 50,981 | 30,037 | **170,158** | **5.277** | — | — | makespan 측정 |
 | `V24_gather_before_hbm_store` | `V23` | (a) 투영 출력을 HBM에 쓰기 전 클러스터 안 switch gather → **기각**(live 슬라이스가 8칸 간격이라 ring 256, 2,055 = store 절감분); (b) post-norm 피연산자(x·residual)를 HBM에서 ReducingSlices로 직접 로드, ffn global scale을 8슬라이스 레이아웃에서 → **채택** | **50,981** | **30,037** | **179,922** | **5.180** | — | — | makespan 측정 |
@@ -342,6 +343,21 @@ L=15360이면 60 × 256.
   **실측 검증 필요.**
 
 ### 판정: makespan 측정 (실측 대기)
+
+## V34_attnout_scale_in_rmsnorm
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V33_attnout_immediate_scale` (V27 슬롯의 계획; V27은 V26 위에 예약돼 있어 새 번호로)
+- **가설:** V33 큐 선두는 x 로드 535 → **weight-scale 로드 594** → x_hi store → tile0. scale의 소비자(Sub의 scale VRF pass)가
+  의존성이 없어 일찍 잡히므로 로드가 앞에 선다. 투영 epilogue에서 scale 곱(narrow_split/MulF/widen, 타일 pass 956)을 빼고
+  bf16 합만 내보내면 로드가 큐 선두에서 사라지고(−594) 마지막 타일 pass가 짧아진다. scale은 post-attn RMSNorm이
+  ReducingSlices(8 디스크립터)로 tail에서 로드(DMA가 노는 구간)해 mean-square pass와 normalize pass에 `MulF(Mul1)`로 접는다
+  (pass당 Mul0·Mul1 각 1회 규칙 안).
+- **변경 파일:** `src/device/sliding/projection.rs`(`project_output`에서 scale 제거), `src/device/shared/rmsnorm.rs`
+  (`normalize_add_scaled_reduced` 추가), `src/ops.rs`
+- **정확도:** bf16 반올림 지점이 바뀐다: 지금은 bf16(f32합·scale), 바꾸면 bf16(f32합)·scale(f32). 상대 오차 크기 동일(2^-9),
+  값은 비트 단위로 다를 수 있음. 실측 검증 필요.
+- **예상:** attn_out −0.6k ~ −0.9k.
 
 ## V33_attnout_immediate_scale
 
