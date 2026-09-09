@@ -67,11 +67,13 @@ pub fn sliding_project_qkv(
     // all reading the same 7.5 KB ran at half the DMA rate of a normal tile load. x goes as
     // two f8 pieces of x times a power of two (their sum is exact), which the projections
     // contract as f8 x f8 with no lookup pass; the head RMSNorms that follow are
-    // scale-invariant, so the factor is never undone.
+    // scale-invariant, so the factor is never undone. The projections split H across the
+    // two slices of a row group, so each slice loads only its 1920-column half (one segment).
     let x2_hbm = shared::mlp::stage_x_hi_lo_copies_hbm(ctx, &x);
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, m![Dummy256 / 16, Dummy256 % 16], m![Dummy2, H]> =
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, m![Dummy256 / 16, Dummy8, H / 1920], m![Dummy2, H % 1920]> =
         x2_hbm.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, sliding::projection::XHalves, m![Dummy2, H % 1920]> =
+        unsafe { x.reshape() };
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 

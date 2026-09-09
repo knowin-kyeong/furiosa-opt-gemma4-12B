@@ -151,7 +151,7 @@ pub(crate) fn stage_x_hi_lo_hbm(
 pub(crate) fn stage_x_hi_lo_copies_hbm(
     ctx: &mut Context,
     normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
-) -> HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, Dummy2, H]> {
+) -> HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, H / 1920, Dummy2, H % 1920]> {
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .main
         .begin(normalized.view())
@@ -179,12 +179,17 @@ pub(crate) fn stage_x_hi_lo_copies_hbm(
     let (s, _inv_s) = pow2_scale_reducing(ctx, &m_all);
     let s_vrf = stage_packet_reducing(ctx, &s);
 
+    // Laid out so that a slice's column half of both pieces is one contiguous segment.
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, Dummy2, H]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(1));
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, H / 1920, Dummy2, H % 1920]> = HbmTensor::new();
+    x_hi.view().to_hbm_view(
+        &mut ctx.tdma,
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(0),
+    );
+    x_lo.view().to_hbm_view(
+        &mut ctx.tdma,
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(1),
+    );
     x2_hbm
 }
 
