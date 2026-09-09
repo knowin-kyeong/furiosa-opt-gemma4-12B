@@ -452,7 +452,8 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 ### 10.0a 2026-09-10 밤 3차 체인(12h+)이 남긴 상태 (최신)
 
-- **실측 SOTA 후보: `V165_qkv_broadcast_attnout_two_tiles`** (= V82 + qkv x 복제를 16 디스크립터 + ring-32 `CustomBroadcast`로(V158)
+- **공식 SOTA: `V165_qkv_broadcast_attnout_two_tiles` = 5.7576** (moa-submitter `d0239b5b`, 2026-09-09 17:15 UTC: qkv 105,544 / attn_out 53,374 / ffn 349,160). 새 실험은 여기서 분기한다.
+- (제출 전 기록) 실측 SOTA 후보: `V165_qkv_broadcast_attnout_two_tiles` (= V82 + qkv x 복제를 16 디스크립터 + ring-32 `CustomBroadcast`로(V158)
   + attn_out O-weight 타일 48/12). cold 6회 median qkv 109.5k / attn_out 53.9k / ffn 350.7k, 전부 PASS → 공식 baseline 기준 ≈5.66.
   **리더보드 제출은 사용자 지시가 있을 때만**(팀 Goat Chovy #1557, 현재 공식 5.086 = V82; 1위 5.667). 제출: pod `/root/lab`에서
   브랜치 체크아웃 후 `moa-submitter submit --source /root/lab` (로그인 토큰 30일).
