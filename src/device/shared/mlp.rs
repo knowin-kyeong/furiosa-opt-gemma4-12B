@@ -1035,8 +1035,3 @@ pub(crate) fn feedforward_v181(
 
     down
 }
-
-/// geglu on up and gate as the up/gate projections leave them: one row group of 60 per slice
-/// (replicated on both slices of a pair), both clusters. 60 f32 do not fill 8-wide packets, so
-/// every 4-element packet is padded to 8 and the vector passes work on the live half (the V18
-/// scale-packet pattern). The two scalars (erf argument factor and output factor, with the global
