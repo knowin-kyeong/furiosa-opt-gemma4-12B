@@ -68,3 +68,8 @@ V151_hop_via_outputs_probe#r2
 V154_qkv_x_ring32_broadcast
 V154_qkv_x_ring32_broadcast#r2
 V154_qkv_x_ring32_broadcast#r3
+
+# Phase B3 - which spelling of the ring broadcast the lowering gets right (V154 read 105-111k but half wrong).
+# Harness repeats: base x4, each of 4 variants x4, with failing-slice histogram and median/stdev.
+V155_qkv_x_ring_broadcast_forms
+V155_qkv_x_ring_broadcast_forms#r2
