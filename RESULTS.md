@@ -12,6 +12,7 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
+| `V151_hop_via_outputs_probe` (V151/V152/V153) | `V82` | **스크래치 → 접촉된 출력 버퍼 hop.** V146/V148이 보인 "스크래치 store가 scatter보다 3~4k 비싸다"를 세 커널에서 건설적으로 확인: qkv cos/sin hop을 `q_out` 행 0·1로(V151), attn_out 투영 출력 hop을 `residual_hbm`으로(V152), ffn down 출력 hop을 `residual_hbm`으로(V153). 변형 device fn 3개 + 각 변형 cold/warm 2회 하네스(tests/)를 한 잡에 | — | — | — | — | — | (수치 동일: 데이터 이동만) | 구현됨 (`aad0683`) — 컴파일 검증 중 |
 | `V150_test_order_warm_repeat` | `V82` (tests/만 변경) | **측정 방법 탐침.** 채점 순서(qkv 첫 실행 = cold)가 qkv의 초과 비율·노이즈의 원인인지: 세 커널을 두 바퀴 + qkv 한 번 더 돌려 first-launch 비용과 프로세스 내 재현성을 한 잡에서 읽는다 | 61,381 | 27,424 | 157,763 | 5.244 | cold 154,097 / 171,776 → **warm 145.6k~147.7k** | PASS | **측정 완료** — qkv 노이즈 = first-launch 비용 |
 | `V149_qkv_ablate_no_rope` | `V82` | **실물 ablation.** RoPE 단계(gather 2 + HBM hop + rotate pass)를 통째로 뺀다(head norm 유지). q/k FAIL이 정상; cycle만 읽는다 | 56,258 | 27,424 | 157,763 | — | qkv **141,431** (−7.7k) | FAIL(by design) | 측정 완료 |
 | `V148_qkv_ablate_weights_only` | `V82` | **실물 ablation.** V145+V146: 투영과 store만 남긴 qkv — 옮겨야 하는 바이트의 하드웨어 하한 | 53,583 | 27,424 | 157,763 | — | qkv **138,471** (−10.6k) | FAIL(by design) | 측정 완료 |
@@ -254,6 +255,40 @@ L=15360이면 60 × 256.
 - **배운 것:**
 - **다음 후보:**
 ======================================================================= -->
+
+## 2026-09-09 15:01 UTC — 첫 공식 리더보드 제출 (moa-submitter, V82)
+
+| 항목 | 값 |
+|---|---|
+| 팀 | **Goat Chovy #1557** (계정 knowin-kyeong, `moa-submitter login` 토큰 30일) |
+| submission | `23cc6523` (V82 `07a187f`의 `src/ops.rs` + `src/device/`) |
+| 공식 cycle | qkv **155,419** / attn_out **52,492** / ffn **349,760** |
+| 공식 score | **5.0860** (baseline 250,514 / 404,633 / 3,703,473 기준) |
+| 리더보드 | 2위. 1위 Participant #905: 123,470 / 53,028 / 315,050 = **5.667** |
+
+- 채점 서버의 수치는 Arena cold 실측과 같은 급이다(qkv 155k는 우리 cold 표본 140~172k 안, attn_out 52.5k, ffn 349.8k).
+  즉 **Arena cold = 채점 환경**이고 warm 수치는 A/B 전용이다.
+- 1위와의 차이는 qkv −32k(−21%), ffn −35k(−10%)이며 attn_out은 동급. qkv 123k는 우리 weights-only ablation(V148 138k)보다도
+  낮다 — 상대는 **weight/x 경로 자체**를 우리보다 싸게 흘린다(예: DMA 인터리브·x 분배 방식). 이것이 남은 캠페인의 표적이다.
+- 사용자 지시: Arena는 자유(50+/일), **moa-submitter는 사용자가 시킬 때까지 보류**.
+
+## V151_hop_via_outputs_probe (V151·V152·V153, 한 브랜치에 변형 3개)
+
+- **상태:** 구현됨 (`aad0683`, 2026-09-09 밤)
+- **분기점:** `V82_ffn_up_tiles_12x5`
+- **가설(하나):** 컴파일러가 배치한 HBM 스크래치(`HbmTensor::new()`)로의 store는 실물에서 같은 바이트의 scatter/기존 버퍼 store보다
+  3~4k 비싸다(V146 +8.6k, V148 vs V145 +5.8k; 정적 모델은 −0.5k). 호스트가 이미 접촉한 출력 버퍼를 hop으로 쓰면 그 비용이 사라진다.
+- **세 지점 (같은 기전, 커널별 변형 device fn):**
+  - `sliding_project_qkv_v151`: cos/sin hop → `q_out`을 `[Gf, Ds]`로 reshape한 행 0·1 (마지막 q store가 덮어씀). 스크래치 −2.
+  - `sliding_attention_output_v152`: 투영 출력 [H] hop → `residual_hbm`(먼저 reducing 레이아웃으로 로드해 둔 뒤 덮어쓰고, 최종 store가 다시 덮음). 스크래치 −1.
+  - `decoder_feedforward_v153`: down 출력 [H] hop → `residual_hbm`(같은 방식). 스크래치 −1.
+- **측정 방식:** tests/의 TESTS를 [base, base, v151, v151, attn base ×2, v152 ×2, ffn base ×2, v153 ×2, qkv base, v151]로 두어
+  한 Arena 잡에서 변형마다 cold(그 프로그램의 첫 실행)와 warm을 읽는다. 채점은 cold이므로 판정은 cold 차이(3잡 반복)와 warm 차이를 함께 본다.
+- **변경 파일:** `src/ops.rs`(변형 fn 3개 추가), `src/device/sliding/rope.rs`(`apply_rope_heads_hop`, `rope_heads_from_tables` 분리),
+  `src/device/sliding/projection.rs`(`project_output_into`), `src/device/shared/mlp.rs`(`feedforward_hop`), `tests/test_kernels.rs`.
+  기존 세 커널의 코드 경로는 불변(래퍼로 분리).
+- **정확도:** 데이터 이동만 변경. WAR(residual 로드 → hop store)은 컴파일러가 텐서 단위로 강제.
+- **기대:** qkv −6~8k, attn_out −3~4k, ffn −3~4k (기하평균 +3%). 통하면 남은 스크래치(qkv x2, attn_out x2, ffn 6개)의 pre-touch로 확장.
 
 ## 2026-09-09 밤 3차 체인 — qkv 실물 ablation 사다리 (V145–V150)
 
