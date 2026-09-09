@@ -77,35 +77,9 @@ pub fn sliding_project_qkv(
     let q = sliding::projection::project_query(ctx, &x, &q_weight);
     let (k, v) = sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight);
 
-    // The projections' per-channel weight scales are folded into the head RMSNorms (their
-    // loads are eight descriptors in the head layout instead of 512 in the projection layout).
-    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
-        ctx,
-        &q,
-        q_weight_scale,
-        q_rms_weight,
-    );
-    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
-        ctx,
-        &k,
-        k_weight_scale,
-        k_rms_weight,
-    );
-    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
-        ctx,
-        &v,
-        v_weight_scale,
-    );
-
-    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
-        ctx,
-        &q,
-        &k,
-        rope_offset,
-        cos,
-        sin,
-    );
-
+    // V145 ablation: no head RMSNorms and no RoPE. The raw projections are stored as they
+    // come out of the ring-64 gathers, so that the hardware cost of the whole post-processing
+    // tail can be read off the cycle count (accuracy fails by design).
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
     k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
     v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
