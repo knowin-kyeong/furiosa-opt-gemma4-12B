@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.616** | — | — | makespan 측정 |
+| `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
 | `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
 | `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
 | `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
@@ -51,7 +51,7 @@ RNGD cycles만 점수다.
 ## 현재 SOTA
 
 실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V33_attnout_immediate_scale`**
-(…+V33 누적, 기하평균 5.616×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+(…+V33 누적, 기하평균 5.618×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -355,7 +355,7 @@ L=15360이면 60 × 256.
 - **정확도:** V32와 동일(같은 상수, 같은 연산).
 - **예상:** attn_out −1.0k ~ −1.3k.
 
-### 측정: attn_out 29,318 → **28,002** (−1,316), 기하평균 5.616
+### 측정: attn_out 29,318 → **28,002** (−1,316), 기하평균 5.618
 
 - 첫 컴파일 통과. DMA 큐: x 로드 1,003–1,538 → weight-scale 로드 594 → x_hi store 2,132 → **tile0 로드 2,554**(V32c 3,922).
   DMA busy 22,393 동일(바이트 불변), VE 7.0k → 5.9k. 큐 선두에 남은 것: weight-scale 로드 594(첫 타일보다 앞), x 로드 535.
