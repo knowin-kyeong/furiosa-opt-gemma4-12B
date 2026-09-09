@@ -294,6 +294,50 @@ pub(crate) fn stage_x_hi_lo_hbm(
     (x2_hbm, erf_hbm, out_hbm)
 }
 
+/// The QKV input as two f8 pieces of x * s (see `stage_x_hi_lo_hbm`), written eight times so that
+/// the replicated load can spread over HBM channels (V15). The projections' outputs come out
+/// multiplied by s; the head RMSNorms that follow are scale-invariant (eps aside), so nothing
+/// undoes it.
+pub(crate) fn stage_x_hi_lo_copies_hbm(
+    ctx: &mut Context,
+    normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
+) -> HbmTensor<f8e4m3, Chip, m![Dummy8, Dummy2, H]> {
+    let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
+        .main
+        .begin(normalized.view())
+        .fetch::<m![H / 8 % 60], m![H % 8]>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit();
+
+    let m_local = max_square_reducing(ctx, &x);
+    let m_all: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![1 # 32, Dummy8], m![1]>(InterSliceReduceOpF32::Max)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = unsafe { m_all.reshape() };
+    let (s, _inv_s) = pow2_scale_reducing(ctx, &m_all);
+    let s_vrf = stage_packet_reducing(ctx, &s);
+
+    let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, Dummy2, H]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, Dummy2 = 1 #{!} 2, H]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, Dummy2 = 1 #{!} 2, H]>(1));
+    x2_hbm
+}
+
 /// The geglu output (gathered, eight row groups per slice) as two f8 pieces of x * s_c, s_c chosen
 /// per cluster from the cluster-wide max x^2 (each slice's max is broadcast to every slice of the
 /// cluster over a ring-256 switch and reduced there). Written to an HBM scratch laid out so that a

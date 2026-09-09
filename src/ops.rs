@@ -56,22 +56,22 @@ pub fn sliding_project_qkv(
     v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
     q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
 ) {
-    // The query weight is loaded and dequantized before anything that depends on x, which
-    // puts its 13.5k-cycle load at the head of the DMA queue (the scheduler orders loads by
-    // their consumer, not by issue order) and overlaps the lookup with x's staging.
     let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
 
     let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
-    let x = shared::rmsnorm::normalize_reduced::<Cluster, Slice>(ctx, &x, input_rms_weight);
+    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &x, input_rms_weight);
 
     // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
-    // staging the 7.5 KB vector in HBM and loading it back replicated runs at HBM DMA speed.
+    // staging the vector in HBM and loading it back replicated runs at HBM DMA speed.
     // Eight HBM copies of x, each read by a different eighth of the slices: 512 descriptors
-    // all reading the same 7.5 KB ran at half the DMA rate of a normal tile load.
-    let mut x_hbm: HbmTensor<bf16, Chip, m![Dummy8, H]> = HbmTensor::new();
-    x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let x: DmTensor<bf16, Chip, layout::BothClusters, m![Dummy256 / 8, Dummy8], m![H]> = x_hbm.to_dm(&mut ctx.tdma);
-    let x: DmTensor<bf16, Chip, layout::BothClusters, Replicated, m![H]> = unsafe { x.reshape() };
+    // all reading the same 7.5 KB ran at half the DMA rate of a normal tile load. x goes as
+    // two f8 pieces of x times a power of two (their sum is exact), which the projections
+    // contract as f8 x f8 with no lookup pass; the head RMSNorms that follow are
+    // scale-invariant, so the factor is never undone.
+    let x2_hbm = shared::mlp::stage_x_hi_lo_copies_hbm(ctx, &x);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, m![Dummy256 / 8, Dummy8], m![Dummy2, H]> =
+        x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 

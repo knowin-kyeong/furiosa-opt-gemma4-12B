@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Ds, Gs, H, Ns, Ps, Qs};
+use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
@@ -10,44 +10,37 @@ use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCl
 type QueryClusters = m![Qs / 2048];
 type QueryRows = m![Qs / 8 % 256];
 
-/// The query weight, dequantized to bf16 in its projection layout. Issued by the caller
-/// before anything that depends on x: the scheduler orders DMA by the program order of the
-/// consumer, so the lookup pass being first puts the 13.5k-cycle load at the head of the
-/// queue, and the pass itself runs while x is normalized, staged and replicated.
-pub(crate) type QueryWeight = DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8, H]>;
+/// The query weight in its projection layout, f8 as stored: it is contracted as f8 x f8 against
+/// the two f8 pieces of x (no lookup pass).
+pub(crate) type QueryWeight = DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8, H]>;
 
 pub(crate) fn load_query_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) -> QueryWeight {
-    let weight_f8: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8, H]> = weight.to_dm(&mut ctx.tdma);
-    ctx.main
-        .begin(weight_f8.view())
-        .fetch::<m![Qs % 8, H / 16], m![H % 16]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![Qs % 8, H / 16], m![H % 16]>()
-        .commit_trim::<m![H % 16]>()
-        .commit()
+    weight.to_dm(&mut ctx.tdma)
 }
 
 pub(crate) fn project_query(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     weight_f8: &QueryWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
-    // x is replicated onto every slice of both clusters.
-    let x: DmTensorView<'_, bf16, Chip, QueryClusters, QueryRows, m![H]> = unsafe { x.view().reshape() };
-    let x_trf: TrfTensor<bf16, Chip, QueryClusters, QueryRows, m![1], m![H]> = ctx
+    // x (two f8 pieces whose sum is bf16 x times a power of two) is replicated onto every
+    // slice of both clusters. Each weight packet is streamed twice (the Dummy2 time axis) so
+    // the Time Reducer adds the dot products with the two pieces.
+    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Dummy2, H]> = ctx
         .sub
         .begin(x)
-        .fetch::<m![1], m![H]>()
-        .collect::<m![H / 16], m![H % 16]>()
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .to_trf();
 
     let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
         .main
         .begin(weight_f8.view())
-        .fetch::<m![Qs % 8, H / 16], m![H % 16]>()
-        .collect::<m![Qs % 8, H / 16], m![H % 16]>()
-        .contract_outer::<m![Qs % 8, H / 32], m![H % 32], _, _, _>(&x_trf)
+        .fetch::<m![Qs % 8, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Qs % 8, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Qs % 8, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![Qs % 8]>()
         .contract_lane::<m![Qs % 8], m![1 # 8]>(LaneMode::Interleaved)
@@ -100,8 +93,7 @@ pub(crate) fn project_query(
 type KvClusters = m![Ps / 1024];
 type KvRows = m![Ps / 4 % 256];
 
-/// A K or V weight in its projection layout. (Splitting its lookup out like the query's
-/// does not help: the scheduler still issues the K/V loads only around their contractions.)
+/// A K or V weight in its projection layout, f8 as stored.
 pub(crate) type KvWeight = DmTensor<f8e4m3, Chip, KvClusters, KvRows, m![Ps % 4, H]>;
 
 pub(crate) fn load_kv_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) -> KvWeight {
@@ -110,17 +102,16 @@ pub(crate) fn load_kv_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip,
 
 fn project_one_kv_matrix(
     ctx: &mut Context,
-    x_trf: &TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]>,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]>,
     weight_f8: &KvWeight,
     weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
         .main
         .begin(weight_f8.view())
-        .fetch::<m![Ps % 4, H / 16], m![H % 16]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![Ps % 4, H / 16], m![H % 16]>()
-        .contract_outer::<m![Ps % 4, H / 32], m![H % 32], _, _, _>(x_trf)
+        .fetch::<m![Ps % 4, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Ps % 4, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps % 4, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![Ps % 4]>()
         .contract_lane::<m![Ps % 4], m![1 # 8]>(LaneMode::Interleaved)
@@ -168,7 +159,7 @@ fn project_one_kv_matrix(
 
 pub(crate) fn project_key_value(
     ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, BothClusters, Replicated, m![H]>,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     k_weight: &KvWeight,
     v_weight: &KvWeight,
     k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
@@ -177,12 +168,12 @@ pub(crate) fn project_key_value(
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
 ) {
-    let x: DmTensorView<'_, bf16, Chip, KvClusters, KvRows, m![H]> = unsafe { x.view().reshape() };
-    let x_trf: TrfTensor<bf16, Chip, KvClusters, KvRows, m![1], m![H]> = ctx
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]> = ctx
         .sub
         .begin(x)
-        .fetch::<m![H / 16], m![H % 16]>()
-        .collect::<m![H / 16], m![H % 16]>()
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .to_trf();
 
     let k = project_one_kv_matrix(ctx, &x_trf, k_weight, k_weight_scale);
