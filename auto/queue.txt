@@ -139,3 +139,7 @@ V165_qkv_broadcast_attnout_two_tiles#r12
 # Phase F - stream-ceiling probes (V172 qkv dup Q, V173 attn dup tile0, V174a/b ffn extra full-row vs segmented scale load), paired x3 each, x2 jobs.
 V172_stream_ceiling_probes
 V172_stream_ceiling_probes#r2
+
+# Phase G - V181 ffn up/gate as 30 whole rows per slice (static 157.8k -> 141.4k), base x4 + v181 x4 per job, x2 jobs.
+V181_ffn_upgate_full_rows
+V181_ffn_upgate_full_rows#r2
