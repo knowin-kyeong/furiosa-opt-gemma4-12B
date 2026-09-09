@@ -23,10 +23,10 @@ RNGD cycles만 점수다.
 | `V46_ffn_scalar_broadcast_merge` | `V39` | geglu 스칼라 2개(erf_scale·out_scale)의 broadcast_scalar_pairs가 각각 로드 521 + switch config 719를 낸다. 두 스칼라를 DM `[2, 1 # 8]` 하나에 tile-view 로드해 ring-256 switch 1회로 | — | — | — | — | — | — | 설계됨 (기대 ffn −1.2k) |
 | `V45_post_norm_in_producer_layout` | `V39` | attn_out·ffn tail의 출력 store 2,510(64 desc) + hop 1.6k + 8슬라이스 norm을 없애고 post-norm을 투영 reduce 레이아웃(클러스터당 32 row group × 60원소)에서 수행. mean-square 부분합은 클러스터 안 switch gather + 클러스터 간 HBM 스칼라 교환. 최종 store는 64 desc(2,510) | — | — | — | — | — | — | 설계됨 (순이득 ≈ −1k씩; 구현 비용 큼) |
 | `V44_ffn_scale_segments` | `V39` | block-scale 로드 9,774×3 = DMA 큐의 18.5%. 원인은 바이트(3.7 MB)가 아니라 **120 B 세그먼트 30,720개**(모델 ≈ 548 + bytes/1.21 KB + 0.2/세그먼트). 슬라이스가 full row(240 B × 60 = 1 세그먼트)를 읽고 자기 절반만 쓰려면 슬라이스별 fetch offset이 필요한데 fetch view는 전 슬라이스 공통이라 불가. 남은 길: (a) pair가 행(30/30)을 나누고 partials를 ring-2 switch로 교환 → scale 1 세그먼트(순 ≈ −1.5k/행렬) (b) 슬라이스 패리티 마스크(`TagMode::AxisToggle`은 Ident라 device fn 불가) | — | — | — | — | — | — | 설계됨 (보류: 분석 완료, 구현 경로 (a)만 유효) |
-| `V43_qkv_v_weight_tail_split` | `V39` | qkv tail 4.3k의 V contract 1,225: V weight를 슬라이스당 3행 + 1행 두 tile로 로드해 마지막 contract를 ~1/4로 (DMA 고정비 +548, 순 −0.3k) | — | — | — | — | — | — | 설계됨 |
-| `V42_attnout_tile_shapes` | `V39` | attn_out weight 타일 20/20/20 → 28/28/4: 마지막 타일 contract 956 → ~250이 tail에서 빠짐. 변형 24/24/12, 32/24/4 | — | — | — | — | — | — | 설계됨 (기대 attn_out −0.5k~−0.7k) |
-| `V41_x2_hbm_copies` | `V39` | ffn up/gate x2 로드 3,411(예측 2.2k)·down x2 로드 2,934·attn_out x2 로드 1,318(예측 980)은 같은 HBM 구간을 64~256 슬라이스가 반복해 읽는 패턴. V15처럼 HBM 스크래치에 8/16부 사본을 쓰고(`[Dummy8, …]`, store 디스크립터 불변) 슬라이스 매핑으로 사본을 분산 | — | — | — | — | — | — | 설계됨 (기대 ffn −1k~−1.5k, attn_out −0.3k) |
-| `V40_ffn_down_pass_a_big_tiles` | `V39` | ffn down 타일 5개(16/16/16/8/4)마다 DMA 고정 548 + LUT 테이블 838. V37처럼 pass A만 큰 타일(28/28/4, 타일별 60행 partials 버퍼에 tile commit)로 하고 pass B는 16/12행 tile view로 → 타일 2개 감소(−2.8k), 마지막 4행 타일은 유지해 tail 불변. 변형 20/20/16/4, 32/24/4 | — | — | — | — | — | — | 설계됨 (기대 ffn −2.8k) |
+| `V43_qkv_v_weight_tail_split` | `V39` | qkv tail 4.3k의 V contract 1,225: V weight를 슬라이스당 3행 + 1행 두 tile로 로드해 마지막 contract를 ~1/4로 | — | — | — | — | — | — | **기각 (설계)** — 슬라이스당 4행을 나누면 출력 commit_trim이 6 B/2 B가 되어 8 B 최소(bf16 4개)에 걸림; f32 출력이면 head norm 재작성 필요 |
+| `V42_attnout_tile_shapes` | `V39` | attn_out weight 타일 20/20/20 → 28/28/4: 마지막 타일 contract 956 → ~250이 tail에서 빠지길 기대 | 45,744 | **28,466** | 158,182 | 5.706 | — | — | **기각** (+1,042: 스케줄러가 4행 타일을 두 번째로 로드, 마지막 로드가 28행) |
+| `V41_x2_hbm_copies` | `V39` | ffn up/gate x2 로드 3,411·down x2 로드 2,934·attn_out x2 로드 1,318은 같은 HBM 구간을 64~256 슬라이스가 반복해 읽는 패턴. V15처럼 HBM 스크래치에 8부 사본을 쓰고(`[Dummy8, …]`, store 디스크립터 불변) 슬라이스 매핑으로 사본을 분산 | 45,744 | **27,272** | **157,282** | **5.801** | — | — | makespan 측정 (ffn −900, attn_out −152; 체인 대기) |
+| `V40_ffn_down_pass_a_big_tiles` | `V39` | ffn down 타일 5개(16/16/16/8/4)마다 DMA 고정 548 + LUT 테이블 838. pass A만 큰 타일로(타일별 60행 partials 버퍼에 tile commit), pass B는 ≤16행 tile view로 → 타일 수 감소 | 45,744 | 27,424 | 159,050 (a) / 159,781 (b) | 5.756 | — | — | **기각** — (a) 28/28/4 +868 (b) 16/24/16/4 +1,599 (c) pass B를 sub로: 컴파일 실패. pass A(316/행)가 다음 타일 로드(481/행+1,386) 안에 끝나려면 타일이 0.66배씩 줄어야 해 4행 마지막 타일 기준 5개가 최소 |
 | `V39_x2_single_store` | `V38` | x의 f8 hi/lo 두 조각을 HBM 스크래치에 tile store 2회(qkv 553×2, attn_out 377×2, ffn head 553×2·down 1,653×2)로 쓴다. 두 pass가 한 DM 버퍼(`m![Axis % 960]`, 실제 축의 480-tile 2개에 `commit_view`)에 쓰고 `[Dummy2, Axis % 480]`로 reshape해 store 1회로. 절단 split(V35)을 qkv/ffn에도 적용해 hi 재로드 없이 두 pass가 x만 읽게 | — | — | — | — | — | — | **실패** (StreamUnmatchedSegment) |
 | `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | — | — | makespan 측정 |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
@@ -40,7 +40,7 @@ RNGD cycles만 점수다.
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | V34로 대체 |
-| `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
+| `V26_qkv_hsplit_x_halved` | `V39` (2026-09-09 밤 구현; 원안 분기점 V25) | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.2k, x_trf 1.2k×2). x2 HBM 스크래치를 `[Dummy256/16, H/1920, Dummy2, H%1920]`로 두어 슬라이스당 1세그먼트 | — | — | — | — | — | — | 구현됨 (컴파일 결과는 아래 상세·체인 보드 참조) |
 | `V25_ffn_geglu_two_clusters` | `V24` | up/gate의 HBM hop(store 4,535×2 + load 1,328×2 = 11.7k)을 없앤다: geglu를 두 클러스터 reduce 출력 레이아웃(슬라이스당 60행, V18식 패딩 패킷)에서 직접 수행; 출력 store 앞 ring-16 gather로 4,535 → 1,870 | 50,981 | 30,037 | **170,158** | **5.277** | — | — | makespan 측정 |
 | `V24_gather_before_hbm_store` | `V23` | (a) 투영 출력을 HBM에 쓰기 전 클러스터 안 switch gather → **기각**(live 슬라이스가 8칸 간격이라 ring 256, 2,055 = store 절감분); (b) post-norm 피연산자(x·residual)를 HBM에서 ReducingSlices로 직접 로드, ffn global scale을 8슬라이스 레이아웃에서 → **채택** | **50,981** | **30,037** | **179,922** | **5.180** | — | — | makespan 측정 |
 | `V23_ffn_whole_scale_loads` | `V22` | FFN block scale을 pass 타일(15개, 36k) 대신 행렬당 1회 로드(슬라이스당 7.2 KB)로; V13b 재시도 | 51,631 | 30,487 | **181,625** | **5.131** | — | — | makespan 측정 |
@@ -65,8 +65,9 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V38_post_norm_store_from_reducing`**
-(…+V38 누적, 기하평균 5.779×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V41_x2_hbm_copies`**
+(V38 + x2 8부 사본, 기하평균 5.801×; V39·V40·V42·V43·V26 기각, V27은 V34/V35에 흡수). 문서 최신본도 이 브랜치에 있다.
+야간 자동 체인의 실측/빌드 결과는 pod `/root/auto/wt/auto/BOARD.md`(RULES §11). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -206,10 +207,29 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
   줄어 −2 × 1.4k ≈ −2.8k. pass A 316/행 < 로드 481/행 + 548이라 28행 타일도 Main이 따라간다. 마지막 4행 타일은 그대로 두어
   tail(pass A 1,463 + pass B 462)은 불변. partials 버퍼를 타일마다 따로 두는 이유: V37a에서 공유 버퍼가 pass B 전부를 마지막
   pass A 뒤로 밀었다(버퍼 단위 의존성).
-- **변경 파일:** `src/device/shared/mlp.rs` (`down_tile_fns` → pass A/pass B 분리 매크로)
+- **변경 파일:** `src/device/shared/mlp.rs` (`down_tile_fns` → `down_contract_fns!`/`down_reduce_fns!` 분리 매크로)
 - **정확도:** 연산 동일(같은 partial, 같은 pass B).
-- **변형:** (a) 28/28/4 (b) 20/20/16/4 (c) 32/24/4. 체인 항목 `V40_ffn_down_pass_a_big_tiles` + 변형 커밋.
 - **예상:** ffn −2.8k (a), −1.4k (b).
+
+### 측정 (변형별, ffn; lab 컴파일, cargo-furiosa-opt 0.6.0)
+
+| 변형 | 커밋 | ffn | 비고 |
+|---|---|---:|---|
+| V38 | | 158,182 | 16/16/16/8/4 |
+| (a) 28/28/4, pass B main | `7c4abaa` | 159,050 | DMA busy 149.9k → 147.1k(−2.8k 예상대로)인데 **down scale 로드(9,774)가 tile1 뒤로 밀려** pass B 5개가 tail에 몰림(144.2k–151.0k) |
+| (c) (a) + pass B를 `ctx.sub`로 | `07b2558` | 컴파일 실패 | `visa: while lowering TensorUnit` — pass B(MulF + inter-slice reduce + transpose + commit_view)는 main 전용 |
+| (b) 16/24/16/4, pass B main | `d3fbddb` | 159,781 | DMA 끝 147.8k(−1.6k)인데 tile2(16행)가 143.0k에 도착 → pass A 5.1k → 148.1k, 4행 pass A가 그 뒤(149.6k) → store 151.8k |
+
+- **측정 방식:** makespan only.
+
+### 판정: **기각** (타일 수는 이미 최소)
+
+- **이유/배운 것:** down 단계는 x2 로드(121.8k) 뒤에야 pass A를 시작할 수 있고, 그 뒤 DMA(타일 481/행 + 548 + `?` 838)와 Main
+  (pass A 316/행 + 200)이 나란히 흐른다. 타일 k의 pass A가 타일 k+1의 도착 전에 끝나려면 `316·r_k ≤ 481·r_{k+1} + 1,386`, 즉
+  **다음 타일이 앞 타일의 ≥0.66배**여야 한다(V37이 up/gate에서 본 조건과 같음). 마지막 타일 4행에서 거꾸로 올라가면 4·8·12·16·20 =
+  60 → **5타일이 최소**이고 V38의 16/16/16/8/4가 이미 그 안에 있다. 타일을 줄이려면 x2 로드를 앞당겨(scale 로드 9.8k보다 먼저)
+  pass A 체인을 일찍 시작시켜야 하는데, DMA 순서는 스케줄러가 소비자 우선순위로 정하므로 소스에서 제어 불가(V17).
+- **다음:** 큰 타일은 down 입력이 준비된 뒤가 아니라 **앞**에 두는 구조(예: down 입력을 up/gate와 인터리브)가 필요 — Stage 2 과제.
 
 ## V41_x2_hbm_copies
 
@@ -223,15 +243,35 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
 - **정확도:** 데이터 이동만 변경.
 - **예상:** ffn −1k ~ −1.5k, attn_out −0.3k.
 
+### 측정: ffn 158,182 → **157,282** (−900), attn_out 27,424 → **27,272** (−152), 기하평균 5.801 (커밋 `f96f159`)
+
+- 첫 컴파일 통과. attn_out x2 로드 1,318 → 1,166; ffn DMA busy 149,922 → 149,352. 8부 사본은 store 디스크립터를 늘리지
+  않았다(553 그대로). 이득이 예측(−1.5k)보다 작은 것은 복제 로드의 초과분 중 사본으로 없어지는 몫이 절반 정도라는 뜻 —
+  16부 변형은 체인 뒤 후보.
+- **측정 방식:** makespan only (야간 체인이 전체 빌드·Arena 대기 상태로 재기록).
+
+### 판정: makespan 측정 (실측 대기)
+
 ## V42_attnout_tile_shapes
 
 - **상태:** 설계됨 (2026-09-09)
 - **분기점:** `V39_x2_single_store`
 - **가설:** attn_out tail = 마지막 타일 contract 956 → store 2,510 → …. 타일을 28/28/4로 바꾸면 마지막 contract가 ~250이 되어
   −0.7k; 타일 수(DMA 고정비)는 동일. 변형 24/24/12(−0.4k), 32/24/4.
-- **변경 파일:** `src/device/sliding/projection.rs` (`project_output` 타일을 행 수 매크로로)
+- **변경 파일:** `src/device/sliding/projection.rs` (`project_output` 타일을 행 수 매크로 `output_tile_fns!`로)
 - **정확도:** 연산 동일.
 - **예상:** attn_out −0.5k ~ −0.7k.
+
+### 측정: attn_out 27,424 → 28,466 (+1,042) (커밋 `e587ed6`)
+
+- 스케줄러가 타일 로드를 tile0(28) → **tile2(4)** → x2 → tile1(28) 순으로 발행했다. 마지막 로드가 28행이라 tail의 contract가
+  956 → 1,212로 늘고, 4행 타일의 contract(444)까지 그 뒤에 붙었다(store 19,822 → 20,864).
+
+### 판정: **기각** (스케줄러는 같은 우선순위의 DMA 중 짧은 것을 먼저 발행한다)
+
+- **배운 것:** "마지막 타일을 작게"는 소스 순서로 만들 수 없다. 우선순위가 같은 타일 로드는 짧은 것부터 나가므로 마지막에는
+  항상 큰 타일이 남는다 → 균등 타일(V38의 20/20/20)이 이 축의 최적. 마지막 타일을 작게 하려면 그 로드가 다른 로드보다 *늦게
+  준비*되어야 하는데 HBM→DM 로드에는 데이터 의존성이 없다.
 
 ## V43_qkv_v_weight_tail_split
 
@@ -243,6 +283,12 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
 - **변경 파일:** `src/device/sliding/projection.rs`
 - **정확도:** 연산 동일(행 분할).
 - **예상:** qkv −0.3k.
+
+### 판정: **기각 (설계 단계)**
+
+- 슬라이스당 4행을 3+1(또는 2+2)로 나누면 각 tile의 출력 `commit_trim::<m![Ps % 4 = 3]>`가 6 B(2 B)라 **8 B 최소**(bf16 4개)에
+  걸린다. f32로 내보내면 8 B 이상이 되지만 이후 head gather·norm이 bf16 입력을 전제해 재작성이 필요하고, 추가 cast pass(~350)가
+  tail에 들어가 이득(−0.9k + 548)을 상쇄한다. 브랜치는 코드 없이 예약만 남김.
 
 ## V44_ffn_scale_segments (분석 슬롯)
 
@@ -403,6 +449,29 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
   헤드 gather는 reduce 출력의 `1 # 2` 패딩이 섞인 ring-64(`Broadcast1 { slice1: 64, slice0: 2 }` → ring 128)가 된다.
 - **변경 파일:** `src/device/sliding/projection.rs`, `src/ops.rs`
 - **예상:** qkv −2k ~ −3k.
+
+### 측정 (2026-09-09 밤, V39 위에 구현, 커밋 `f417b5c`): qkv 45,744 → **47,532** (+1,788)
+
+- 첫 컴파일 통과(2-way `vector_inter_slice_reduce::<m![Qs / 16 % 128, 1 # 2]>`, `Broadcast1 { slice1: 64, slice0: 2 }` gather,
+  `[Dummy256 / 16, H / 1920, Dummy2, H % 1920]` 스크래치에서 슬라이스당 1세그먼트 로드 모두 통과).
+- DMA busy 41,910 → 44,447(+2.5k): x2 로드는 줄었지만 **weight 로드가 슬라이스당 1세그먼트(30 KB) → 16/8세그먼트(1920 B)로
+  바뀌며 더 비싸졌다**. 즉 정적 모델은 1920 B 세그먼트에도 세그먼트 비용을 매긴다(V36의 "무관"은 30 KB급 단일 세그먼트끼리의
+  비교였음).
+
+| DMA 노드 | V38 | V26 | Δ | 세그먼트 Δ | cycle/세그먼트 |
+|---|---:|---:|---:|---:|---:|
+| Q weight (15.7 MB) | 13,512 | 15,950 | +2,438 | 512 → 8,192 | 0.32 |
+| K weight (7.9 MB) | 7,030 | 8,250 | +1,220 | 512 → 4,096 | 0.34 |
+| V weight (7.9 MB) | 7,030 | 8,250 | +1,220 | 512 → 4,096 | 0.34 |
+| x2 복제 로드 | 5,182 (3.9 MB) | 2,841 (1.97 MB) | −2,341 | | |
+| 합계 | | | **+2,537** | | |
+- **정확도:** 합산 순서만 변경(f32 2-way reduce).
+
+### 판정: **기각** (weight 세그먼트 비용 > x 절감)
+
+- **배운 것:** 이 정적 모델에서 세그먼트 비용은 크기와 무관하게 개당 붙는다(≈0.2~0.3 cycle). x 복제 바이트를 줄이려고 weight
+  행을 쪼개면 손해. qkv에서 x2 로드(5.2k)를 줄이는 유일한 길은 사본 수/채널 분산(V15 계열)뿐이고 그것도 16부에서 포화(V31).
+  실물에서는 1920 B 세그먼트(256 B 비정렬)가 더 나쁠 수 있어 A/B 가치도 낮다.
 
 ## V27_attnout_scale_in_rmsnorm
 
