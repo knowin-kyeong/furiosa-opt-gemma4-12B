@@ -160,3 +160,6 @@ V189_rope_table_trip
 V189_rope_table_trip#r2
 V190_attnout_x_on_chip
 V190_attnout_x_on_chip#r2
+V191_production_rope_tiles#c1
+V191_production_rope_tiles#c2
+V191_production_rope_tiles#c3
