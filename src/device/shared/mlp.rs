@@ -2073,11 +2073,17 @@ fn down_sum_halves_full(
         .commit();
     // Stored in the packet-major order the gather produced (one 1.9 KB segment per group), and
     // read back in H order by the packing pass's fetch.
-    let mut parts_hbm: HbmTensor<f32, Chip, m![L / 7680, H / 60, H % 15, H / 15 % 4, 1 # 8]> = HbmTensor::new();
+    // The packets travel as a real 8-wide axis (a padded `1 # 8` in a multi-axis HBM tensor
+    // fails the buffer-size check) and are reshaped back to padded packets in DM.
+    let gathered: DmTensor<f32, Chip, UpGateClusters, DownRowsGatheredFull, m![H % 15, H / 15 % 4, Dummy8]> =
+        unsafe { gathered.reshape() };
+    let mut parts_hbm: HbmTensor<f32, Chip, m![L / 7680, H / 60, H % 15, H / 15 % 4, Dummy8]> = HbmTensor::new();
     gathered.view().to_hbm_view(&mut ctx.tdma, parts_hbm.view_mut());
 
-    let parts: DmTensor<f32, Chip, Cluster, ReducingSlices, m![L / 7680, H / 60 % 8, H % 15, H / 15 % 4, 1 # 8]> =
+    let parts: DmTensor<f32, Chip, Cluster, ReducingSlices, m![L / 7680, H / 60 % 8, H % 15, H / 15 % 4, Dummy8]> =
         parts_hbm.to_dm(&mut ctx.tdma);
+    let parts: DmTensor<f32, Chip, Cluster, ReducingSlices, m![L / 7680, H / 60 % 8, H % 15, H / 15 % 4, 1 # 8]> =
+        unsafe { parts.reshape() };
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
     let down_global_scale_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
