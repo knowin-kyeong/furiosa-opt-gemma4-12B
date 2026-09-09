@@ -96,3 +96,9 @@ V160_qkv_weights_half_descriptors#r2
 # Phase B8 - attn_out two weight tiles (48/12 = v162, 40/20 = v163) on top of the x2 broadcast (v161), base interleaved x4, x2 jobs.
 V162_attnout_two_tiles_broadcast
 V162_attnout_two_tiles_broadcast#r2
+
+# Phase B9 - production candidate V165 = V158 + attn_out 48/12 (cold x3), and V160b once (static +26k, hardware check).
+V165_qkv_broadcast_attnout_two_tiles
+V165_qkv_broadcast_attnout_two_tiles#r2
+V165_qkv_broadcast_attnout_two_tiles#r3
+V160b_qkv_weights_half_descriptors_contig
