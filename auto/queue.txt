@@ -110,3 +110,7 @@ V166_ffn_down_three_tiles#r2
 # Phase B11 - attn_out output gathered to one slice per cluster before the store (V167 vs base vs v162), x5 each in one job, x2 jobs.
 V167_attnout_gather_before_store
 V167_attnout_gather_before_store#r2
+
+# Phase B12 - ffn down output gathered before the hop store (V168 vs base), x4 each in one job, x2 jobs.
+V168_ffn_gather_before_store
+V168_ffn_gather_before_store#r2
