@@ -83,3 +83,17 @@ V109_ffn_down_12x4_8_4
 V110_ffn_down_16_12_12_12_8
 V111_ffn_down_4x15
 V112_ffn_up12x5_down12x4_8_4
+
+# ffn tile batch 3: fill in the {4,8,12,16} neighbourhood around the up 12x5 / 16-12-12-12-8 wins
+V113_ffn_up_16_16_8_8_8_4
+V114_ffn_up_16_16_12_12_4
+V115_ffn_up_12_12_8_8_8_8_4
+V116_ffn_up_16_12_8_8_8_8
+V117_ffn_up_16_16_16_8_4
+V118_ffn_up_12_12_12_12_8_4
+V119_ffn_down_16_16_12_12_4
+V120_ffn_down_16_16_16_12
+V121_ffn_down_16_16_8_8_8_4
+V122_ffn_up12x5_down16_16_16_12
+V123_ffn_up16_12_12_12_8_down16_16_16_12
+V124_ffn_up12x5_down16_16_12_12_4
