@@ -13,7 +13,7 @@ RNGD cycles만 점수다.
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
 | `V164_qkv_q_scatter_zero_index` | `V160` 브랜치(v157a 위) | q의 최종 store(head 레이아웃 `1 # 64`에서 `to_hbm_view`, V146이 이 경로를 scatter보다 +4k로 측정)를 **on-device zero index(kv_offset − kv_offset, `SubFxp` + Stash)로 `dma_scatter`**로 대체 | — | — | — | — | — | — | **막힘** — `dma_scatter`는 소스에 없는 테이블 축(k_cache의 Ts처럼)을 인덱스 키로 relabel해야 하는데 `q_out [Ns, Gs, Ds]`는 전 축이 소스에 있고, device fn 안에서 `&mut HbmTensor`를 다른 타입으로 볼 수 없다 |
-| `V170_ffn_ablation_ladder` (f3/f6/f7) | `V168` 브랜치 | **ffn 실물 ablation.** f3: gate block-scale 로드 생략(up의 것을 재사용) = scale 로드 1개(512 디스크립터 × 60 세그먼트)의 실물 비용; f6: post-FF RMSNorm/residual/gate tail 생략; f7: geglu 체인(gelu·곱·스칼라 broadcast 2개) 생략. 정확도 FAIL by design | — | — | 152,342 (f3) / 157,261 (f6) / 154,998 (f7) | — | — | FAIL(by design) | 구현됨 (`7c2fd7c`), Arena 2잡 큐 |
+| `V170_ffn_ablation_ladder` (f3/f6/f7) | `V168` 브랜치 | **ffn 실물 ablation.** f3: gate block-scale 로드 생략(up의 것을 재사용) = scale 로드 1개(512 디스크립터 × 60 세그먼트)의 실물 비용; f6: post-FF RMSNorm/residual/gate tail 생략; f7: geglu 체인(gelu·곱·스칼라 broadcast 2개) 생략. 정확도 FAIL by design | — | — | 152,342 (f3) / 157,261 (f6) / 154,998 (f7) | — | job 15590 (n=4 warm median): base **346,246** · f3 353,570 (+7k) · f6 **346,008** (−0.2k) · f7 347,866 (+1.6k) | FAIL(by design) | **측정 완료** — post-norm tail·geglu 체인·scale 로드 1개를 빼도 ffn은 안 줄어든다: **ffn은 실물에서 weight/scale DMA 스트림에만 묶여 있다**(99 MB @ ~300 B/cycle). 남은 레버 없음(바이트·정렬 모두 구조적) |
 | `V169_qkv_rope_gather_idx8` | `V160` 브랜치(v157a 위) | cos/sin을 HBM hop 없이 head 레이아웃으로 직접 gather: `rope_offset`을 복제 로드로 `[Ns]` 인덱스(8부)로 만들어 `dma_gather_scaled` | — | — | — | — | — | — | **막힘** — i32 스칼라의 복제 로드가 `tail_size % min_align (4)` 정렬 검사에 걸림(4 B 원소는 broadcast 불가). 기대 이득 ≤2k(V147)라 추가 반복 안 함 |
 | `V168_ffn_gather_before_store` | `V167` | V167과 같은 기전을 ffn down 출력 hop store(DownRows `1 # 8`, 64 디스크립터)에: switch gather(ring 256) 후 클러스터당 1 디스크립터 store. 정적 중립(157,766) | — | — | 157,766 (v168) | — | job 15585 (n=4): base 346,393 · **v168 355,930** (+9.5k) | v168 **FAIL** (14% tol 안) | **기각** (V167과 같은 결론: 패딩 레이아웃 64-디스크립터 store는 싸고 ring-256 gather가 비싸다) |
 | `V167_attnout_gather_before_store` | `V162` | attn_out 투영 출력 store를 64 디스크립터(패딩 `1 # 8` 레이아웃)에서 **클러스터당 switch gather(ring 256, `Broadcast1 { slice1: 32, slice0: 8 }`, 12원소 패킷) 후 2 디스크립터 store**로. V24(a)의 실물 A/B: 정적 중립(28,180 vs 28,223), 실물은 패딩 레이아웃 store가 V146에서 +4k/store였으므로 이득 가능. 컴파일 교훈: switch OutTime에 fetch의 패킷 시간축을 함께 적는다 | — | 28,180 (v167) | — | — | job 15584 (n=5): base 55,816 · v162 53,301 · **v167 57,168** (stdev 0.5k) | v167 **FAIL** (23% tol 안: collect 순서가 어긋남) | **기각** — 맞아도 +1.4k 느리다. 패딩 레이아웃 64-디스크립터 store는 실물에서 싸다(V146의 +4k는 store가 아니라 다른 경로 차이) |
@@ -342,6 +342,19 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 - 정확도 PASS(형태는 옳다). 이득이 없으므로 **"디스크립터 수"가 일반 법칙은 아니다**: qkv의 x2 로드가 특별했던 이유는 512개
   디스크립터가 **같은 7.7 KB 한 영역**을 읽는 것(HBM 채널 직렬화)이고, ffn(영역당 256개)·attn_out(영역당 64개)은 그 문턱 아래다.
 - 부수 관찰: 이 잡의 ffn base warm median 342k는 평소 cold 350k보다 낮다(ffn도 cold 페널티 ~8k가 있다).
+
+## V170_ffn_ablation_ladder — ffn은 DMA 스트림 하한에 있다 (2026-09-09 16:19 UTC, job 15590)
+
+| 변형 | 뺀 것 | 정적 | 실물 warm median (n=3) | Δ vs base 346,246 |
+|---|---|---:|---:|---:|
+| f6 | post-FF RMSNorm + residual + gate tail | 157,261 (−0.5k) | **346,008** | −0.2k |
+| f7 | geglu 체인(gelu·곱·스칼라 broadcast 2개) | 154,998 (−2.8k) | 347,866 | +1.6k |
+| f3 | gate block-scale 로드(9.8k 정적, 512 디스크립터 × 60 세그먼트) | 152,342 (−5.4k) | 353,570 | **+7.3k** |
+
+- 계산·tail·소형 DMA를 빼도 ffn은 줄지 않는다(f3는 오히려 느려짐 — 로드가 빠지자 스케줄러가 순서를 바꿔 다른 것이 노출된 듯).
+  **ffn의 실물 350k는 weight(88 MB) + scale(11 MB) 스트림 자체**이고, 그 스트림의 실효 대역폭(~300 B/cycle, HBM 피크의 ~40%)이 한계다.
+- 바이트는 고정(f4 weight, f8 scale)이고 256 B 정렬은 H=3840·f4 행 1920 B 구조상 어떤 짝수 분할로도 못 맞춘다(V44 분석 + 이번 계산).
+  qkv처럼 "같은 영역 반복 읽기" 병리도 없다(V159). **ffn은 이 구조에서 하한 근처**로 판단하고 이 세션에서는 닫는다.
 
 ## V165_qkv_broadcast_attnout_two_tiles — 프로덕션 후보 (2026-09-09 16:05~16:09 UTC, job 15578~15580)
 
