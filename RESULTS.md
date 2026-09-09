@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | — | — | — | — | — | — | 설계됨 |
+| `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | — | — | makespan 측정 |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
@@ -55,8 +55,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V37_ffn_upgate_pass_a_big_tiles`**
-(…+V37 누적, 기하평균 5.736×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V38_post_norm_store_from_reducing`**
+(…+V38 누적, 기하평균 5.779×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -360,6 +360,18 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/device/shared/rmsnorm.rs`(`normalize_add_scaled_reduced`·`normalize_add_gate_reduced`가 ReducingSlices bf16 반환), `src/ops.rs`
 - **정확도:** 데이터 이동만 변경(cast 위치 동일: f32 → bf16 1회).
 - **예상:** attn_out −0.7k ~ −0.9k, ffn −0.7k ~ −1.4k.
+
+### 측정: attn_out 27,954 → **27,424** (−530), ffn 158,712 → **158,182** (−530), 기하평균 5.779
+
+- 첫 컴파일 통과. 두 커널 모두 switch pass 744가 빠지고 store가 434 → 546(8 디스크립터)으로 바뀌어 순 −530. `normalize_add_gate`
+  래퍼(full 경로용)는 자기 switch pass를 유지.
+- **정확도:** 데이터 이동만 변경.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** 소비자 레이아웃(한 슬라이스 [H])이 HBM store를 위한 것이라면 8-슬라이스 레이아웃에서 바로 store하는 편이
+  switch(744 + config 719)보다 싸다. tail의 pass 하나 = 그대로 makespan.
+- **다음:** x_hi/x_lo store 병합(qkv·attn_out·ffn), qkv x 절반(V26), ffn up/gate 30행 full-H(scale 세그먼트 반감).
 
 ## V37_ffn_upgate_pass_a_big_tiles
 
