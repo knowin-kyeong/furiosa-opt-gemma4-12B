@@ -6,7 +6,8 @@
 #   1. checks out the ref (detached) in /root/furiosa-opt-gemma4-12B,
 #   2. dumps the three Stage-1 schedules (makespan),
 #   3. builds the full test binary (the crate-wide compile gate),
-#   4. submits to Arena with scripts/rngd_test.sh when the pod is logged in
+#   4. submits to Arena with the driver's own arena.sh when the pod is logged in
+#      (not the branch's scripts/rngd_test.sh: its --timeout default exceeds the server maximum)
 #      (otherwise the entry stays `pending` and is retried every poll),
 #   5. writes auto/results/<id>.json + regenerates auto/BOARD.md, commits and pushes
 #      the `auto_results` branch (deploy key, see RULES.md §11).
@@ -117,7 +118,7 @@ run_entry() {
     if [ "$build_rc" -ne 0 ]; then
         arena="n/a"
     elif arena_ok; then
-        RNGD_JOB_NAME="$id" RNGD_TIMEOUT=${RNGD_TIMEOUT:-3000} timeout 3600 bash scripts/rngd_test.sh --no-build > "$STATE/logs/$id.arena.log" 2>&1; rc=$?
+        timeout 3600 bash "$STATE/arena.sh" "$id" > "$STATE/logs/$id.arena.log" 2>&1; rc=$?
         if [ "$rc" -eq 0 ]; then arena=pass; else arena=fail; fi
         log "$id arena rc=$rc -> $arena"
     else
