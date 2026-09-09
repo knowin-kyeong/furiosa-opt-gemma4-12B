@@ -66,9 +66,12 @@ pub fn sliding_project_qkv(
     // two f8 pieces of x times a power of two (their sum is exact), which the projections
     // contract as f8 x f8 with no lookup pass; the head RMSNorms that follow are
     // scale-invariant, so the factor is never undone.
-    // One copy, not sixteen: a copy axis the source lacks does not replicate the store (V50).
+    // 4 real copies, each read by a different quarter of the slices (V51/V52: the copy count
+    // is chosen on measured cycles, not on makespan, which understates a same-address load).
     let x2_hbm = shared::mlp::stage_x_hi_lo_qkv_hbm(ctx, &x);
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, m![Dummy256 / 64, Dummy256 % 64], m![Dummy2, H]> =
+        x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
