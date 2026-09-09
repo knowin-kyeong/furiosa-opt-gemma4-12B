@@ -850,25 +850,25 @@ pub fn sliding_project_qkv_v160(
 
     // The projections' per-channel weight scales are folded into the head RMSNorms (their
     // loads are eight descriptors in the head layout instead of 512 in the projection layout).
-    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, sliding::projection::HeadSlices32>(
         ctx,
         &q,
         q_weight_scale,
         q_rms_weight,
     );
-    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, sliding::projection::HeadSlices32>(
         ctx,
         &k,
         k_weight_scale,
         k_rms_weight,
     );
-    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, sliding::projection::HeadSlices32>(
         ctx,
         &v,
         v_weight_scale,
     );
 
-    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, sliding::projection::HeadSlices32>(
         ctx,
         &q,
         &k,

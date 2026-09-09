@@ -135,7 +135,9 @@ pub(crate) fn project_key_value(
 // V160: the same projections on half the slices with twice the rows each (Q: 128 slices x 16
 // rows, K/V: 128 slices x 8 rows per cluster), i.e. 256 DMA descriptors per weight instead of
 // 512. The live slices sit at even slots (`1 # 2`), so the head gather is a stride-2 ring-64.
-type QueryRows16 = m![Qs / 16 % 128, 1 # 2];
+type QueryRows16 = m![1 # 2, Qs / 16 % 128];
+/// Four heads per cluster on the first 128 slices, one head per 32-slice ring.
+pub(crate) type HeadSlices32 = m![1 # 2, Ns % 4, 1 # 32];
 pub(crate) type QueryWeight16 = DmTensor<f8e4m3, Chip, QueryClusters, QueryRows16, m![Qs % 16, H]>;
 
 pub(crate) fn load_query_weight_16(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) -> QueryWeight16 {
@@ -146,7 +148,7 @@ pub(crate) fn project_query_16(
     ctx: &mut Context,
     x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     weight_f8: &QueryWeight16,
-) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlices32, m![Gs, Ds]> {
     let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRows16, m![Dummy2, H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows16, m![1], m![Dummy2, H]> = ctx
         .sub
@@ -169,18 +171,18 @@ pub(crate) fn project_query_16(
         .commit_trim::<m![Qs % 4]>()
         .commit();
 
-    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 16, 1 # 2], m![Ds % 16]> =
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![1 # 2, Ns % 4, Gs, Ds / 16], m![Ds % 16]> =
         unsafe { contraction.view().reshape() };
     ctx.main
         .begin(scaled)
         .fetch::<m![1], m![Ds % 16]>()
-        .switch::<HeadSlicesPerCluster, m![Gs, Ds / 16]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 2 })
+        .switch::<HeadSlices32, m![Gs, Ds / 16]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 1 })
         .collect::<m![Gs, Ds / 16], m![Ds % 16]>()
         .commit_trim::<m![Ds % 16]>()
         .commit()
 }
 
-type KvRows8 = m![Ps / 8 % 128, 1 # 2];
+type KvRows8 = m![1 # 2, Ps / 8 % 128];
 pub(crate) type KvWeight8 = DmTensor<f8e4m3, Chip, KvClusters, KvRows8, m![Ps % 8, H]>;
 
 pub(crate) fn load_kv_weight_8(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) -> KvWeight8 {
@@ -191,7 +193,7 @@ fn project_one_kv_matrix_8(
     ctx: &mut Context,
     x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRows8, m![1], m![Dummy2, H]>,
     weight_f8: &KvWeight8,
-) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlices32, m![Ds]> {
     let contraction: DmTensor<bf16, Chip, KvClusters, KvRows8, m![Ps % 8]> = ctx
         .main
         .begin(weight_f8.view())
@@ -206,12 +208,12 @@ fn project_one_kv_matrix_8(
         .commit_trim::<m![Ps % 4]>()
         .commit();
 
-    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 8, 1 # 2], m![Ds % 8]> =
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![1 # 2, Ns % 4, Ds / 8], m![Ds % 8]> =
         unsafe { contraction.view().reshape() };
     ctx.main
         .begin(scaled)
         .fetch::<m![1], m![Ds % 8 # 16]>()
-        .switch::<HeadSlicesPerCluster, m![Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 2 })
+        .switch::<HeadSlices32, m![Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 1 })
         .collect::<m![Ds / 8], m![Ds % 8 # 16]>()
         .commit_trim::<m![Ds % 8]>()
         .commit()
@@ -223,8 +225,8 @@ pub(crate) fn project_key_value_8(
     k_weight: &KvWeight8,
     v_weight: &KvWeight8,
 ) -> (
-    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
-    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlices32, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlices32, m![Ds]>,
 ) {
     let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRows8, m![Dummy2, H]> = unsafe { x.view().reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRows8, m![1], m![Dummy2, H]> = ctx
