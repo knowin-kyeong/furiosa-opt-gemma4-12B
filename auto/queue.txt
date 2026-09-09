@@ -11,3 +11,5 @@
 # is 1.64 against attn_out 7.17 and ffn 10.45, and its real/makespan ratio (2.53) is the worst
 # of the three, so the static model is least trustworthy exactly where the work now is.
 V50_drop_false_replication
+V52_qkv_x_copies_c2
+V54_qkv_x_copies_c4
