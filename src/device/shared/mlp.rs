@@ -81,14 +81,22 @@ pub(crate) fn stage_x_hi_lo_hbm(
     // well below the DMA rate (V15, V36), so the load spreads over the copies.
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, H / 1920, Dummy2, H % 1920]> = HbmTensor::new();
-    x_hi.view().to_hbm_view(
-        &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(0),
-    );
-    x_lo.view().to_hbm_view(
-        &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(1),
-    );
+    for copy in 0..8 {
+        x_hi.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy8], 1, m![1 #{!} 8, H / 1920, Dummy2, H % 1920]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(0),
+        );
+        x_lo.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy8], 1, m![1 #{!} 8, H / 1920, Dummy2, H % 1920]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(1),
+        );
+    }
 
     // The geglu scalars.
     let s_up: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = up_global_scale.to_dm(&mut ctx.tdma);
@@ -183,11 +191,26 @@ pub(crate) fn stage_x_hi_lo_copies_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    // One store per copy: a copy axis that is absent from the source does NOT replicate the
+    // store (V15/V31/V41 assumed it did; only copy 0 was ever written and the other fifteen
+    // were uninitialised HBM, which is what made qkv non-finite).
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, Dummy2, H]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(1));
+    for copy in 0..16 {
+        x_hi.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy256 / 16], 1, m![1 #{!} 16, Dummy2, H]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 16, Dummy2 = 1 #{!} 2, H]>(0),
+        );
+        x_lo.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy256 / 16], 1, m![1 #{!} 16, Dummy2, H]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 16, Dummy2 = 1 #{!} 2, H]>(1),
+        );
+    }
     x2_hbm
 }
 
@@ -229,14 +252,22 @@ fn stage_geglu_hi_lo_hbm(
     // Eight copies of every chunk (see stage_x_hi_lo_hbm): each chunk is read by 64 slices.
     let (x_hi, x_lo) = hi_lo_gathered(ctx, x, &s_vrf);
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, L / 1920, Dummy2, L % 1920]> = HbmTensor::new();
-    x_hi.view().to_hbm_view(
-        &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(0),
-    );
-    x_lo.view().to_hbm_view(
-        &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(1),
-    );
+    for copy in 0..8 {
+        x_hi.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy8], 1, m![1 #{!} 8, L / 1920, Dummy2, L % 1920]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(0),
+        );
+        x_lo.view().to_hbm_view(
+            &mut ctx.tdma,
+            x2_hbm
+                .view_mut()
+                .tile::<m![Dummy8], 1, m![1 #{!} 8, L / 1920, Dummy2, L % 1920]>(copy)
+                .tile::<m![Dummy2], 1, m![1 #{!} 8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(1),
+        );
+    }
 
     let inv_s_one: DmTensor<f32, Chip, UpGateClusters, m![1 # 256], m![1 # 8]> = unsafe { inv_s_all.reshape() };
     let mut inv_s_hbm: HbmTensor<f32, Chip, m![L / 7680, 1 # 8]> = HbmTensor::new();
