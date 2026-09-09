@@ -102,3 +102,7 @@ V165_qkv_broadcast_attnout_two_tiles
 V165_qkv_broadcast_attnout_two_tiles#r2
 V165_qkv_broadcast_attnout_two_tiles#r3
 V160b_qkv_weights_half_descriptors_contig
+
+# Phase B10 - ffn down in 3 DMA tiles (28/28/4, V40a ported onto V165): static +3k, hardware -1024 descriptors. Cold x2.
+V166_ffn_down_three_tiles
+V166_ffn_down_three_tiles#r2
