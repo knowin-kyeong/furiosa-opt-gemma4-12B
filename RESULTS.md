@@ -18,10 +18,11 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V24_gather_before_hbm_store` | `V23` | attn_out/ffn 투영 출력을 HBM에 쓰기 전에 클러스터 안 switch ring gather로 슬라이스 1개에 모아 2 디스크립터로 저장(4,535×2·2,510×2 → ~450), 후속 rmsnorm은 HBM에서 ReducingSlices로 직접 로드 | — | — | — | — | — | — | 설계됨 |
-| `V25_qkv_hsplit_x_halved` | `V24` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
-| `V26_attnout_scale_in_rmsnorm` | `V25` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
-| `V27_ffn_16row_tiles` | `V26` | FFN 타일을 12행×5 → 16/16/16/12행×4로 (scale VRF 7.7 KB < 8 KB): 행렬당 DmaLoad 고정비·`?` 838·Sub 프리로드 1개씩 제거 | — | — | — | — | — | — | 설계됨 |
+| `V28_ffn_16row_tiles` | `V27` | FFN 타일을 12행×5 → 16/16/16/12행×4로 (scale VRF 7.7 KB < 8 KB): 행렬당 DmaLoad 고정비·`?` 838·Sub 프리로드 1개씩 제거 | — | — | — | — | — | — | 설계됨 |
+| `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
+| `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
+| `V25_ffn_geglu_two_clusters` | `V24` | up/gate의 HBM hop(store 4,535×2 + load 1,328×2 + geglu 출력 store 2,219 = 13.9k)을 없앤다: global scale을 contraction epilogue에 접고, geglu를 두 클러스터 reduce 출력 레이아웃(슬라이스당 60행, V18식 패딩 패킷)에서 직접 수행 | — | — | — | — | — | — | 설계됨 |
+| `V24_gather_before_hbm_store` | `V23` | (a) 투영 출력을 HBM에 쓰기 전 클러스터 안 switch gather → **기각**(live 슬라이스가 8칸 간격이라 ring 256, 2,055 = store 절감분); (b) post-norm 피연산자(x·residual)를 HBM에서 ReducingSlices로 직접 로드, ffn global scale을 8슬라이스 레이아웃에서 → **채택** | **50,981** | **30,037** | **179,922** | **5.180** | — | — | makespan 측정 |
 | `V23_ffn_whole_scale_loads` | `V22` | FFN block scale을 pass 타일(15개, 36k) 대신 행렬당 1회 로드(슬라이스당 7.2 KB)로; V13b 재시도 | 51,631 | 30,487 | **181,625** | **5.131** | — | — | makespan 측정 |
 | `V22_attnout_weight_tiles` | `V21` | attn_out weight를 20행 타일 3개로 선로드해 융합 LUT+contract(5k)를 DMA(13.5k)와 겹침 | 51,631 | **30,487** | 186,976 | **5.082** | — | — | makespan 측정 |
 | `V21_qkv_rope_tables_early` | `V20` | cos/sin gather·HBM hop·VRF 스테이징을 커널 맨 앞에서 수행해 q/k rope가 V 로드와 겹치게 | 51,631 | — | — | — | — | — | **기각** (불변; 스케줄러가 gather 하나만 앞당김) |
@@ -44,8 +45,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V23_ffn_whole_scale_loads`**
-(…+V23 누적, 기하평균 5.131×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V24_gather_before_hbm_store`**
+(…+V24 누적, 기하평균 5.180×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -56,6 +57,11 @@ RNGD cycles만 점수다.
   모두 동일 비용. **바이트 수 자체를 줄이는 것(축 분할)만이 답.**
 - **DMA로 Replicated 매핑에 복제** — FFN이 이미 이렇게 하고 있고(ops.rs:227) 54,432 cycle.
   512 슬라이스 × ~106 cycle의 디스크립터 비용에 묶인다. switch 대비 8k 이득뿐.
+- **inter-slice reduce 출력(`m![X, 1 # k]`)을 switch로 클러스터 안에서 모아 HBM store 디스크립터를 줄이기** (V24a/b) —
+  VRU reduce 축은 innermost 강제(`VRU reduce axes must be innermost in Partitioning`)라 live 슬라이스가 k칸 간격으로
+  남고, `Broadcast1 { slice1: 32, slice0: 8 }`은 ring 256으로 취급되어 비용 = 256 × Time × flit(+~800 고정):
+  4원소 패킷(Time 15) 4,615, 12원소 패킷(Time 5) 2,055. store 절감(2,510 → 458)과 정확히 상쇄. Main이 노는
+  구간(ffn up/gate)에서만 쓸모가 있으나 V25가 hop 자체를 없애므로 불필요.
 - **contract_lane으로 reduction 축 일부를 미축약 상태로 남기기** (per-block scale을
   contraction 뒤에 적용하려는 시도) — book(Lane Folder): "reduction axes cannot be
   partially preserved". FFN f4의 16-블록 scale은 contraction 전에 곱해야 한다.
@@ -144,53 +150,89 @@ L=15360이면 60 × 256.
 
 ## V24_gather_before_hbm_store
 
-- **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V23_ffn_whole_scale_loads`
-- **가설:** V23 스케줄에서 HBM store가 디스크립터 비용에 묶여 있다(util 0.2~1%): ffn up/gate 결과 store
-  4,535×2(`m![L / 60 % 128, 1 # 2]`, 슬라이스당 120 B × 256 디스크립터), ffn down 출력 store 2,510과 attn_out
-  출력 store 2,510(`m![H / 60 % 32, 1 # 8]`, 64 디스크립터). 단일 디스크립터 store는 337~434다. 클러스터 안에서
-  switch ring gather(geglu의 ring-2 패턴을 ring-32/ring-128로; book 비용 = ring × Time × flit ≈ 480 / 1,920)로
-  클러스터당 슬라이스 1개에 모은 뒤 클러스터당 1 디스크립터로 쓰면 store가 ~450으로 준다. 이어지는
-  post-norm은 `Slice`로 로드(547) 후 `ReducingSlices`로 재배치(449)하던 것을 HBM에서 ReducingSlices로 직접 로드한다
-  (`shared::rmsnorm::normalize_add_from_hbm`/`normalize_add_gate_from_hbm` 추가; 기존 함수는 유지).
-  세 커널 모두 DMA-bound(qkv 91%, ffn 91%)이므로 DMA 큐 시간 감소가 makespan에 직접 반영된다.
-- **변경 파일:** `src/device/sliding/projection.rs`(`project_output`), `src/device/shared/mlp.rs`(`project_up_and_gate`,
-  `project_down`), `src/device/shared/rmsnorm.rs`(함수 추가), `src/ops.rs`
-- **공유 코드 영향:** `mlp.rs` → vision/audio MLP 경로. rmsnorm은 함수 추가만.
-- **리스크:** `1 # 2`/`1 # 8` 패딩 슬라이스가 섞인 ring에서 Broadcast1 gather가 컴파일되는지 미검증.
-  실패 시 inter-slice reduce 출력을 `Dummy` 복제로 바꿔 시도.
-- **예상:** attn_out −2k, ffn −10k (store 8k + 2k + 재배치 0.5k).
+- **상태:** makespan 측정 (2026-09-09)
+- **분기점:** `V23_ffn_whole_scale_loads` (`fd20ecd`)
+- **가설(원문):** V23 스케줄에서 HBM store가 디스크립터 비용에 묶여 있다(util 0.2~1%): ffn up/gate 결과 store
+  4,535×2(슬라이스당 120 B × 256 디스크립터), ffn down·attn_out 출력 store 2,510(64 디스크립터). 단일 디스크립터
+  store는 337~434. (a) 클러스터 안에서 switch ring gather로 슬라이스 1개에 모은 뒤 클러스터당 1 디스크립터로
+  쓴다. (b) 이어지는 post-norm은 `Slice`로 로드(547) 후 `ReducingSlices`로 재배치(449)하던 것을 HBM에서
+  ReducingSlices로 직접 로드한다.
+- **변경 파일:** `src/device/shared/rmsnorm.rs`(`ReducingSlices` 공개, `load_reducing`, `normalize_reduced` /
+  `normalize_add_reduced` / `normalize_add_gate_reduced` 추가; 기존 함수는 래퍼로), `src/device/shared/mlp.rs`
+  (`project_down`·`feedforward`가 HBM/ReducingSlices 반환, global scale pass를 8슬라이스에서), `src/device/sliding/projection.rs`
+  (`project_output`이 HBM 반환), `src/ops.rs`
+- **공유 코드 영향:** rmsnorm 기존 함수 의미 불변(리팩터). mlp.rs 호출처는 `decoder_feedforward`뿐.
 
-## V25_qkv_hsplit_x_halved
+### 측정
+
+| 단계 | qkv | attn_out | ffn | 비고 |
+|---|---:|---:|---:|---|
+| V23 | 51,631 | 30,487 | 181,625 | |
+| (a) attn_out: `Broadcast1 { slice1: 32, slice0: 8 }` gather, 4원소 패킷 | | 33,050 | | switch 4,615 (ring 256 × Time 15), store 2,510 → 458 |
+| (a) 12원소 패킷(Time 5, commit_trim 24 B) | | 30,483 | | switch 2,055 — store 절감분과 상쇄. **기각** |
+| (b) 직접 로드 (세 커널) | **50,981** | **30,037** | **179,922** | qkv −650 (head의 relayout 449 + 로드 차), attn_out −450, ffn −1,703 (relayout 449×2 + global scale pass 1,241 → ~200 + 잔여) |
+| **기하평균 (V0 대비 누적)** | | | | **5.180** |
+
+- **정확도:** 수치 동일(로드 경로·pass 레이아웃만 변경; global scale 곱은 같은 f32 연산).
+- **측정 방식:** makespan only.
+- **컴파일 교훈:** `vector_inter_slice_reduce`는 innermost 슬라이스 축만 줄인다 — 바깥 축을 reduce하려는 레이아웃
+  (`m![1 # 8, H / 60 % 32]`)은 visa 단계에서 `VRU reduce axes must be innermost in Partitioning`. `SwitchConfig`의
+  `CustomBroadcast { ring_size }`는 패딩 축·순열을 지원하지만(std 테스트 참조) stride가 있는 live 집합은 ring 전체
+  비용을 낸다.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** HBM store 비용은 디스크립터 수와 레이아웃 슬롯 수에 묶이고, 그것을 줄이는 switch는 ring 크기에
+  묶인다(둘 다 ~2k). hop을 줄이는 정답은 "모으기"가 아니라 **hop 자체를 없애거나(V25) 소비자 레이아웃으로 직접
+  로드하기(V24b)**.
+
+## V25_ffn_geglu_two_clusters
 
 - **상태:** 설계됨 (2026-09-09)
 - **분기점:** `V24_gather_before_hbm_store`
+- **가설:** ffn DMA 165k 중 up/gate → geglu → down 사이의 hop이 13.9k: up/gate 결과 store 4,535×2(`m![L / 60 % 128, 1 # 2]`,
+  256 디스크립터), geglu 입력 로드 1,328×2, geglu 출력 store 2,219. up과 gate는 같은 슬라이스에 같은 60행이 있으므로
+  geglu를 그 레이아웃에서 직접 계산하면 앞의 네 DMA가 사라진다. 60 f32 = 7.5 패킷이라 8-wide 패킷에 안 맞는 문제는
+  V18의 패딩 패킷 기법(`fetch::<m![L / 4 % 15], m![L % 4 # 8]>` → `narrow_split::<m![L / 4 % 15, 1 # 2], m![L % 4]>`)으로
+  푼다. up/gate global scale은 contraction epilogue(inter-slice reduce 뒤 MulF scalar VRF)에 접어 넣어 geglu의
+  scale pass 2개도 없앤다. geglu 출력 store는 256 디스크립터(4,535)로 남지만, 순이득 ≈ −9k. 2단계로 출력 앞에
+  ring-4 pair gather(`Broadcast1 { slice1: 2, slice0: 2 }`, 비용 ~60+고정)를 붙여 128 디스크립터(2,219)로 줄이는 것을
+  시도한다.
+- **변경 파일:** `src/device/shared/mlp.rs`(`contract_up_gate_rows` epilogue, `geglu` 대체, `feedforward`)
+- **공유 코드 영향:** mlp.rs 호출처는 `decoder_feedforward`뿐.
+- **정확도:** 곱셈 순서 동일(sum × global_scale → bf16 → × gelu); 중간 bf16 반올림이 한 번 줄어 오히려 정밀.
+- **예상:** ffn −9k ~ −11k.
+
+## V26_qkv_hsplit_x_halved
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V25_ffn_geglu_two_clusters`
 - **가설:** qkv DMA 큐 47k 중 복제 x 로드 5.4k(3.9 MB)와 x_trf 스테이징 1.2k(임계 경로)는 슬라이스당 x 전체
   [H]를 필요로 해서 생긴다. 투영을 H/1920 열 반으로 나누면(Q: `m![Qs / 16 % 128, H / 1920]` 16행×1920열,
   K/V: `m![Ps / 8 % 128, H / 1920]` 8행×1920열, 2-way `vector_inter_slice_reduce`) 슬라이스당 x가 절반이라
   복제 로드 바이트가 절반(V15의 8부 사본 기법 유지: `m![Dummy256 / 16, Dummy8, H / 1920]`), x_trf도 절반.
   weight DMA는 바이트 동일, 행 세그먼트 2배(모델상 +0.2 cycle/세그먼트 ≈ +1.7k)라 순이득은 x 쪽에서 나온다.
-  헤드 gather는 reduce 출력의 `1 # 2` 패딩이 섞인 ring-64가 된다(V24에서 패딩 ring 검증 후 진행).
+  헤드 gather는 reduce 출력의 `1 # 2` 패딩이 섞인 ring-64(`Broadcast1 { slice1: 64, slice0: 2 }` → ring 128)가 된다.
 - **변경 파일:** `src/device/sliding/projection.rs`, `src/ops.rs`
 - **예상:** qkv −2k ~ −3k.
 
-## V26_attnout_scale_in_rmsnorm
+## V27_attnout_scale_in_rmsnorm
 
 - **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V25_qkv_hsplit_x_halved`
+- **분기점:** `V26_qkv_hsplit_x_halved`
 - **가설:** attn_out 타임라인 head 3.75k = x 청크 594 + `?` 838 + **채널 scale 로드 1,318**(64 디스크립터 × 120 B)
   뒤에야 첫 weight 타일이 시작된다. scale은 V18에서 contraction epilogue로 옮겨 tile0 pass의 소비자가
   됐기 때문에 DMA 큐 선두에 선다. scale 곱을 post-attn rmsnorm의 두 pass(mean_square 앞의 MulF, 마지막
   정규화 pass의 MulF)에 접어 넣으면 scale 로드는 ReducingSlices 8 디스크립터(~550)로 tail에서 마지막 타일
   pass와 겹치고, epilogue의 narrow_split/MulF/widen이 빠진다. rms(s⊙x)는 scale된 값으로 계산하므로 수치 동일.
-- **변경 파일:** `src/device/sliding/projection.rs`, `src/device/shared/rmsnorm.rs`(`normalize_scaled_add` 추가), `src/ops.rs`
+- **변경 파일:** `src/device/sliding/projection.rs`, `src/device/shared/rmsnorm.rs`(`normalize_scaled_add_reduced` 추가), `src/ops.rs`
 - **예상:** attn_out −1.3k.
 
-## V27_ffn_16row_tiles
+## V28_ffn_16row_tiles
 
 - **상태:** 설계됨 (2026-09-09)
-- **분기점:** `V26_attnout_scale_in_rmsnorm`
-- **가설:** FFN DMA 166k 중 타일당 고정비(DmaLoad 디스크립터 고정 ~550 + `?` 838) × 15. V12에서 ROWS_PER_PASS=12가
+- **분기점:** `V27_attnout_scale_in_rmsnorm`
+- **가설:** FFN DMA 165k 중 타일당 고정비(DmaLoad 디스크립터 고정 ~550 + `?` 838) × 15. V12에서 ROWS_PER_PASS=12가
   scale VRF 한도(8 KB)로 정해졌지만 16행 × 120 f32 = 7.7 KB도 들어간다. 60 = 16+16+16+12로 행렬당 타일 4개
   (합계 12)로 하면 고정비 3개(≈4.2k)와 Sub 프리로드 3개가 빠진다. transpose는 `= 16 / 4`.
 - **변경 파일:** `src/device/shared/mlp.rs`
