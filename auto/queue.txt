@@ -45,3 +45,16 @@ V77_mix_qkv8_rest8
 V78_mix_qkv16_rest2
 V79_mix_qkv16_rest4
 V80_mix_qkv16_rest8
+
+# ffn row-tile sweep (up 16/16/16/12 and down 16/16/16/8/4 were makespan choices, never measured)
+V81_ffn_up_tiles_20x3
+V82_ffn_up_tiles_12x5
+V83_ffn_up_tiles_30x2
+V84_ffn_up_tiles_60x1
+V85_ffn_down_tiles_20x3
+V86_ffn_down_tiles_12x5
+V87_ffn_down_tiles_30x2
+V88_ffn_down_tiles_60x1
+V89_ffn_down_tiles_8x7_4
+V90_ffn_tiles_both_20x3
+V91_ffn_tiles_both_12x5
