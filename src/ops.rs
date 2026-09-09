@@ -68,7 +68,22 @@ pub fn sliding_project_qkv(
     // scale-invariant, so the factor is never undone.
     // One copy, not sixteen: a copy axis the source lacks does not replicate the store (V50).
     let x2_hbm = shared::mlp::stage_x_hi_lo_qkv_hbm(ctx, &x);
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    // Replicating x onto the 512 slices as one HBM load costs 512 DMA descriptors that all read
+    // the same 7.7 KB: on hardware that is ~45k cycles, not the 18k of the static model (V154).
+    // Instead eight copies per cluster come from HBM (16 descriptors) and a ring-32 switch
+    // broadcast fills each copy's 32 slices (V157: qkv 151k -> 108k, 3/3 PASS). The copies are
+    // loaded and switched on a real cluster axis: a pass on the dummy axis BothClusters serves
+    // one cluster only (V155).
+    let x8: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, 1 # 32], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
+        .main
+        .begin(x8.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
