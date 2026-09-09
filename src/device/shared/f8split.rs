@@ -103,6 +103,64 @@ macro_rules! max_square_fns {
     };
 }
 
+/// `hi_lo_fns!` with the scale as an immediate: for a consumer whose input is bounded a priori
+/// (the attention output, |x| <= sqrt(Ds) = 16) no scale has to be measured.
+#[macro_export]
+macro_rules! hi_lo_const_fns {
+    ($name:ident, $cl:ty, $sl:ty, $ax:ident, $n:literal, $n32:literal, $n16:literal, $n8:literal, $n4:literal) => {
+        fn $name(
+            ctx: &mut Context,
+            x: &DmTensor<bf16, Chip, $cl, $sl, m![$ax % $n]>,
+            s: f32,
+        ) -> (
+            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]>,
+            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]>,
+        ) {
+            let x_hi: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .sub
+                .begin(x.view())
+                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_init()
+                .vector_intra_slice_tag(TagMode::Zero)
+                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s)
+                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_final()
+                .cast::<f8e4m3, m![$ax % 8 # 32]>()
+                .commit_trim::<m![$ax % 8]>()
+                .commit();
+
+            let x_hi_vrf: VrfTensor<f32, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .sub
+                .begin(x_hi.view())
+                .fetch::<m![$ax / 32 % $n32], m![$ax % 32]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .to_vrf();
+
+            let x_lo: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .sub
+                .begin(x.view())
+                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_init()
+                .vector_intra_slice_tag(TagMode::Zero)
+                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s)
+                .vector_fp_binary(FpBinaryOp::SubF, &x_hi_vrf)
+                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_final()
+                .cast::<f8e4m3, m![$ax % 8 # 32]>()
+                .commit_trim::<m![$ax % 8]>()
+                .commit();
+            (x_hi, x_lo)
+        }
+    };
+}
+
 /// The two f8 pieces of a scaled vector: `hi = f8(x * s)` and `lo = f8(x * s - hi)`. Their sum is
 /// bf16(x) * s exactly (x has 8 significant bits, each f8e4m3 piece carries 4, and s is a power of
 /// two), so an f8 x f8 contraction against both reproduces the bf16 x f8 one, up to 1/s.

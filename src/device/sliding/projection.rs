@@ -3,7 +3,7 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
-use crate::{hi_lo_fns, max_square_fns, stage_packet_fns};
+use crate::hi_lo_const_fns;
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
@@ -216,23 +216,7 @@ pub(crate) fn project_output(
     let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
     // s = 16 is safe without measuring: the attention output is a convex combination of the
     // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
-    let m_local = max_square_x(ctx, &xs);
-    let sixteen: DmTensor<f32, Chip, Cluster, XSlices, m![1 # 8]> = ctx
-        .sub
-        .begin(m_local.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 0f32)
-        .vector_fp_binary(FpBinaryOp::AddF, 16f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
-    let s_vrf = stage_packet_x(ctx, &sixteen);
-    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, &s_vrf);
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
     x_hi.view()
         .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
@@ -342,9 +326,7 @@ type HiddenRows = m![H / 60 % 32, 1 # 8];
 type HiddenRowsByColumns = m![H / 60 % 32, Qs / 512];
 /// The attention output on eight slices, 512 elements each, for the f8 split.
 type XSlices = m![1 # 32, Qs / 512];
-stage_packet_fns!(stage_packet_x, Cluster, XSlices);
-max_square_fns!(max_square_x, Cluster, XSlices, Qs, 512, 32, 64, 128);
-hi_lo_fns!(hi_lo_x, Cluster, XSlices, Qs, 512, 16, 32, 64, 128);
+hi_lo_const_fns!(hi_lo_x, Cluster, XSlices, Qs, 512, 16, 32, 64, 128);
 
 fn apply_output_channel_scale(
     ctx: &mut Context,
