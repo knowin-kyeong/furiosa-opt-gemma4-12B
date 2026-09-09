@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | — | — | — | — | — | — | 설계됨 |
+| `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
 | `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
@@ -54,8 +54,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V36_qkv_scales_in_head_norms`**
-(…+V36 누적, 기하평균 5.654×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V37_ffn_upgate_pass_a_big_tiles`**
+(…+V37 누적, 기하평균 5.736×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -361,6 +361,30 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/device/shared/mlp.rs`
 - **정확도:** 연산 동일(같은 partial, 같은 pass B).
 - **예상:** ffn −2.8k(20행) ~ −8k(60행).
+
+### 측정 (변형별, ffn)
+
+| 변형 | ffn | 비고 |
+|---|---:|---|
+| V36 | 165,733 | up/gate pass A·B 모두 16/16/16/12 |
+| V37a (공유 60행 partials 버퍼, 같은 타일) | 166,380 | 통과. 버퍼 단위 의존성으로 pass B가 pass A 전부 뒤로 밀리고 DMA 순서가 바뀜(+647) |
+| V37b (pass A 20/20/20) | 163,799 | 통과 — 누산기 한도 없음 |
+| V37c (pass A 30/30) | 160,580 | |
+| **V37d (pass A 60: 행렬당 1 pass)** | **158,712** | 채택. DMA 큐에서 타일 6개 × (548 + 838) 제거 |
+| **기하평균 (V0 대비 누적)** | | **5.736** |
+
+- 60행 pass A = LUT-bound ~19k Main/행렬. up 로드(31k) 동안 아무것도 못 하지만 gate 로드(31k) 동안 up pass A가 돌아
+  DMA-bound 유지. pass B 8개(768)는 pass A 뒤에 몰린다.
+- **정확도:** 연산 동일(같은 partial·pass B). LUT/contraction 결과는 타일 경계와 무관.
+- **측정 방식:** makespan only.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** (1) `contract_lane` Sequential·시간 무축약 pass A에 행 수 한도는 없다(60행 × 30 × 2 = 3,600 시간 스텝 통과);
+  16행 한도는 pass B의 scale VRF(8 KB)뿐이었다. (2) 타일당 비용 = DMA 고정 548 + LUT 테이블 838 ≈ 1.4k. (3) down은
+  tail이 걸려 있어 타일을 키우면 Main이 못 따라간다(pass A 316/행 vs 로드 481/행 + 548: 다음 타일이 앞 타일의 0.66배
+  이상이어야 함) → 5타일 유지.
+- **다음:** ffn down x2 store 2회 → 1회(−1.65k), attn_out post-norm switch pass 제거, qkv x 복제(V26).
 
 ## V36_qkv_scales_in_head_norms
 

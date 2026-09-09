@@ -43,7 +43,8 @@
 | `V32_attnout_f8_contraction_no_lut` (…+V32 누적) | 46,541 | 29,318 | 165,733 | 5.533× |
 | `V33_attnout_immediate_scale` (…+V33 누적) | 46,541 | 28,002 | 165,733 | 5.618× |
 | `V35_attnout_trunc_split` (…+V35 누적; V34 기각·V35에 흡수) | 46,541 | 27,954 | 165,733 | 5.621× |
-| `V36_qkv_scales_in_head_norms` (…+V36 누적) | 45,744 | 27,954 | 165,733 | **5.654×** |
+| `V36_qkv_scales_in_head_norms` (…+V36 누적) | 45,744 | 27,954 | 165,733 | 5.654× |
+| `V37_ffn_upgate_pass_a_big_tiles` (…+V37 누적) | 45,744 | 27,954 | 158,712 | **5.736×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
