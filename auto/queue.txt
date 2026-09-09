@@ -74,4 +74,8 @@ V154_qkv_x_ring32_broadcast#r3
 V155_qkv_x_ring_broadcast_forms
 V155_qkv_x_ring_broadcast_forms#r2
 V155_qkv_x_ring_broadcast_forms#fix1
-V155_qkv_x_ring_broadcast_forms#fix2
+# V155_qkv_x_ring_broadcast_forms#fix2 (dropped: diagnosis complete - cluster 1 unserved)
+
+# Phase B4 - broadcast on a real cluster axis (V157 a/b/e), base x4 + each variant x4 per job.
+V157_qkv_x_ring_broadcast_both_clusters
+V157_qkv_x_ring_broadcast_both_clusters#r2
