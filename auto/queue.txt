@@ -1,10 +1,22 @@
 # auto/queue.txt — the unattended chain's work list (scripts/dev/auto/driver.sh on the pod).
 # One entry per line: BRANCH or BRANCH@COMMIT. Order = execution order. Lines starting with #
 # are ignored. Append lines (GitHub web editor is fine); the driver re-reads this file after
-# every entry and every idle poll (10 min). Entries with a final result are skipped.
+# every entry and every idle poll (10 min). Entries with a final result are skipped; entries
+# removed from this file are not re-submitted to Arena.
+#
+# Arena order once the pod is logged in: the denominator, the current head, then the accuracy
+# bisection ladder (RULES §10.1 step 3) so a failing lineage is located without a session.
 V0_baseline
 V38_post_norm_store_from_reducing
 V41_x2_hbm_copies
-V42_attnout_tile_shapes
-V40_ffn_down_pass_a_big_tiles@7c4abaa
-V40_ffn_down_pass_a_big_tiles
+V14_two_clusters
+V7_qkv_x_replicate_via_hbm
+V29_ffn_block_scale_after_contract
+V31_qkv_f8_contraction_no_lut
+V32_attnout_f8_contraction_no_lut
+V35_attnout_trunc_split
+V23_ffn_whole_scale_loads
+V22_attnout_weight_tiles
+V13_ffn_dma_trims
+V2_attnout_rows_over_256_slices
+V1_ffn_down_chunked_dequant
