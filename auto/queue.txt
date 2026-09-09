@@ -123,3 +123,11 @@ V165_qkv_broadcast_attnout_two_tiles#r6
 # Phase D - ffn hardware ablation ladder (f3 no gate scale load / f6 no post-norm tail / f7 no geglu), base x4 + each x4 per job, x2 jobs.
 V170_ffn_ablation_ladder
 V170_ffn_ablation_ladder#r2
+
+# Phase E - overnight: six more cold draws of the production candidate (score distribution for the submission decision).
+V165_qkv_broadcast_attnout_two_tiles#r7
+V165_qkv_broadcast_attnout_two_tiles#r8
+V165_qkv_broadcast_attnout_two_tiles#r9
+V165_qkv_broadcast_attnout_two_tiles#r10
+V165_qkv_broadcast_attnout_two_tiles#r11
+V165_qkv_broadcast_attnout_two_tiles#r12
