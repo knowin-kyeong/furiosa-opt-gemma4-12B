@@ -8,15 +8,14 @@ use crate::device::shared::rmsnorm::{self, ReducingSlices};
 
 const INVSQRT2: f32 = 0.70710678118f32;
 
-pub(crate) type UpGateRows = m![L / 60];
-pub(crate) type UpGateRowsPaired = m![L / 120, 1 # 2];
-
 /// Both clusters do real work on the up/gate projections: the L rows are split across the
 /// two clusters, then 128 row groups per cluster, and H across two 1920-column halves
 /// (512 slices x 60 rows x 1920 columns). The two half partials are summed across slices.
 type UpGateClusters = m![L / 7680];
 type UpGateRowsSplit = m![L / 60 % 128, 1 # 2];
 type UpGateRowsByColumns = m![L / 60 % 128, H / 1920];
+/// Eight row groups per slice after the ring-16 gather ahead of the geglu output store.
+type UpGateRowsGathered = m![L / 480 % 16, 1 # 16];
 
 pub(crate) fn project_up_and_gate(
     ctx: &mut Context,
@@ -26,8 +25,8 @@ pub(crate) fn project_up_and_gate(
     up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
     gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
 ) -> (
-    DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
-    DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
+    DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]>,
+    DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]>,
 ) {
     // All 5 tiles per matrix are issued up front into distinct
     // buffers so the loads stream back to back while each tile is dequantized as it lands.
@@ -80,16 +79,21 @@ pub(crate) fn project_up_and_gate(
     let w = dequant_up_gate_rows(ctx, &gate4, &gate_scale, 4);
     contract_up_gate_rows(ctx, &x_trf, &w, 4, &mut gate);
 
-    // Bring both results back to the single-cluster row layout geglu works on, through HBM
-    // (a cross-cluster DM-to-DM DMA is rejected by the synchronization checker).
-    let mut up_hbm: HbmTensor<bf16, Chip, m![L]> = HbmTensor::new();
-    up.view().to_hbm_view(&mut ctx.tdma, up_hbm.view_mut());
-    let mut gate_hbm: HbmTensor<bf16, Chip, m![L]> = HbmTensor::new();
-    gate.view().to_hbm_view(&mut ctx.tdma, gate_hbm.view_mut());
-    let up: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]> = up_hbm.to_dm(&mut ctx.tdma);
-    let gate: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]> = gate_hbm.to_dm(&mut ctx.tdma);
-
+    // Both stay in the two-cluster reduce layout: geglu runs there directly (see geglu_split).
     (up, gate)
+}
+
+/// A global scale as a scalar packet in the VRF of every slice of the reduce layout.
+fn load_global_scale(
+    ctx: &mut Context,
+    scale: &HbmTensor<f32, Chip, m![1]>,
+) -> VrfTensor<f32, Chip, UpGateClusters, UpGateRowsSplit, m![1 # 8]> {
+    let scale: DmTensor<f32, Chip, UpGateClusters, UpGateRowsSplit, m![1 # 8]> = scale.to_dm(&mut ctx.tdma);
+    ctx.sub
+        .begin(scale.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf()
 }
 
 /// Loads 12 packed rows x each slice's 1920-column half of one up/gate matrix.
@@ -184,9 +188,19 @@ pub(crate) fn feedforward(
         up_weight_scale,
         gate_weight_scale,
     );
-    let x = geglu(ctx, up, gate, up_global_scale, gate_global_scale);
-    // Stage the geglu output through HBM: a DM-to-DM relayout into the column-split layout
-    // costs 11.7k cycles, an HBM round trip a fraction of that (see V7).
+    let x = geglu_split(ctx, up, gate, up_global_scale, gate_global_scale);
+    // Stage the geglu output through HBM (see V7). Storing 60 rows from each of 256 slices
+    // costs 4.5k cycles of descriptors, so eight row groups are first gathered onto one slice
+    // over a ring of 16 (the live slices sit two apart): store 1,870, switch 503. Wider rings
+    // save nothing more on the store and cost more in the switch.
+    let x: DmTensor<bf16, Chip, UpGateClusters, UpGateRowsGathered, m![L % 480]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![L / 4 % 15], m![L % 4 # 16]>()
+        .switch::<UpGateRowsGathered, m![L / 4 % 15, L / 60 % 8]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 2 })
+        .collect::<m![L / 4 % 15, L / 60 % 8], m![L % 4 # 16]>()
+        .commit_trim::<m![L % 4]>()
+        .commit();
     let mut x_hbm: HbmTensor<bf16, Chip, m![L]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
     let down_hbm = project_down(ctx, &x_hbm, down_weight_packed, down_weight_scale);
@@ -223,121 +237,87 @@ pub(crate) fn feedforward(
     down
 }
 
-pub(crate) fn geglu(
+/// geglu on up and gate as the up/gate projections leave them: one row group of 60 per live
+/// slice, both clusters. 60 f32 do not fill 8-wide packets, so every 4-element packet is
+/// padded to 8 and the vector passes work on the live half (the V18 scale-packet pattern).
+/// The global scales are separate passes as in `geglu` (a pass has one Mul0 and one Mul1, and
+/// the gelu pass uses both; folding them into the contraction epilogue cost 1,050 cycles per
+/// 12-row pass).
+pub(crate) fn geglu_split(
     ctx: &mut Context,
-    up: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
-    gate: DmTensor<bf16, Chip, Cluster, UpGateRows, m![L % 60]>,
+    up: DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]>,
+    gate: DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]>,
     up_global_scale: &HbmTensor<f32, Chip, m![1]>,
     gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
-) -> DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]> {
-    let up: DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
-        .main
-        .begin(up.view())
-        .fetch::<m![L / 4 % 15], m![L % 4 # 16]>()
-        .switch::<UpGateRowsPaired, m![L / 4 % 15, L / 60 % 2]>(SwitchConfig::Broadcast1 { slice1: 2, slice0: 1 })
-        .collect::<m![L / 4 % 15, L / 60 % 2], m![L % 4 # 16]>()
-        .commit_trim::<m![L % 4]>()
-        .commit();
+) -> DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]> {
+    let up_global_scale_vrf = load_global_scale(ctx, up_global_scale);
+    let gate_global_scale_vrf = load_global_scale(ctx, gate_global_scale);
 
-    let up_global_scale: DmTensor<f32, Chip, Cluster, UpGateRowsPaired, m![1 # 8]> =
-        up_global_scale.to_dm(&mut ctx.tdma);
-    let up_global_scale_vrf: VrfTensor<f32, Chip, Cluster, UpGateRowsPaired, m![1 # 8]> = ctx
-        .sub
-        .begin(up_global_scale.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .to_vrf();
+    let up = scale_split_rows(ctx, &up, &up_global_scale_vrf);
+    let gate = scale_split_rows(ctx, &gate, &gate_global_scale_vrf);
 
-    let up: DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
-        .main
-        .begin(up.view())
-        .fetch::<m![1], m![L % 120]>()
-        .fetch_cast::<f32>()
-        .collect::<m![L / 8 % 15], m![L % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![L / 4 % 30], m![L % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &up_global_scale_vrf)
-        .vector_widen_concat::<m![L / 8 % 15], m![L % 8]>()
-        .vector_final()
-        .cast::<bf16, m![L % 8 # 16]>()
-        .commit_trim::<m![L % 8]>()
-        .commit();
-
-    let gate_global_scale: DmTensor<f32, Chip, Cluster, UpGateRowsPaired, m![1 # 8]> =
-        gate_global_scale.to_dm(&mut ctx.tdma);
-    let gate_global_scale_vrf: VrfTensor<f32, Chip, Cluster, UpGateRowsPaired, m![1 # 8]> = ctx
-        .sub
-        .begin(gate_global_scale.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .to_vrf();
-
-    let gate: DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
-        .main
-        .begin(gate.view())
-        .fetch::<m![L / 4 % 15], m![L % 4 # 16]>()
-        .switch::<UpGateRowsPaired, m![L / 4 % 15, L / 60 % 2]>(SwitchConfig::Broadcast1 { slice1: 2, slice0: 1 })
-        .collect::<m![L / 4 % 15, L / 60 % 2], m![L % 4 # 16]>()
-        .commit_trim::<m![L % 4]>()
-        .commit();
-
-    let gate: DmTensor<bf16, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
-        .main
-        .begin(gate.view())
-        .fetch::<m![1], m![L % 120]>()
-        .fetch_cast::<f32>()
-        .collect::<m![L / 8 % 15], m![L % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![L / 4 % 30], m![L % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &gate_global_scale_vrf)
-        .vector_widen_concat::<m![L / 8 % 15], m![L % 8]>()
-        .vector_final()
-        .cast::<bf16, m![L % 8 # 16]>()
-        .commit_trim::<m![L % 8]>()
-        .commit();
-
-    let gelu: DmTensor<f32, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
+    let gelu: DmTensor<f32, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]> = ctx
         .sub
         .begin(gate.view())
-        .fetch::<m![1], m![L % 120]>()
+        .fetch::<m![L / 4 % 15], m![L % 4 # 8]>()
         .fetch_cast::<f32>()
-        .collect::<m![L / 8 % 15], m![L % 8]>()
+        .collect::<m![L / 4 % 15], m![L % 4 # 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![L / 4 % 30], m![L % 4]>()
+        .vector_narrow_split::<m![L / 4 % 15, 1 # 2], m![L % 4]>()
         .vector_stash()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), INVSQRT2)
         .vector_fp_unary(FpUnaryOp::Erf)
         .vector_fp_binary(FpBinaryOp::AddF, 1f32)
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), Stash)
-        .vector_widen_concat::<m![L / 8 % 15], m![L % 8]>()
+        .vector_widen_concat::<m![L / 4 % 15], m![L % 4 # 8]>()
         .vector_final()
-        .commit_trim::<m![L % 8]>()
+        .commit_trim::<m![L % 4]>()
         .commit();
 
-    let gelu_vrf: VrfTensor<f32, Chip, Cluster, UpGateRowsPaired, m![L % 120]> = ctx
+    let gelu_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsSplit, m![L / 4 % 15, L % 4 # 8]> = ctx
         .sub
         .begin(gelu.view())
-        .fetch::<m![L / 8 % 15], m![L % 8]>()
-        .collect::<m![L / 8 % 15], m![L % 8]>()
+        .fetch::<m![L / 4 % 15], m![L % 4 # 8]>()
+        .collect::<m![L / 4 % 15], m![L % 4 # 8]>()
         .to_vrf();
 
     ctx.main
         .begin(up.view())
-        .fetch::<m![L / 8 % 15], m![L % 8]>()
+        .fetch::<m![L / 4 % 15], m![L % 4 # 8]>()
         .fetch_cast::<f32>()
-        .collect::<m![L / 8 % 15], m![L % 8]>()
+        .collect::<m![L / 4 % 15], m![L % 4 # 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![L / 4 % 30], m![L % 4]>()
+        .vector_narrow_split::<m![L / 4 % 15, 1 # 2], m![L % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &gelu_vrf)
         .vector_fp_div(2f32)
-        .vector_widen_concat::<m![L / 8 % 15], m![L % 8]>()
+        .vector_widen_concat::<m![L / 4 % 15], m![L % 4 # 8]>()
         .vector_final()
-        .cast::<bf16, m![L % 8 # 16]>()
-        .commit_trim::<m![L % 8]>()
+        .cast::<bf16, m![L % 4 # 16]>()
+        .commit_trim::<m![L % 4]>()
+        .commit()
+}
+
+/// One row group per slice times a global scale, bf16 in and out.
+fn scale_split_rows(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]>,
+    scale_vrf: &VrfTensor<f32, Chip, UpGateClusters, UpGateRowsSplit, m![1 # 8]>,
+) -> DmTensor<bf16, Chip, UpGateClusters, UpGateRowsSplit, m![L % 60]> {
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![L / 4 % 15], m![L % 4 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![L / 4 % 15], m![L % 4 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![L / 4 % 15, 1 # 2], m![L % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), scale_vrf)
+        .vector_widen_concat::<m![L / 4 % 15], m![L % 4 # 8]>()
+        .vector_final()
+        .cast::<bf16, m![L % 4 # 16]>()
+        .commit_trim::<m![L % 4]>()
         .commit()
 }
 
