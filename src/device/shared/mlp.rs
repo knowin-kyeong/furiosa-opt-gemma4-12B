@@ -369,6 +369,8 @@ macro_rules! up_gate_reduce_fns {
 }
 up_gate_contract_fns!(load_up_gate_rows_60, contract_up_gate_rows_60, 60);
 up_gate_reduce_fns!(reduce_up_gate_rows_16, 16);
+up_gate_reduce_fns!(reduce_up_gate_rows_20, 20);
+up_gate_reduce_fns!(reduce_up_gate_rows_40, 40);
 up_gate_reduce_fns!(reduce_up_gate_rows_12, 12);
 
 pub(crate) fn feedforward(
@@ -421,14 +423,10 @@ pub(crate) fn feedforward(
     let mut gate_partials: DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> = DmTensor::new();
     contract_up_gate_rows_60(ctx, &x_trf, &up0, 0, &mut up_partials);
     contract_up_gate_rows_60(ctx, &x_trf, &gate0, 0, &mut gate_partials);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 0, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 0, &mut gate);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 16, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 16, &mut gate);
-    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 32, &mut up);
-    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 32, &mut gate);
-    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 48, &mut up);
-    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 48, &mut gate);
+    reduce_up_gate_rows_40(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_rows_40(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_rows_20(ctx, &up_partials, &up_scale, 40, &mut up);
+    reduce_up_gate_rows_20(ctx, &gate_partials, &gate_scale, 40, &mut gate);
 
     // geglu runs in the up/gate reduce layout (see geglu_split); its output is staged through
     // HBM (see V7). Storing 60 rows from each of 256 slices costs 4.5k cycles of descriptors,
