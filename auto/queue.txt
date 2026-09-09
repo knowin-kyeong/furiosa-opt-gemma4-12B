@@ -84,3 +84,7 @@ V157_qkv_x_ring_broadcast_both_clusters#r2
 V158_qkv_x_ring32_broadcast
 V158_qkv_x_ring32_broadcast#r2
 V158_qkv_x_ring32_broadcast#r3
+
+# Phase B6 - ffn/attn_out x2 ring broadcasts (V159 ffn, V161 attn_out) with base interleaved, x2 jobs.
+V159_ffn_attnout_x_ring_broadcast
+V159_ffn_attnout_x_ring_broadcast#r2
