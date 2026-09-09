@@ -1,0 +1,6 @@
+# auto/queue.txt — the unattended chain's work list (scripts/dev/auto/driver.sh on the pod).
+# One entry per line: BRANCH or BRANCH@COMMIT. Order = execution order. Lines starting with #
+# are ignored. Append lines (GitHub web editor is fine); the driver re-reads this file after
+# every entry and every idle poll (10 min). Entries with a final result are skipped.
+V0_baseline
+V38_post_norm_store_from_reducing
