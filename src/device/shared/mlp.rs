@@ -279,18 +279,18 @@ fn broadcast_inv_s_down(
     stage_packet_down(ctx, &all)
 }
 
-/// The up/gate tile helpers for one tile height: load `$rows` packed rows x each slice's
-/// 1920-column half; contract them with x into per-16-column-block partial sums (pass A); scale
-/// the block partials, reduce them along the columns and across the two column halves (pass B).
+/// The up/gate pass-A helpers for one tile height: load `$rows` packed rows x each slice's
+/// 1920-column half and contract them with x into per-16-column-block partial sums, written into
+/// the tile of a 60-row partials buffer (so pass B can tile the rows independently).
 ///
 /// Pass A streams the f4 -> f8 lookup straight into an f8 x f8 contraction (f32 accumulate):
 /// x is held in the TRF as two f8 pieces, `x_hi = f8(x)` and `x_lo = f8(x - x_hi)`, whose sum is
 /// the bf16 x exactly, and each weight packet is streamed twice (the `Dummy2` time axis) so the
-/// Time Reducer adds the two dot products. No vector work: the dequantization pass (4-lane f32
-/// multiply over every weight element) is gone, and pass B touches 1/16 of the elements. Stamped
-/// out per tile height: 16 (the scale VRF takes 16 x 120 f32 = 7.7 KB) and the 12-row remainder.
-macro_rules! up_gate_tile_fns {
-    ($load:ident, $contract:ident, $reduce:ident, $rows:literal) => {
+/// Time Reducer adds the two dot products. Every pass reloads the 4 KB lookup table (838 cycles
+/// of DMA) and every tile load has ~550 cycles of fixed DMA cost, so the tiles are as tall as the
+/// contraction allows; the pass-B tiles stay at 16 rows (the scale VRF holds 16 x 120 f32).
+macro_rules! up_gate_contract_fns {
+    ($load:ident, $contract:ident, $rows:literal) => {
         fn $load(
             ctx: &mut Context,
             packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
@@ -307,7 +307,9 @@ macro_rules! up_gate_tile_fns {
             ctx: &mut Context,
             x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![1], m![Dummy2, H % 1920]>,
             packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60 = $rows, H % 1920]>,
-        ) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60 = $rows, H / 16 % 120]> {
+            offset: usize,
+            partials: &mut DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]>,
+        ) {
             ctx.main
                 .begin(packed.view())
                 .fetch::<m![L % 60 = $rows, H / 64 % 30, Dummy2], m![H % 64]>()
@@ -318,13 +320,18 @@ macro_rules! up_gate_tile_fns {
                 .contract_time::<m![L % 60 = $rows, H / 64 % 30]>()
                 .contract_lane::<m![L % 60 = $rows, H / 64 % 30], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
                 .commit_trim::<m![H / 16 % 4]>()
-                .commit()
+                .commit_view(partials.view_mut().tile::<m![L % 60], $rows, m![L % 60 = $rows #{!} 60, H / 16 % 120]>(offset));
         }
+    };
+}
 
-        /// Pass B: block scales, column reduction and the cross-slice sum of the column chunks.
+/// Pass B for one tile height: block scales, column reduction and the cross-slice sum of the
+/// column chunks, over a `$rows`-row tile of the partials buffer.
+macro_rules! up_gate_reduce_fns {
+    ($reduce:ident, $rows:literal) => {
         fn $reduce(
             ctx: &mut Context,
-            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60 = $rows, H / 16 % 120]>,
+            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]>,
             scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]>,
             offset: usize,
             out: &mut DmTensor<bf16, Chip, UpGateClusters, UpGateRowsPairs, m![L % 60]>,
@@ -338,7 +345,7 @@ macro_rules! up_gate_tile_fns {
                 .to_vrf();
 
             ctx.main
-                .begin(partials.view())
+                .begin(partials.view().tile::<m![L % 60], $rows, m![L % 60 = $rows # 60, H / 16 % 120]>(offset))
                 .fetch::<m![L % 60 = $rows, H / 128 % 15], m![H / 16 % 8]>()
                 .collect::<m![L % 60 = $rows, H / 128 % 15], m![H / 16 % 8]>()
                 .vector_init()
@@ -356,8 +363,9 @@ macro_rules! up_gate_tile_fns {
         }
     };
 }
-up_gate_tile_fns!(load_up_gate_rows_16, contract_up_gate_rows_16, reduce_up_gate_rows_16, 16);
-up_gate_tile_fns!(load_up_gate_rows_12, contract_up_gate_rows_12, reduce_up_gate_rows_12, 12);
+up_gate_contract_fns!(load_up_gate_rows_60, contract_up_gate_rows_60, 60);
+up_gate_reduce_fns!(reduce_up_gate_rows_16, 16);
+up_gate_reduce_fns!(reduce_up_gate_rows_12, 12);
 
 pub(crate) fn feedforward(
     ctx: &mut Context,
@@ -378,18 +386,12 @@ pub(crate) fn feedforward(
     // little dequant + contract work trails the final weight load. Only the packed f4 tiles
     // reach DM: the f4 -> f8 lookup and f8 -> f32 cast run in the fetch stage of the scale
     // pass.
-    let up0 = load_up_gate_rows_16(ctx, up_weight_packed, 0);
+    let up0 = load_up_gate_rows_60(ctx, up_weight_packed, 0);
     let up_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> =
         up_weight_scale.to_dm(&mut ctx.tdma);
-    let gate0 = load_up_gate_rows_16(ctx, gate_weight_packed, 0);
+    let gate0 = load_up_gate_rows_60(ctx, gate_weight_packed, 0);
     let gate_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> =
         gate_weight_scale.to_dm(&mut ctx.tdma);
-    let up1 = load_up_gate_rows_16(ctx, up_weight_packed, 16);
-    let gate1 = load_up_gate_rows_16(ctx, gate_weight_packed, 16);
-    let up2 = load_up_gate_rows_16(ctx, up_weight_packed, 32);
-    let gate2 = load_up_gate_rows_16(ctx, gate_weight_packed, 32);
-    let up3 = load_up_gate_rows_12(ctx, up_weight_packed, 48);
-    let gate3 = load_up_gate_rows_12(ctx, gate_weight_packed, 48);
     let down0 = load_down_rows_16(ctx, down_weight_packed, 0);
     let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
@@ -411,22 +413,18 @@ pub(crate) fn feedforward(
     // scales are applied to those partials (pass B); see the tile helpers.
     let mut up: DmTensor<bf16, Chip, UpGateClusters, UpGateRowsPairs, m![L % 60]> = DmTensor::new();
     let mut gate: DmTensor<bf16, Chip, UpGateClusters, UpGateRowsPairs, m![L % 60]> = DmTensor::new();
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &up0);
-    reduce_up_gate_rows_16(ctx, &p, &up_scale, 0, &mut up);
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &gate0);
-    reduce_up_gate_rows_16(ctx, &p, &gate_scale, 0, &mut gate);
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &up1);
-    reduce_up_gate_rows_16(ctx, &p, &up_scale, 16, &mut up);
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &gate1);
-    reduce_up_gate_rows_16(ctx, &p, &gate_scale, 16, &mut gate);
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &up2);
-    reduce_up_gate_rows_16(ctx, &p, &up_scale, 32, &mut up);
-    let p = contract_up_gate_rows_16(ctx, &x_trf, &gate2);
-    reduce_up_gate_rows_16(ctx, &p, &gate_scale, 32, &mut gate);
-    let p = contract_up_gate_rows_12(ctx, &x_trf, &up3);
-    reduce_up_gate_rows_12(ctx, &p, &up_scale, 48, &mut up);
-    let p = contract_up_gate_rows_12(ctx, &x_trf, &gate3);
-    reduce_up_gate_rows_12(ctx, &p, &gate_scale, 48, &mut gate);
+    let mut up_partials: DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> = DmTensor::new();
+    let mut gate_partials: DmTensor<f32, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> = DmTensor::new();
+    contract_up_gate_rows_60(ctx, &x_trf, &up0, 0, &mut up_partials);
+    contract_up_gate_rows_60(ctx, &x_trf, &gate0, 0, &mut gate_partials);
+    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 16, &mut up);
+    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 16, &mut gate);
+    reduce_up_gate_rows_16(ctx, &up_partials, &up_scale, 32, &mut up);
+    reduce_up_gate_rows_16(ctx, &gate_partials, &gate_scale, 32, &mut gate);
+    reduce_up_gate_rows_12(ctx, &up_partials, &up_scale, 48, &mut up);
+    reduce_up_gate_rows_12(ctx, &gate_partials, &gate_scale, 48, &mut gate);
 
     // geglu runs in the up/gate reduce layout (see geglu_split); its output is staged through
     // HBM (see V7). Storing 60 rows from each of 256 slices costs 4.5k cycles of descriptors,
