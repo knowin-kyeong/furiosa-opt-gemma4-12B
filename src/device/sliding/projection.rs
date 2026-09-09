@@ -216,6 +216,410 @@ pub(crate) fn project_output(
     contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
     gathered_hbm
 }
+pub(crate) fn project_output_t52(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> HbmTensor<bf16, Chip, m![H]> {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 52, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 52, m![H / 60, H % 60 = 52 # 60, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 8, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 8, m![H / 60, H % 60 = 8 # 60, Qs]>(52)
+        .to_dm(&mut ctx.tdma);
+
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 52, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 52, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 52, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 52]>()
+        .contract_lane::<m![H % 60 = 52], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 52]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 52 / 4], m![H % 60 = 52 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 52 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 52, m![H % 60 = 52 #{!} 60]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 8, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 8, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 8, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 8]>()
+        .contract_lane::<m![H % 60 = 8], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 8]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 8 / 4], m![H % 60 = 8 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 8 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 8, m![H % 60 = 8 #{!} 60]>(52));
+
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+    gathered_hbm
+}
+
+pub(crate) fn project_output_t44(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> HbmTensor<bf16, Chip, m![H]> {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 44, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 44, m![H / 60, H % 60 = 44 # 60, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 16, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 16, m![H / 60, H % 60 = 16 # 60, Qs]>(44)
+        .to_dm(&mut ctx.tdma);
+
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 44, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 44, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 44, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 44]>()
+        .contract_lane::<m![H % 60 = 44], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 44]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 44 / 4], m![H % 60 = 44 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 44 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 44, m![H % 60 = 44 #{!} 60]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 16, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 16, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 16, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 16]>()
+        .contract_lane::<m![H % 60 = 16], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 16]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 16 / 4], m![H % 60 = 16 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 16 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 16, m![H % 60 = 16 #{!} 60]>(44));
+
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+    gathered_hbm
+}
+
+pub(crate) fn project_output_t40(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> HbmTensor<bf16, Chip, m![H]> {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 40, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 40, m![H / 60, H % 60 = 40 # 60, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 20, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 20, m![H / 60, H % 60 = 20 # 60, Qs]>(40)
+        .to_dm(&mut ctx.tdma);
+
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 40, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 40, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 40, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 40]>()
+        .contract_lane::<m![H % 60 = 40], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 40]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 40 / 4], m![H % 60 = 40 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 40 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 40, m![H % 60 = 40 #{!} 60]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 20, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 20]>()
+        .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 20]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 20 / 4], m![H % 60 = 20 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 20 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 20, m![H % 60 = 20 #{!} 60]>(40));
+
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+    gathered_hbm
+}
+
+pub(crate) fn project_output_t56(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> HbmTensor<bf16, Chip, m![H]> {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 56, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 56, m![H / 60, H % 60 = 56 # 60, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 4, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 4, m![H / 60, H % 60 = 4 # 60, Qs]>(56)
+        .to_dm(&mut ctx.tdma);
+
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 56, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 56, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 56, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 56]>()
+        .contract_lane::<m![H % 60 = 56], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 56]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 56 / 4], m![H % 60 = 56 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 56 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 56, m![H % 60 = 56 #{!} 60]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 60 = 4, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 4, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 4, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 4]>()
+        .contract_lane::<m![H % 60 = 4], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 4]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 4 / 4], m![H % 60 = 4 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 4 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 60], 4, m![H % 60 = 4 #{!} 60]>(56));
+
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+    gathered_hbm
+}
+
+pub(crate) fn project_output_t60(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> HbmTensor<bf16, Chip, m![H]> {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 60, Qs % 512]> = weight
+        .view()
+        .tile::<m![H % 60], 60, m![H / 60, H % 60 = 60 # 60, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 60 = 60, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 60, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 60, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 60 = 60]>()
+        .contract_lane::<m![H % 60 = 60], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows, m![H % 60 = 60]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 60 = 60 / 4], m![H % 60 = 60 % 4 # 16]>()
+        .commit_trim::<m![H % 60 = 60 % 4]>()
+        .commit_view(contraction.view_mut());
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+    gathered_hbm
+}
+
 
 type TwoClusters = m![H / 1920];
 type HiddenRows = m![H / 60 % 32, 1 # 8];
