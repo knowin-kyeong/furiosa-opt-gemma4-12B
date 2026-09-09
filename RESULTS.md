@@ -15,7 +15,7 @@ RNGD cycles만 점수다.
 | `V162_attnout_two_tiles_broadcast` (V162 48/12, V163 40/20) | `V159` | attn_out O-weight DMA 타일 3 → 2(Phase C 단발 −2.5k)를 v161(x2 broadcast) 위에 얹어 base·v161·v162·v163을 한 잡에서 4회씩 | — | 28,223 (v162) / 27,900 (v163) | — | — | — | ? | 구현됨 (`29fa190`), Arena 2잡 큐 |
 | `V160_qkv_weights_half_descriptors` | `V157` | **weight 스트림이 디스크립터 발행에 묶였는지 검증.** Q를 클러스터당 128 live 슬라이스 × 16행(`m![Qs / 16 % 128, 1 # 2]`), K/V를 128 × 8행으로 → weight당 디스크립터 512 → 256, 슬라이스당 바이트 2배. head gather는 stride-2 ring-64(`Broadcast1 { slice1: 64, slice0: 2 }`). v157a와 같은 잡에서 비교 | 45,791 | 27,424 | 157,763 | — | — | ? | 구현됨 (`184f370`), Arena 2잡 큐 |
 | `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | job 15566: qkv **cold 107,552** / warm 108,556 · 110,686; attn_out 58,474 / 57,830; ffn 353,628 / 351,700 | **3/3 PASS** | **채택 후보 (실측 SOTA)** — 리더보드 제출은 사용자 지시 대기 |
-| `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | 44,792 (qkv v157a) | **27,663** (v161) | **155,561** (v159) | — | — | ? | 구현됨 (`2ac4b3c`), Arena 2잡 큐 |
+| `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | 44,792 (qkv v157a) | 27,663 (v161) | 155,561 (v159) | — | job 15570: attn_out v161 median 56,491 vs base 55,548; ffn v159 344,358 vs base 342,369 (n=4, stdev ≤1.1k) | 전부 PASS | **기각** — 이득 없음. 병리는 "같은 영역을 512 디스크립터가 읽는" qkv에만 있었다 |
 | `V157_qkv_x_ring_broadcast_both_clusters` | `V154` | V155의 진단: `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 **실제 클러스터 축 `Qs / 2048`** 위에서 하고 끝에 Replicated로 reshape. (a) 실축 직접 로드 + 32 B 패킷 ring 32, (b) 더미축 로드 후 reshape → switch, (e) 실축 16부 ring 16 | 44,792 (a·b) / 44,998 (e) | 27,424 | 157,763 | — | job 15563: qkv v157a **108,374** (cold 117,689, stdev 1.3k) · v157b 111,920 · v157e 108,641 vs base 151,163 (cold 163,293) | **3/3 PASS** (전 실행) | **채택 후보 — qkv −28%** → 프로덕션 V158 |
 | `V155_qkv_x_ring_broadcast_forms` | `V154` | V154의 기전을 유지하고 **매핑 표기만 바꾼 4형**: (a) 32 B 패킷 시간축을 switch에 통과, (f) `Dummy256 / 32, 1 # 32` → `Dummy256 / 32, Dummy256 % 32` 단일 축 인수분해 ring 32, (e) 16부 + ring 16(정적 3.8k), (d) 4부 + ring 64. 하네스에 실패 원소의 64-그룹 히스토그램과 변형별 cold/median/stdev 요약 추가 | 44,792 (a·g) / 44,998 (e) / 45,099 (d) | 27,424 | 157,763 | — | job 15559: v155a **106,734** (stdev 1.7k) · g 107,168 · e 108,295 (stdev 207) · d 108,393 vs base 150,823 (stdev 6.2k) | 네 형 모두 FAIL — **cluster 1만 틀림**(q 행 2048~4095, k/v head 4~7), cluster 0은 완전히 맞음 | **기전 확인, 원인 = 더미 클러스터 축** → V157 |
 | `V154_qkv_x_ring32_broadcast` | `V82` (하네스는 V151 브랜치 것) | **x 복제 로드(512 디스크립터, 정적 18.4k, util 0.157) → HBM에서 클러스터당 8부(16 디스크립터) + ring-32 `CustomBroadcast`(32 × 240 flit).** 책의 문서화된 형태(`1 # 32` 패딩 슬롯 → live 축). V138이 "바이트가 아니다"를 보였으므로 디스크립터 수를 512 → 16으로 | **44.8k** (v154; switch pass 7,943) | 27,424 | 157,763 | — | job 15555/15556/15557: qkv v154 **104,968 / 111,154 / 107,652** (base 152,427 / 144,741 / 151,148) | qkv **FAIL** (q/k/v 원소 54~57%만 tol 안, max\|Δ\| 6~7) | **−40k(−28%) 확인, 정확도만 남음** → V155 |
@@ -323,6 +323,17 @@ attn_out O-weight DMA 타일(각 1회):
 
 **설계 원칙(갱신):** DMA 디스크립터 수(그리고 같은 HBM 영역을 여러 디스크립터가 반복 읽는 패턴)를 먼저 센다. 큰 복제 로드는 "적은 디스크립터 +
 on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적은 슬라이스)로.
+
+## V159/V161 — ffn·attn_out x2 ring broadcast: 기각 (2026-09-09 15:55 UTC, job 15570)
+
+| 커널 | base median (n=3 warm) | 변형 median | Δ |
+|---|---:|---:|---:|
+| attn_out (v161: x2 512 → 128 디스크립터 + ring 32) | 55,548 (stdev 1.1k) | 56,491 (stdev 0.5k) | +0.9k |
+| ffn (v159: up/gate x2 512 → 32, down x2 512 → 128 + ring 32 ×2) | 342,369 (stdev 0.9k) | 344,358 (stdev 0.8k) | +2.0k |
+
+- 정확도 PASS(형태는 옳다). 이득이 없으므로 **"디스크립터 수"가 일반 법칙은 아니다**: qkv의 x2 로드가 특별했던 이유는 512개
+  디스크립터가 **같은 7.7 KB 한 영역**을 읽는 것(HBM 채널 직렬화)이고, ffn(영역당 256개)·attn_out(영역당 64개)은 그 문턱 아래다.
+- 부수 관찰: 이 잡의 ffn base warm median 342k는 평소 cold 350k보다 낮다(ffn도 cold 페널티 ~8k가 있다).
 
 ## V158_qkv_x_ring32_broadcast — 프로덕션 (2026-09-09 15:48 UTC, job 15566)
 
