@@ -104,6 +104,8 @@ pub fn sliding_project_qkv(
         rope_offset,
         cos,
         sin,
+        q_rms_weight,
+        k_rms_weight,
     );
 
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());

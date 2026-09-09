@@ -255,13 +255,21 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
     ctx: &mut Context,
     q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
     k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
-    rope_offset: &HbmTensor<i32, Chip, m![1]>,
-    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
-    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    _rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    _cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    _sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    cos_stub: &HbmTensor<bf16, Chip, m![Ds]>,
+    sin_stub: &HbmTensor<bf16, Chip, m![Ds]>,
 ) -> (
     DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
     DmTensor<bf16, Chip, C, S, m![Ds]>,
 ) {
+    // V147 ablation: the two indexed gathers and their HBM hop are replaced by plain [Ds]
+    // loads of stand-in vectors (the q/k norm weights): same bytes into the same layout, so
+    // that the hardware cost of the gathers can be read off (accuracy fails by design).
+    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos_stub.to_dm(&mut ctx.tdma);
+    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin_stub.to_dm(&mut ctx.tdma);
+    /*
     // The gathered rows land on one cluster; stage them through HBM so both clusters can
     // load them into the head layout (a DM-to-DM DMA cannot change the cluster mapping).
     // V30 gathered straight into the head layout on the premise that a cluster or slice axis
@@ -276,6 +284,7 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
     sin_row.view().to_hbm_view(&mut ctx.tdma, sin_hbm.view_mut());
     let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos_hbm.to_dm(&mut ctx.tdma);
     let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin_hbm.to_dm(&mut ctx.tdma);
+    */
 
     let cos_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
