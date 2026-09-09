@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행 | — | — | — | — | — | — | 설계됨 |
 | `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
 | `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
@@ -343,6 +344,20 @@ L=15360이면 60 × 256.
   **실측 검증 필요.**
 
 ### 판정: makespan 측정 (실측 대기)
+
+## V35_attnout_trunc_split
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V33_attnout_immediate_scale`
+- **가설:** V33/V34에서 tile0 로드 발행(2,554)은 x_lo pass의 발행 시점과 일치한다. x_lo는 x_hi(cast f8 → DM) → x_hi VRF 재로드
+  (327) → 지연 200을 거쳐야 발행된다. hi를 Cast Engine 반올림 대신 VE의 비트 마스크로 만들면(bf16 x의 유효 8비트 중 상위 4비트:
+  `BitAnd 0xFFF00000`; s=16이 2의 거듭제곱이라 마스크와 스케일이 가환) hi는 e4m3에 정확히 들어가고 lo = 16·(x − trunc x)는
+  나머지 ≤4비트라 역시 정확(|lo| ≥ 2^-9·… 구간; 바닥은 기존과 같은 max|x|/4096). 두 pass 모두 x만 읽으므로 x_lo가 x_hi 직후에
+  발행되고(≈1,950) tile0 로드가 −600 앞당겨진다. VE 스테이지 순서(Tag → Logic → Narrow → Fp)상 마스크는 곱보다 앞에 온다.
+- **변경 파일:** `src/device/shared/f8split.rs`(`hi_lo_trunc_fns!`), `src/device/sliding/projection.rs`
+- **정확도:** hi + lo = bf16(x)·16 exact(동일 바닥). hi가 반올림이 아니라 절단이라 hi·w + lo·w의 f32 합산에서 부분합의 크기 분포만
+  달라짐(결과 동일 수학). 마스크 즉치는 NaN 비트패턴(0xFFF00000)이라 컴파일러가 비트를 보존하는지 **실측 검증 필요**.
+- **예상:** attn_out −0.5k ~ −0.7k.
 
 ## V34_attnout_scale_in_rmsnorm
 
