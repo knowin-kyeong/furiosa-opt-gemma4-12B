@@ -382,7 +382,7 @@ pub(crate) fn feedforward(
 ) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
     // All weight tiles are issued up front into distinct buffers so the loads stream back to
     // back while each tile is contracted as it lands. up/gate: one 60-row pass-A tile per
-    // matrix; down: 3 tiles (28, 28 and 4 rows), the last one small so that little pass-A +
+    // matrix; down: 4 tiles (16, 24, 16 and 4 rows), the last one small so that little pass-A +
     // pass-B work trails the final weight load. Only the packed f4 tiles reach DM: the
     // f4 -> f8 lookup runs in the fetch stage of pass A.
     let up0 = load_up_gate_rows_60(ctx, up_weight_packed, 0);
@@ -391,11 +391,16 @@ pub(crate) fn feedforward(
     let gate0 = load_up_gate_rows_60(ctx, gate_weight_packed, 0);
     let gate_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> =
         gate_weight_scale.to_dm(&mut ctx.tdma);
-    let down0 = load_down_rows_28(ctx, down_weight_packed, 0);
+    // Down tiles 16/24/16/4: the first tile is loaded before the geglu output is staged, so
+    // it stays small (its load delays that staging); after it the DMA queue (tiles + lookup
+    // tables) must stay ahead of the pass-A chain on the main context; the last tile is
+    // small so that little work trails the final load.
+    let down0 = load_down_rows_16(ctx, down_weight_packed, 0);
     let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
-    let down1 = load_down_rows_28(ctx, down_weight_packed, 28);
-    let down2 = load_down_rows_4(ctx, down_weight_packed, 56);
+    let down1 = load_down_rows_24(ctx, down_weight_packed, 16);
+    let down2 = load_down_rows_16(ctx, down_weight_packed, 40);
+    let down3 = load_down_rows_4(ctx, down_weight_packed, 56);
 
     // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA).
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![Dummy2, H % 1920]> = x2.to_dm(&mut ctx.tdma);
@@ -450,20 +455,22 @@ pub(crate) fn feedforward(
         .collect::<m![Dummy2, L / 32 % 60], m![L % 32]>()
         .to_trf();
 
-    // Pass A per tile (28, 28 and 4 rows) into that tile's own 60-row partials buffer at the
-    // tile's row offset; pass B over 16- and 12-row tile views of it (the scale VRF limit).
+    // Pass A per tile (16, 24, 16 and 4 rows) into that tile's own 60-row partials buffer at
+    // the tile's row offset; pass B over at most 16-row tile views of it (the scale VRF limit).
     let mut down: DmTensor<bf16, Chip, DownClusters, DownRows, m![H % 60]> = DmTensor::new();
     let mut p0: DmTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = DmTensor::new();
     let mut p1: DmTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = DmTensor::new();
     let mut p2: DmTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = DmTensor::new();
-    contract_down_rows_28(ctx, &x_trf, &down0, 0, &mut p0);
+    let mut p3: DmTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = DmTensor::new();
+    contract_down_rows_16(ctx, &x_trf, &down0, 0, &mut p0);
     reduce_down_rows_16(ctx, &p0, &down_scale, &inv_s_vrf, 0, &mut down);
-    reduce_down_rows_12(ctx, &p0, &down_scale, &inv_s_vrf, 16, &mut down);
-    contract_down_rows_28(ctx, &x_trf, &down1, 28, &mut p1);
-    reduce_down_rows_16(ctx, &p1, &down_scale, &inv_s_vrf, 28, &mut down);
-    reduce_down_rows_12(ctx, &p1, &down_scale, &inv_s_vrf, 44, &mut down);
-    contract_down_rows_4(ctx, &x_trf, &down2, 56, &mut p2);
-    reduce_down_rows_4(ctx, &p2, &down_scale, &inv_s_vrf, 56, &mut down);
+    contract_down_rows_24(ctx, &x_trf, &down1, 16, &mut p1);
+    reduce_down_rows_16(ctx, &p1, &down_scale, &inv_s_vrf, 16, &mut down);
+    reduce_down_rows_8(ctx, &p1, &down_scale, &inv_s_vrf, 32, &mut down);
+    contract_down_rows_16(ctx, &x_trf, &down2, 40, &mut p2);
+    reduce_down_rows_16(ctx, &p2, &down_scale, &inv_s_vrf, 40, &mut down);
+    contract_down_rows_4(ctx, &x_trf, &down3, 56, &mut p3);
+    reduce_down_rows_4(ctx, &p3, &down_scale, &inv_s_vrf, 56, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
     // rejected by the synchronization checker), then load it in the layout the post-FF
@@ -629,9 +636,9 @@ macro_rules! down_reduce_fns {
                 .collect::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
                 .to_vrf();
 
-            // On the sub context: pass A of the next tile (main context, lookup + contraction)
-            // then overlaps this pass's vector work instead of queueing behind it.
-            ctx.sub
+            // (Main context: on the sub context this pass fails to lower, "visa: while lowering
+            // TensorUnit" -- the transpose or the inter-slice reduce is main-only.)
+            ctx.main
                 .begin(partials.view().tile::<m![H % 60], $rows, m![H % 60 = $rows # 60, L / 16 % 120]>(offset))
                 .fetch::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
                 .collect::<m![H % 60 = $rows, L / 128 % 15], m![L / 16 % 8]>()
@@ -651,8 +658,9 @@ macro_rules! down_reduce_fns {
         }
     };
 }
-down_contract_fns!(load_down_rows_28, contract_down_rows_28, 28);
+down_contract_fns!(load_down_rows_24, contract_down_rows_24, 24);
+down_contract_fns!(load_down_rows_16, contract_down_rows_16, 16);
 down_contract_fns!(load_down_rows_4, contract_down_rows_4, 4);
 down_reduce_fns!(reduce_down_rows_16, 16);
-down_reduce_fns!(reduce_down_rows_12, 12);
+down_reduce_fns!(reduce_down_rows_8, 8);
 down_reduce_fns!(reduce_down_rows_4, 4);
