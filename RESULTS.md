@@ -528,6 +528,44 @@ up/gate reduce 타일을 16/16/16/12 → **12×5**로 바꾸면 ffn 158,182 → 
 makespan 기하평균 5.239 → **5.244**. down을 12×5로 하면 반대로 나빠진다(160,851). 이득이 실측 편차
 (qkv 6%, ffn 1%)보다 작아 단독 제출로는 판정할 수 없으므로, 더 나은 구성이 나오면 함께 묶어 제출한다.
 
+## V45 구현 시도 (2026-09-09) — lowering 한 단계 앞에서 중단
+
+패치는 `scripts/dev/v45_post_norm_in_rows.py`에 그대로 있다(V50에 적용하면 재현된다).
+`project_output`이 post-attention RMSNorm까지 자기 행 레이아웃에서 끝내고 residual을 직접 쓴다.
+
+### 어디까지 됐나
+
+Rust 타입 검사는 통과했고 툴체인 lowering까지 들어갔다. 가는 길에 확인된 것들:
+
+- 60원소 행의 정석 패턴은 `geglu_split`이다: `fetch/collect m![H / 4 % 15], m![H % 4 # 8]` →
+  `vector_narrow_split::<m![H / 4 % 15, 1 # 2], m![H % 4]>` → 이항연산들 → `vector_widen_concat`.
+  **`vector_fp_binary`는 narrow 이전 상태(`IntraFirst`)에서는 존재하지 않는다.**
+- **reduce 뒤에는 `vector_fp_div`와 `vector_widen_pad`만 온다.** eps 덧셈과 sqrt는 각각 별도 패스가
+  필요하다(rmsnorm이 mean_square / reduced_mean_square / rms 셋으로 나눠 둔 이유가 이것이다).
+- `vector_intra_slice_reduce`의 첫 인자는 **축 이름**이어야 한다(`H`). `m![H / 1920]` 같은 식은
+  `AxisName`을 만족하지 않는다.
+- `EPS`는 crate 루트, `H_F32`는 `rmsnorm` 전용 private.
+
+### 남은 블로커 (정확히 한 곳)
+
+`ms_slice` 패스(슬라이스별 제곱합)의 commit:
+
+```
+declared: [ Chip: [] | Cluster: [H_1920=2] | InSlice: [[[]+7]=8] ]
+pipeline: [ Chip: [] | Cluster: [H_1920=2] | InSlice: [[[]+15]=16] ]
+```
+
+파이프라인이 슬라이스 패딩 16을 내보내는데 `HiddenRows`는 `m![H / 60 % 32, 1 # 8]`이다.
+`1 # 16`으로 선언하면 클러스터당 32 × 16 = 512로 256을 넘고, 패킷을 `m![1 # 16]`으로 넓히면 f32
+64 B라 `commit_trim` 규칙(8/16/24/32 B)에 걸린다. 원래 contraction의 transpose가
+`m![H % 60 = 20 % 4 # 16]`으로 16-wide 레인을 쓰는 것과 관련이 있어 보인다.
+
+### 중단 이유 — 이득이 노이즈보다 작다
+
+기대 이득은 attn_out −1k(3.6%)인데 **attn_out의 실측 노이즈가 ±2~4%**다. 컴파일에 성공해도
+작동을 입증할 수 없다. 위 §"측정 노이즈" 기준 (c)에 스스로 걸리므로 여기서 멈춘다.
+**다시 열려면 먼저 필요한 것은 이 구현이 아니라 반복 측정 예산이다.**
+
 ## V44–V48 실현 가능성 조사 (2026-09-09, V50 위에서)
 
 설계 슬롯 5개를 구현하려고 상류 API와 매핑 제약을 확인한 결과, **3개는 막혀 있고 2개는 구현 가능하지만
