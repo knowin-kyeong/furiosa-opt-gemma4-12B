@@ -68,7 +68,7 @@ pub fn sliding_project_qkv(
     // scale-invariant, so the factor is never undone.
     // One copy, not sixteen: a copy axis the source lacks does not replicate the store (V50).
     let x2_hbm = shared::mlp::stage_x_hi_lo_qkv_hbm(ctx, &x);
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![H]> = x2_hbm.to_dm(&mut ctx.tdma);
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 

@@ -155,7 +155,7 @@ pub(crate) fn stage_x_hi_lo_hbm(
 pub(crate) fn stage_x_hi_lo_qkv_hbm(
     ctx: &mut Context,
     normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
-) -> HbmTensor<f8e4m3, Chip, m![Dummy2, H]> {
+) -> HbmTensor<f8e4m3, Chip, m![H]> {
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .main
         .begin(normalized.view())
@@ -184,11 +184,14 @@ pub(crate) fn stage_x_hi_lo_qkv_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(1));
+    // One f8 piece, not two: the replicated load is qkv's biggest slack (18,400 cycles at 0.157
+    // utilisation, half of it the second piece). f8e4m3 carries three mantissa bits, so a single
+    // piece is ~6% per element against a 1% rtol, but the projection sums 3,840 of them and the
+    // head RMSNorm that follows is scale-invariant. Whether the sum averages the error down far
+    // enough is exactly what this branch is for; it needs Arena to be judged.
+    let _ = x_lo;
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![H]> = HbmTensor::new();
+    x_hi.view().to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut());
     x2_hbm
 }
 
