@@ -12,7 +12,8 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
-| `V151_hop_via_outputs_probe` (V151/V152/V153) | `V82` | **스크래치 → 접촉된 출력 버퍼 hop.** V146/V148이 보인 "스크래치 store가 scatter보다 3~4k 비싸다"를 세 커널에서 건설적으로 확인: qkv cos/sin hop을 `q_out` 행 0·1로(V151), attn_out 투영 출력 hop을 `residual_hbm`으로(V152), ffn down 출력 hop을 `residual_hbm`으로(V153). 변형 device fn 3개 + 각 변형 cold/warm 2회 하네스(tests/)를 한 잡에 | — | — | — | — | — | (수치 동일: 데이터 이동만) | 구현됨 (`aad0683`) — 컴파일 검증 중 |
+| `V154_qkv_x_ring32_broadcast` | `V82` (하네스는 V151 브랜치 것) | **x 복제 로드(512 디스크립터, 정적 18.4k, util 0.157) → HBM에서 클러스터당 8부(16 디스크립터) + ring-32 `CustomBroadcast`(32 × 240 flit).** 책의 문서화된 형태(`1 # 32` 패딩 슬롯 → live 축). V138이 "바이트가 아니다"를 보였으므로 디스크립터 수를 512 → 16으로 | **≈44.8k** (v154; DMA busy 39,958) | 27,424 | 157,763 | — | — | (데이터 이동만) | 구현됨 (`4bbfa0e`), Arena 3잡 큐 |
+| `V151_hop_via_outputs_probe` (V151/V152/V153) | `V82` | **스크래치 → 접촉된 출력 버퍼 hop.** V146/V148이 보인 "스크래치 store가 scatter보다 3~4k 비싸다"를 세 커널에서 건설적으로 확인: qkv cos/sin hop을 `q_out` 행 0·1로(V151), attn_out 투영 출력 hop을 `residual_hbm`으로(V152), ffn down 출력 hop을 `residual_hbm`으로(V153). 변형 device fn 3개 + 각 변형 cold/warm 2회 하네스(tests/)를 한 잡에 | 61,472 (v151) | 27,872 (v152) | 157,763 (v153) | — | job 15551: 이득 없음, v152 FAIL | v151/v153 PASS, v152 **FAIL** | **기각** |
 | `V150_test_order_warm_repeat` | `V82` (tests/만 변경) | **측정 방법 탐침.** 채점 순서(qkv 첫 실행 = cold)가 qkv의 초과 비율·노이즈의 원인인지: 세 커널을 두 바퀴 + qkv 한 번 더 돌려 first-launch 비용과 프로세스 내 재현성을 한 잡에서 읽는다 | 61,381 | 27,424 | 157,763 | 5.244 | cold 154,097 / 171,776 → **warm 145.6k~147.7k** | PASS | **측정 완료** — qkv 노이즈 = first-launch 비용 |
 | `V149_qkv_ablate_no_rope` | `V82` | **실물 ablation.** RoPE 단계(gather 2 + HBM hop + rotate pass)를 통째로 뺀다(head norm 유지). q/k FAIL이 정상; cycle만 읽는다 | 56,258 | 27,424 | 157,763 | — | qkv **141,431** (−7.7k) | FAIL(by design) | 측정 완료 |
 | `V148_qkv_ablate_weights_only` | `V82` | **실물 ablation.** V145+V146: 투영과 store만 남긴 qkv — 옮겨야 하는 바이트의 하드웨어 하한 | 53,583 | 27,424 | 157,763 | — | qkv **138,471** (−10.6k) | FAIL(by design) | 측정 완료 |
@@ -289,6 +290,26 @@ L=15360이면 60 × 256.
   기존 세 커널의 코드 경로는 불변(래퍼로 분리).
 - **정확도:** 데이터 이동만 변경. WAR(residual 로드 → hop store)은 컴파일러가 텐서 단위로 강제.
 - **기대:** qkv −6~8k, attn_out −3~4k, ffn −3~4k (기하평균 +3%). 통하면 남은 스크래치(qkv x2, attn_out x2, ffn 6개)의 pre-touch로 확장.
+
+### 측정 (Arena job 15551, 2026-09-09 15:12 UTC; 한 프로세스에서 순서대로)
+
+| 실행 | qkv base | qkv v151 | attn base | attn v152 | ffn base | ffn v153 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 (cold) | 158,004 | 148,927 | 55,376 | 56,657 **FAIL** | 354,507 | 355,883 |
+| 2 (warm) | 142,487 | 151,418 | 56,398 | 56,799 **FAIL** | 352,485 | 354,792 |
+| 3 (뒤) | 150,990 | 154,358 | | | | |
+
+정적: v151 61,472 / v152 27,872 / v153 157,763 (base 61,381 / 27,424 / 157,763).
+
+### 판정: **기각 (세 지점 모두)**
+
+- qkv v151은 base와 구별되지 않고(148.9~154.4k vs 142.5~158.0k), ffn v153도 +1~2k로 노이즈 안. **"스크래치 첫 접촉이 3~4k"라는
+  가설은 죽었다.** V146의 +8.6k는 스크래치가 아니라 **head 레이아웃(4 live 슬라이스/클러스터, `1 # 64` 패딩)에서 `to_hbm_view`로
+  쓰는 경로 자체**가 scatter보다 비싸다는 뜻으로 읽어야 한다 — 그리고 q의 최종 store가 정확히 그 경로다(후보: q도 scatter로).
+- attn_out v152는 residual을 먼저 reducing 레이아웃으로 로드한 뒤 같은 버퍼에 투영 결과를 쓰는 WAR 순서를 컴파일러가 지키지 않았거나
+  로드가 hop store 뒤로 밀렸다 → 출력이 완전히 틀림(max|Δ| 2.8e5). 같은 텐서를 커널 안에서 읽고 덮어쓰는 hop은 안전하지 않다.
+- 부수 관찰: "warm"이 항상 조용하지는 않다 — 세 번째 base 실행(다른 커널 10회 뒤)이 151k로 cold급. 프로그램 캐시 축출로 보인다.
+  A/B는 **인접한 두 실행**끼리 비교한다.
 
 ## 2026-09-09 밤 3차 체인 — qkv 실물 ablation 사다리 (V145–V150)
 
