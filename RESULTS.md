@@ -19,7 +19,7 @@ RNGD cycles만 점수다.
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 4-lane 곱, 91k) 제거: LUT를 contraction fetch에 융합하고 `contract_packet::<m![L / 16 % 2]>`로 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial(원소 1/16)에만 scale을 곱해 intra→inter reduce(pass B). 수치는 f32 합산 순서만 다름 | — | — | — | — | — | — | 설계됨 |
-| `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.306** | — | — | makespan 측정 |
+| `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
 | `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
 | `V25_ffn_geglu_two_clusters` | `V24` | up/gate의 HBM hop(store 4,535×2 + load 1,328×2 = 11.7k)을 없앤다: geglu를 두 클러스터 reduce 출력 레이아웃(슬라이스당 60행, V18식 패딩 패킷)에서 직접 수행; 출력 store 앞 ring-16 gather로 4,535 → 1,870 | 50,981 | 30,037 | **170,158** | **5.277** | — | — | makespan 측정 |
@@ -47,7 +47,7 @@ RNGD cycles만 점수다.
 ## 현재 SOTA
 
 실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V28_ffn_tile_shapes`**
-(…+V28 누적, 기하평균 5.306×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+(…+V28 누적, 기하평균 5.292×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -282,7 +282,7 @@ L=15360이면 60 × 256.
 | (c) geglu 체인(scale·mul·gather)을 Sub 컨텍스트로 | 169,168 | Sub vector pass도 `VectorEngine`을 점유(공용 단일 자원). geglu는 global scale 소형 DMA(2×1,968, 큐 뒤 124.9k)를 기다림 |
 | (d) global scale을 입력 없는 스칼라 준비 pass로 소비(로드가 큐 선두로), gelu·mul pass에 fold | 168,760 | 스칼라는 111k에 준비됐지만 gelu pass는 여전히 135k(VE가 dequant로 점유되고 스케줄러가 작은 pass를 뒤로) |
 | (e) = (d) + geglu 체인을 Main으로 | **168,757** | 채택(수치 동일 계열: s_gate/√2, s_up·s_gate/2 f32 사전 곱) |
-| **기하평균 (V0 대비 누적)** | | **5.306** |
+| **기하평균 (V0 대비 누적)** | | **5.292** |
 
 - **측정 방식:** makespan only. DMA 152.7k / VE 121k / Main 121k.
 - **컴파일 교훈:** (1) `macro_rules!`로 `m![L % 60 = $rows]`를 찍어내는 것은 문제없다. (2) `= 4 / 4` transpose(1패킷)도 통과.
