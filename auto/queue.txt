@@ -142,4 +142,5 @@ V172_stream_ceiling_probes#r2
 
 # Phase G - V181 ffn up/gate as 30 whole rows per slice (static 157.8k -> 141.4k), base x4 + v181 x4 per job, x2 jobs.
 V181_ffn_upgate_full_rows
-V181_ffn_upgate_full_rows#r2
+# V181_ffn_upgate_full_rows#r2 (dropped: first job FAIL, order fix follows)
+V181_ffn_upgate_full_rows#fix1
