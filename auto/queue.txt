@@ -114,3 +114,4 @@ V136_attnout_tiles_48_12
 
 # qkv: half the replicated x bytes by carrying one f8 piece (accuracy question, screening only)
 V137_qkv_x_single_f8
+V138_single_f8_plus_up12x5
