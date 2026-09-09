@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k)로 TRF에 주고 f8×f8 contraction(V29 기법)으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요(eps만 s²배 작아짐) | — | — | — | — | — | — | 설계됨 |
+| `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수 | — | — | — | — | — | — | 설계됨 |
+| `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
 | `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
@@ -48,8 +49,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V30_qkv_rope_tables_direct_gather`**
-(…+V30 누적, 기하평균 5.408×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V31_qkv_f8_contraction_no_lut`**
+(…+V31 누적, 기하평균 5.488×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -329,7 +330,28 @@ L=15360이면 60 × 256.
   ReducingSlices에서 max x²로(V29 head와 동일 체인). x 복제는 V15의 8부 사본을 유지하되 f8 2조각(바이트 동일).
 - **변경 파일:** `src/device/sliding/projection.rs`, `src/ops.rs`, `src/device/shared/mlp.rs`의 스케일 체인 재사용 여부
 - **정확도 리스크:** hi/lo 분해는 max|x|/4096 이상에서 exact; 그 아래는 ≤ 2^-10/s 절대오차(V29와 동일). rms 불변성은 eps에서만 깨짐.
-- **예상:** qkv −3k ~ −4k (`?` 2.5k + tail의 V contract 2,663 → ~1.9k + Q LUT 제거로 x 스테이징 경로 단축).
+- **예상:** qkv −3k ~ −4k.
+
+### 측정: qkv 48,638 → 46,726 (8부 사본) → **46,541** (16부 사본), 기하평균 5.488
+
+- 첫 컴파일 통과. DMA 44.7k → 42.7k(`?` 3개 제거, x2 store 553×2 추가, x 로드 5,367 → 5,182). K/V contract 2,663 → 1,225,
+  Q LUT 5,063 사라짐, Q contract 2,185 그대로. 스케줄러는 이제 K 로드를 큐 선두에, Q 로드를 x 뒤에 둔다(DMA-bound라 무해).
+  tail: V 로드 종료 42.1k → V contract 1,225 → 후처리 → scatter → 46.5k. 16·32부 사본은 동일(5,182).
+- **정확도:** V29와 같은 hi/lo 분해; q/k/v는 2^k배로 커진 채 head RMSNorm에 들어가고 정규화에서 상쇄(eps 항만 2^-2k배).
+  **실측 검증 필요.**
+
+### 판정: makespan 측정 (실측 대기)
+
+## V32_attnout_f8_contraction_no_lut
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V31_qkv_f8_contraction_no_lut`
+- **가설:** attn_out(DMA 23.6k/30.0k)은 20행 타일 3개를 융합 LUT+contract(1,863, LUT-bound)로 처리하고 pass마다 `?` 838이 큐에
+  선다(2.5k). x([Qs] bf16, 8 KB)를 작은 레이아웃(8슬라이스×512)에 올려 max x²·2^k·hi/lo를 만들고(V29 head 체인) HBM
+  `[Qs / 512, Dummy2, Qs % 512]`에 쓴 뒤 슬라이스별 청크를 f8 두 조각으로 로드(지금의 x 청크 로드와 디스크립터 수 동일)하면
+  타일 pass가 f8×f8 contraction(~1k)이 되고 `?`가 사라진다. 결과는 2^k배지만 post-attn RMSNorm이 흡수(eps만 변화).
+- **변경 파일:** `src/device/sliding/projection.rs`, `src/device/shared/f8split.rs`(V29/V31의 스케일·hi/lo 매크로를 공유 모듈로 이동), `src/ops.rs`
+- **예상:** attn_out −2k ~ −2.5k (DMA −2.5k `?` + 1.1k store; tail pass −0.9k).
 
 ## V29_ffn_block_scale_after_contract
 
