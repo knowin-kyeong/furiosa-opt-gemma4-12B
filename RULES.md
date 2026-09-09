@@ -326,6 +326,17 @@ URL은 이전 README 버전에 있던 `https://arena.furiosa.ai`.
 **④ 로그인은 사람이 해야 한다.** `furiosa-arena login`은 GitHub device flow(브라우저에서
 코드 입력)라 자동화가 안 된다. 로그인 전에는 `health`조차 실패한다.
 
+**⑤ 실행시간 상한은 70초다.** `rngd submit --timeout`이 70을 넘으면 컨트롤러가
+`Error: timeout_sec 3000 exceeds server maximum 70`으로 **거부**한다. `scripts/rngd_test.sh`의
+기본값은 1800이라 그대로 쓰면 아무것도 제출되지 않는다. 세 커널 테스트는 70초 안에 끝난다.
+
+**⑥ `rngd_test.sh`는 제출 에러를 삼킨다.** `submit_output=$(rngd submit …)`가 `set -e` 아래
+있어서, 거부되면 `echo "$submit_output"` 전에 스크립트가 죽는다. 증상은 "빈 로그"다. 무인 체인은
+이 때문에 드라이버 전용 `arena.sh`(§11.2)로 제출한다.
+
+**⑦ 로그인 계정은 `knowin-kyeong`이다** (2026-09-09 완료, 토큰은 pod의
+`/root/.config/furiosa-arena/token`). pod가 사라지면 device flow를 다시 해야 한다.
+
 위 ①~③은 `/root/env.sh`에 모아두었고 `~/.bashrc`가 이를 source한다.
 **비대화형 ssh 명령은 `.bashrc`를 읽지 않으므로** 원격 명령 앞에 항상 `. /root/env.sh`를 붙인다.
 
@@ -431,6 +442,41 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
+### 10.0 2026-09-09 첫 RNGD 실측 세션이 남긴 상태 (최신)
+
+- **Arena 로그인 완료**(`knowin-kyeong`), 첫 실측 7건 확보. 자세한 표·근본 원인은 RESULTS.md
+  §"2026-09-09 첫 RNGD 실측".
+- **실측 SOTA는 `V14_two_clusters` 3.936×** (3/3 PASS). **V15~V41은 전부 정확도 FAIL**이라 점수가 없다.
+  makespan 선두였던 V41은 3/3 FAIL로 기각.
+- **원인은 하나다: 소스에 없는 `Dummy` 사본 축은 HBM store를 복제하지 않는다.** V15가 도입, V31이 16부로,
+  V41이 attn_out·ffn까지 확대했다. store 디스크립터·시간이 그대로인 것이 증거이자 함정이었다
+  (스케줄에서 "공짜 복제"로 보였다). 감염 위치 4곳은 RESULTS.md의 표에 있다.
+- **다음 일은 `V49_hbm_copies_real_stores`** — 사본마다 `to_hbm_view`를 명시적으로 호출하고 사본 수
+  (1/2/4/8/16)를 네 곳에서 다시 고른다. 성공하면 계보 전체(실측 5.5×대)가 되살아난다.
+- **makespan은 상대 스크리닝으로는 유효하다**(실측/makespan 2.0~2.4로 균일, 순서 보존). 다만 정확도는
+  전혀 보지 못한다. **실측 없이 채택 판정을 내리지 않는다** — 이번 사고의 교훈이다.
+- 야간 체인은 `/root/auto/STOP`으로 멈춰 있다. 재개하려면 STOP을 지우고 keeper를 다시 띄운다(§11.2).
+  큐(`origin/auto_results:auto/queue.txt`)는 V15~V28 계보 순회로 갱신돼 있다(V15가 첫 FAIL일 것이라는
+  예측의 확인용이며, 근본 원인은 스케줄 비교로 이미 확정됐다).
+
+### 10.0.1 2026-09-09 밤 세션이 남긴 상태 (그 전 — makespan만 있던 시점)
+
+- **선두 브랜치: `V41_x2_hbm_copies`** (V38 + x2 8부 사본; makespan 45,744 / 27,272 / 157,282, 기하평균 5.808×). 문서
+  최신본(RESULTS/SOTA/RULES)도 여기. 계보: … V36 ─ V37 ─ V38 ─ V39(기각) ─ V41. V40(ffn down 타일 수), V42(attn_out 타일 형상),
+  V43(qkv V 분할), V26(qkv H-split)은 모두 V39 위의 독립 A/B이며 **기각**(RESULTS 각 섹션에 스케줄러 함정 기록). V44–V48은
+  슬롯만.
+- **야간 자동 체인이 pod에서 돌고 있다** (§11). 큐(`origin/auto_results:auto/queue.txt`) 순서: V0 → V38 → V41 → 정확도
+  이분 탐색 사다리(V14, V7, V29, V31, V32, V35, V23, V22, V13, V2, V1). Arena 로그인 전에는 makespan·전체 빌드만 기록하고
+  `arena=pending`으로 남는다.
+- **Arena는 로그인되어 있지 않다.** `ssh root@213.192.2.99 -p 41008 '. /root/env.sh; furiosa-arena login'`으로 사람이 GitHub
+  device flow를 마치면 체인이 10분 안에 pending 항목을 순서대로 제출한다.
+- pod의 결과는 push되지 않는다(자격증명 없음). 다음 세션 첫 일: `scp -r -P 41008 root@213.192.2.99:/root/auto/wt/auto ./auto`
+  → 보드 수치를 RESULTS.md로 옮기고 `auto_results`에 커밋. (push를 자동화하려면 사용자가 pod에서 `ssh-keygen`으로 만든
+  키를 `gh repo deploy-key add --allow-write`로 등록하고 `git remote set-url --push origin git@github.com:…`.)
+- 남은 후보(기대값 순): V45(post-norm을 생산자 레이아웃에서, attn_out·ffn −1k씩), V46(geglu 스칼라 broadcast 병합 −1.2k),
+  V44(a)(ffn scale 세그먼트, pair 행 교환), V47(global scale → eps −0.4k), V48(gather/scatter 인덱스 공유). 세 커널 모두
+  DMA 큐가 makespan이고 weight 바이트는 HBM 한계라, 이제는 실측(Arena)으로 정적 모델과 실물의 차이를 먼저 봐야 한다.
+
 ### 10.1 2026-09-09 세션이 남긴 상태 (다음 세션이 이어받을 것)
 
 **브랜치 계보 (모두 origin에 push됨, 각각 한 가지 변경만 담음):**
@@ -482,3 +528,35 @@ main ─ V0_baseline ─ V1_ffn_down_chunked_dequant ─ V2_attnout_rows_over_25
 | `shared::rmsnorm` 경량화 (ReducingSlices 경로 3~4k × 4회) | 세 커널 각 −2k~−3k | 기하평균 레버리지 |
 | qkv x 복제 18.4k (H-split, 정렬 리스크) | qkv −10k | §RESULTS V3 보류 사유 참조 |
 | V8 실물 A/B (인터리브 레이아웃) | 실측에서만 판단 가능 | 정적 모델은 무반응 |
+
+---
+
+## 11. 무인 실험 체인 (2026-09-09 도입)
+
+랩탑이 꺼져 있어도 pod가 큐의 브랜치를 순서대로 **makespan 덤프 → 전체 크레이트 빌드 → (로그인 시) Arena 제출**하고 기록한다.
+코드는 `auto_results` 브랜치의 `scripts/dev/auto/`(driver.sh·keeper.sh·dump.sh·summarize.py·record.py), 설명은 `auto/README.md`.
+
+### 11.1 프로토콜
+
+1. 실험 브랜치를 push한 뒤 `auto_results`의 `auto/queue.txt`에 한 줄(`BRANCH` 또는 `BRANCH@COMMIT`) 추가하고 push한다.
+   GitHub 웹 편집기로도 된다. 드라이버는 매 항목 뒤·매 유휴 폴(10분)마다 `origin/auto_results:auto/queue.txt`를 다시 읽는다.
+2. 항목마다 pod의 `/root/auto/wt/auto/results/<id>.json`과 `auto/BOARD.md`(makespan 3개, V0 대비 기하평균, 빌드, Arena 판정,
+   첫 컴파일 에러)가 갱신된다. 로그 tail은 `auto/logs/<id>.*`.
+3. Arena가 로그인돼 있지 않으면 `arena=pending`으로 남고, 로그인이 확인되면 큐 순서대로 재제출된다. 큐에서 지운 항목은 재제출
+   되지 않는다(기각된 변형은 큐에서 지워 Arena 시간을 아낀다).
+4. 보드의 숫자는 **스크리닝**이다. RESULTS.md로 옮겨 적고, 판정은 §5대로 실측 후에만 한다.
+
+### 11.2 pod 쪽 운영
+
+- 시작: `/root/auto/deadline`(epoch)을 쓰고 `cd /root/auto && setsid nohup bash keeper.sh > keeper.out 2>&1 < /dev/null &`.
+  keeper는 driver가 죽으면 60초 뒤 다시 띄운다(driver는 flock으로 1개만).
+- 중지: `touch /root/auto/STOP` 후 driver의 자식(`sleep`)부터 죽인다 — 자식이 flock을 물려받는다(`pkill -P <pid>; kill <pid>`).
+- 드라이버 갱신: `git show origin/auto_results:scripts/dev/auto/driver.sh > /root/auto/driver.sh` 후 driver만 죽이면 keeper가
+  새 스크립트로 재시작한다.
+- 결과 worktree(`/root/auto/wt`, 브랜치 `auto_results`)는 **절대 pull/rebase 하지 않는다**(첫 판에 identity 없는 rebase가
+  멈춰 체인이 서 있었다). push 자격증명이 없으므로 결과는 `scp`로 가져와 랩탑에서 커밋한다. push까지 자동화하려면 pod에
+  deploy key(쓰기)를 등록한다(§10.0).
+- 드라이버는 브랜치의 스크립트에 의존하지 않는다(V0_baseline에는 `scripts/dev`가 없다): 덤프는 `/root/auto/dump.sh`,
+  Arena는 `/root/auto/arena.sh`(§6.3.1 ⑤⑥ 때문에 상류 `rngd_test.sh`를 쓰지 않는다. 실행시간 상한
+  `ARENA_TIMEOUT`(70)과 큐 대기 `ARENA_WAIT`(1800)이 분리돼 있고, 제출 출력과 exit code를 항상 남긴다).
+- 스크리닝 클론 `/root/lab`, `/root/lab2`(target 사본)에서 대화형 컴파일을 하면 드라이버와 CPU를 나눠 쓴다(각 ~2분/커널).
