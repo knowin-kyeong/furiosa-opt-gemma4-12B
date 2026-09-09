@@ -79,3 +79,8 @@ V155_qkv_x_ring_broadcast_forms#fix1
 # Phase B4 - broadcast on a real cluster axis (V157 a/b/e), base x4 + each variant x4 per job.
 V157_qkv_x_ring_broadcast_both_clusters
 V157_qkv_x_ring_broadcast_both_clusters#r2
+
+# Phase B5 - production branch: V82 + ring-32 broadcast in the graded qkv (V157 form a). Cold draws x3.
+V158_qkv_x_ring32_broadcast
+V158_qkv_x_ring32_broadcast#r2
+V158_qkv_x_ring32_broadcast#r3
