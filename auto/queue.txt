@@ -31,3 +31,17 @@ V65_ffn_down_copies_c2
 V66_ffn_down_copies_c4
 V67_all_x_copies_c4
 V68_all_x_copies_c2
+
+# combination grid: qkv copy count x the other three sites' copy count
+V69_mix_qkv2_rest2
+V70_mix_qkv2_rest4
+V71_mix_qkv2_rest8
+V72_mix_qkv4_rest2
+V73_mix_qkv4_rest4
+V74_mix_qkv4_rest8
+V75_mix_qkv8_rest2
+V76_mix_qkv8_rest4
+V77_mix_qkv8_rest8
+V78_mix_qkv16_rest2
+V79_mix_qkv16_rest4
+V80_mix_qkv16_rest8
