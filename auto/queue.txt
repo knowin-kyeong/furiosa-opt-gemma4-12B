@@ -109,8 +109,13 @@ V166_ffn_down_three_tiles#r2
 
 # Phase B11 - attn_out output gathered to one slice per cluster before the store (V167 vs base vs v162), x5 each in one job, x2 jobs.
 V167_attnout_gather_before_store
-V167_attnout_gather_before_store#r2
+# V167_attnout_gather_before_store#r2 (dropped: FAIL and slower)
 
 # Phase B12 - ffn down output gathered before the hop store (V168 vs base), x4 each in one job, x2 jobs.
 V168_ffn_gather_before_store
-V168_ffn_gather_before_store#r2
+# V168_ffn_gather_before_store#r2 (dropped: same mechanism as V167)
+
+# Phase C2 - V165 cold repeats to characterise the score distribution of the production candidate.
+V165_qkv_broadcast_attnout_two_tiles#r4
+V165_qkv_broadcast_attnout_two_tiles#r5
+V165_qkv_broadcast_attnout_two_tiles#r6
