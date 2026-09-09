@@ -250,13 +250,15 @@ pub(crate) fn normalize_add_reduced<Cluster: M, Slice: M>(
 
 /// `normalize_add_reduced` of `x * channel_scale`, with the scale folded into the two passes
 /// that read x (so a projection can leave its per-channel weight scale to its consumer).
-pub(crate) fn normalize_add_scaled_reduced<Cluster: M, Slice: M>(
+/// The result stays in the reducing layout (eight slices x 480, bf16): storing it to HBM from there
+/// costs eight descriptors, which is cheaper than the switch pass that would gather it onto one slice.
+pub(crate) fn normalize_add_scaled_reduced<Cluster: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
     channel_scale: &HbmTensor<bf16, Chip, m![H]>,
     rms_weight: &HbmTensor<bf16, Chip, m![H]>,
     residual: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
     let scale_dm: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = channel_scale.to_dm(&mut ctx.tdma);
     let scale_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .sub
@@ -336,8 +338,7 @@ pub(crate) fn normalize_add_scaled_reduced<Cluster: M, Slice: M>(
         .collect::<m![1], m![1 # 8]>()
         .to_vrf();
 
-    let normalized: DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
-        .main
+    ctx.main
         .begin(x.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
@@ -351,14 +352,6 @@ pub(crate) fn normalize_add_scaled_reduced<Cluster: M, Slice: M>(
         .vector_fp_binary(FpBinaryOp::AddF, &residual_vrf)
         .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
         .vector_final()
-        .commit_trim::<m![H % 8]>()
-        .commit();
-
-    ctx.main
-        .begin(normalized.view())
-        .fetch::<m![1], m![H % 480]>()
-        .switch::<Slice, m![H / 480]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 1 })
-        .collect::<m![H / 8], m![H % 8]>()
         .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit()
@@ -375,17 +368,26 @@ pub(crate) fn normalize_add_gate<Cluster: M, Slice: M>(
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = x.to_dm(&mut ctx.tdma);
     let residual: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = residual.to_dm(&mut ctx.tdma);
-    normalize_add_gate_reduced::<Cluster, Slice>(ctx, &x, rms_weight, &residual, layer_scalar)
+    let normalized = normalize_add_gate_reduced::<Cluster>(ctx, &x, rms_weight, &residual, layer_scalar);
+
+    ctx.main
+        .begin(normalized.view())
+        .fetch::<m![1], m![H % 480]>()
+        .switch::<Slice, m![H / 480]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 1 })
+        .collect::<m![H / 8], m![H % 8]>()
+        .commit_trim::<m![H % 8]>()
+        .commit()
 }
 
 /// `normalize_add_gate` for x and residual already in the reducing layout.
-pub(crate) fn normalize_add_gate_reduced<Cluster: M, Slice: M>(
+/// The result stays in the reducing layout (see `normalize_add_scaled_reduced`).
+pub(crate) fn normalize_add_gate_reduced<Cluster: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
     rms_weight: &HbmTensor<bf16, Chip, m![H]>,
     residual: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
     layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
 
     let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .main
@@ -465,8 +467,7 @@ pub(crate) fn normalize_add_gate_reduced<Cluster: M, Slice: M>(
         .collect::<m![1], m![1 # 8]>()
         .to_vrf();
 
-    let normalized: DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
-        .main
+    ctx.main
         .begin(x.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
@@ -480,14 +481,6 @@ pub(crate) fn normalize_add_gate_reduced<Cluster: M, Slice: M>(
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &gate_vrf)
         .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
         .vector_final()
-        .commit_trim::<m![H % 8]>()
-        .commit();
-
-    ctx.main
-        .begin(normalized.view())
-        .fetch::<m![1], m![H % 480]>()
-        .switch::<Slice, m![H / 480]>(SwitchConfig::Broadcast1 { slice1: 8, slice0: 1 })
-        .collect::<m![H / 8], m![H % 8]>()
         .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit()

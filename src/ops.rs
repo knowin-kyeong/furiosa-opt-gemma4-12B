@@ -182,8 +182,8 @@ pub fn sliding_attention_output(
     // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
     let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::rmsnorm::normalize_add_scaled_reduced::<Cluster, Slice>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
@@ -281,8 +281,8 @@ pub fn decoder_feedforward(
         down_global_scale,
     );
 
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::rmsnorm::normalize_add_gate_reduced::<Cluster, Slice>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
