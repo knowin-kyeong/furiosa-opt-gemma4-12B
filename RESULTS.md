@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V168_ffn_gather_before_store` | `V167` | V167과 같은 기전을 ffn down 출력 hop store(DownRows `1 # 8`, 64 디스크립터)에: switch gather(ring 256) 후 클러스터당 1 디스크립터 store. 정적 중립(157,766) | — | — | 157,766 (v168) | — | job 15585 (n=4): base 346,393 · **v168 355,930** (+9.5k) | v168 **FAIL** (14% tol 안) | **기각** (V167과 같은 결론: 패딩 레이아웃 64-디스크립터 store는 싸고 ring-256 gather가 비싸다) |
 | `V167_attnout_gather_before_store` | `V162` | attn_out 투영 출력 store를 64 디스크립터(패딩 `1 # 8` 레이아웃)에서 **클러스터당 switch gather(ring 256, `Broadcast1 { slice1: 32, slice0: 8 }`, 12원소 패킷) 후 2 디스크립터 store**로. V24(a)의 실물 A/B: 정적 중립(28,180 vs 28,223), 실물은 패딩 레이아웃 store가 V146에서 +4k/store였으므로 이득 가능. 컴파일 교훈: switch OutTime에 fetch의 패킷 시간축을 함께 적는다 | — | 28,180 (v167) | — | — | job 15584 (n=5): base 55,816 · v162 53,301 · **v167 57,168** (stdev 0.5k) | v167 **FAIL** (23% tol 안: collect 순서가 어긋남) | **기각** — 맞아도 +1.4k 느리다. 패딩 레이아웃 64-디스크립터 store는 실물에서 싸다(V146의 +4k는 store가 아니라 다른 경로 차이) |
 | `V166_ffn_down_three_tiles` | `V165` | ffn down DMA 타일 5(16/16/16/8/4) → 3(28/28/4; V40(a) `7c4abaa`를 cherry-pick, pass A 큰 타일 + pass B 16/12행 뷰). 정적 +3k이지만 실물 타일당 ~2k(attn_out 근거) → 디스크립터 −1,024 | 44,792 | 28,173 | 160,809 | — | job 15582/83: ffn cold **350,878 / 346,780**, warm 346,786 / 347,054 (V165: cold 348.7~352.3k, warm 344.5~347.8k) | PASS ×2 | **중립 → 채택 안 함** (실물 타일당 비용이 정적 +3k와 상쇄; ffn 노이즈 ±5k 안) |
-| `V181_ffn_upgate_full_rows` | `V165` | **1위의 ffn 315k를 재현할 후보(V174 근거).** up/gate를 슬라이스당 **30행 × H 전체**(`L / 30 % 256`, 클러스터 L/7680)로: weight 57.6 KB·scale 7.2 KB가 각각 연속 1세그먼트(지금은 60 × 960 B, 60 × 120 B), H 반쪽 inter-slice reduce 소멸, x는 qkv처럼 ring-32 broadcast로 전 슬라이스 복제. 30행의 4행-transpose 제약은 pass B가 transpose 없이 행별 스칼라 패킷(`[30, 1 # 8]` f32)을 commit하고, ring-16 gather 뒤 480행에서 transpose로 조밀화해 우회. geglu는 한 슬라이스의 up/gate 패킷에서(pairs 불필요). down·이후 경로 불변 | — | — | **141,374** (v181) | — | job 15616 (n=4): base 348,242 · **v181 320,240** (stdev 1.4k; −28.0k, −8.0%) | v181 **FAIL** (12.6% tol 안, 전 구간 — 값 순서 뒤섞임) | **실물 −8% 확인(1위의 315k 수준)**, 정확도 추적 중: 다중 패킷 gather 도착 순서를 packet-major로 뒤집은 fix1 큐 |
+| `V181_ffn_upgate_full_rows` | `V165` | **1위의 ffn 315k를 재현할 후보(V174 근거).** up/gate를 슬라이스당 **30행 × H 전체**(`L / 30 % 256`, 클러스터 L/7680)로: weight 57.6 KB·scale 7.2 KB가 각각 연속 1세그먼트(지금은 60 × 960 B, 60 × 120 B), H 반쪽 inter-slice reduce 소멸, x는 qkv처럼 ring-32 broadcast로 전 슬라이스 복제. 30행의 4행-transpose 제약은 pass B가 transpose 없이 행별 스칼라 패킷(`[30, 1 # 8]` f32)을 commit하고, ring-16 gather 뒤 480행에서 transpose로 조밀화해 우회. geglu는 한 슬라이스의 up/gate 패킷에서(pairs 불필요). down·이후 경로 불변 | — | — | **141,374** (v181) | — | job 15616 (n=4): base 348,242 · v181 320,240 (FAIL, 값 순서 뒤섞임) → **fix1 job 15621 (n=4): base cold 345,672 / median 348,967 · v181 cold 317,053 / median 317,947 (stdev 949; −31.0k, −8.9%)** | fix1 **PASS** (max\|Δ\| 1.08% = base와 동일 오차) | **확인 — ffn −8.9% (1위의 315k 수준)**. 다중 패킷 gather는 packet-major로 도착(fix1). 프로덕션 판 V182로 승격 |
+| `V182_ffn_full_rows_production` | `V165` | **프로덕션 후보 (V165 + V181 ffn).** 채점 ffn이 `stage_x_hi_lo_hbm_full` + `feedforward_v181`(슬라이스당 30행 × H 전체 up/gate, x ring-32 broadcast, 행 패킷 ring-16 gather)을 호출; qkv·attn_out은 V165 그대로. tests/는 채점 커널 3개 × 5회(cold + warm 4회) | 44,792 (= V165) | 28,173 (= V165) | **141,374** | — | 큐 #c1~#c3 (cold 3회, 2026-09-09 18:13 UTC) | — | 컴파일 OK(lab2), Arena 대기. 기대: ffn ≈ 318k → 예상 5.94 (V165 공식 5.76) |
 | `V172_qkv_fetch_interference_probe` | `V165` | **탐침(A).** 세 커널이 같은 ~290 B/cycle에 묶인 원인 후보 중 소스에서 만질 수 있는 것은 "DMA는 DM 뱅크 우선순위가 가장 낮다"(책) — 스트리밍 중 이전 타일의 contraction fetch가 DMA를 늦춘다. Q contraction을 **한 번 더**(결과는 스크래치 store) 돌려 초과 비용을 잰다: 간섭이 없으면 +pass 자체(정적 2.2k ≈ 실물 4.5k), 그 이상이면 간섭 | 44,789 (v172) | — | — | — | job 15613 (n=3): v157a 104,984 · v172 112,645 (stdev **10.6k**: 102,008~123,282) | PASS | 노이즈로 판정 불가(r2 대기); attn_out 결과로 보아 간섭은 작을 것 |
 | `V173_attnout_fetch_interference_probe` | `V165` | 탐침(A) attn_out판: tile0 contraction 중복(+스크래치 store) | — | 30,933 (v173) | — | — | job 15613: v162 54,270 (stdev 74) · v173 56,943 (stdev 249) → +2.7k = 정적 Δ 그대로 | PASS | **간섭 없음** — 스트리밍 중 fetch는 DMA를 늦추지 않는다(가설 1 기각) |
 | `V174_ffn_scale_fullrow_probe` | `V165` | **탐침(B).** 1위의 ffn 315k(우리 349k)를 설명할 후보 = block-scale을 120 B 세그먼트 60개/슬라이스가 아니라 full row(240 B × 60 = 1 세그먼트, 바이트 2배)로 읽는 것(V44). 슬라이스별 열 오프셋이 불가하므로 **모든 슬라이스가 앞 절반을 쓰는 FAIL-by-design** 판으로 up/gate scale 2개의 실물 세그먼트 비용만 잰다. −10k 이상이면 cluster 축 H-split 재설계(V177)로 | — | — | 167,083 (f174a) / 168,574 (f174b) | — | job 15613: base 348,737 · **f174a +22.9k (7.4 MB 연속 = 3.1 cycle/KB)** · **f174b +24.3k (3.7 MB, 120 B 세그먼트 = 6.6 cycle/KB)** | PASS | **세그먼트 로드는 바이트당 2배** → 프로덕션 scale 로드 3개 ≈ 73k (ffn의 21%). 슬라이스가 행 전체를 맡는 레이아웃(V181)이면 scale 3.7 MB가 연속 1세그먼트 → ≈ −26k(up/gate) + weight 세그먼트 이득 |
@@ -355,6 +356,33 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 - 정확도 PASS(형태는 옳다). 이득이 없으므로 **"디스크립터 수"가 일반 법칙은 아니다**: qkv의 x2 로드가 특별했던 이유는 512개
   디스크립터가 **같은 7.7 KB 한 영역**을 읽는 것(HBM 채널 직렬화)이고, ffn(영역당 256개)·attn_out(영역당 64개)은 그 문턱 아래다.
 - 부수 관찰: 이 잡의 ffn base warm median 342k는 평소 cold 350k보다 낮다(ffn도 cold 페널티 ~8k가 있다).
+
+## V181/V182 — ffn up/gate를 슬라이스당 30행 × H 전체로: ffn −8.9%, PASS (2026-09-09 17:30~18:05 UTC, job 15616/15621)
+
+**가설(V174에서).** ffn의 block-scale 로드 3개는 120 B 세그먼트 60개/슬라이스라 바이트당 연속 로드의 2배(6.6 vs 3.1 cycle/KB)를 쓰고,
+weight 로드도 960 B 세그먼트 60개다. 슬라이스가 행 전체(H)를 맡으면 weight 57.6 KB·scale 7.2 KB가 각각 **한 세그먼트**가 된다.
+1위의 ffn 315k(우리 349k)는 여기서 나올 가능성이 가장 컸다.
+
+**설계.** up/gate 각각 `L / 30 % 256`(클러스터당 128 슬라이스 × 30행, `UpGateRowsFull`), x는 qkv(V158)처럼 `[Dummy2, H]`를 HBM에서 한 번
+읽어 ring-32 broadcast로 전 슬라이스에 복제(`stage_x_hi_lo_hbm_full`). pass A는 `contract_up_gate_full`(fetch `[L % 30, H / 64, Dummy2]` →
+LUT → contract → lane Sequential → 부분합 `[L % 30, H / 16]`), pass B는 8/8/8/6행 타일이 transpose 없이 행별 f32 스칼라 패킷
+`[30, 1 # 8]`을 commit(4행-transpose 제약 우회). geglu는 같은 슬라이스의 up/gate 패킷에서(`geglu_full`, pairs 불필요).
+그 뒤 ring-16 gather로 16 슬라이스의 30행 패킷을 한 슬라이스에 모아 480행을 transpose로 조밀화(`gather_pack_full`) → 기존 `stage_geglu_hi_lo_hbm`·down 경로.
+
+**측정.**
+
+| 잡 | 판 | base (n=4) | v181 (n=4) | Δ median | 정확도 |
+|---|---|---:|---:|---:|---|
+| 15616 | 최초(gather slice-major) | 348,242 | 320,240 (stdev 1.4k) | −28.0k | **FAIL** — 값이 tol 안(12.6%)이지만 순서가 뒤섞임 |
+| 15621 | fix1(gather packet-major) | cold 345,672 / median 348,967 | **cold 317,053 / median 317,947 (stdev 949)** | **−31.0k (−8.9%)** | **PASS** (max\|Δ\| 1.08%, base와 동일) |
+
+**배운 것.** (1) 다중 패킷 switch gather(`Broadcast1 { slice1: 16, slice0: 1 }`, 슬라이스당 30 패킷)의 도착 순서는 **packet-major**
+(`[L % 30, L / 30 % 16]`)다 — OutTime을 `[L / 30 % 16, L % 30]`으로 쓰면 값은 맞지만 행 순서가 뒤섞인다. (2) 세그먼트 통합만으로 ffn 349k → 318k:
+V174의 예측(−26k scale + weight 세그먼트 이득)과 맞고, 1위의 315k와 3k 차이다. (3) 부수 효과로 H 반쪽 inter-slice reduce와 pairs 복제가 사라졌지만
+pass A의 fetch가 두 배(슬라이스당 57.6 KB)라 정적 makespan은 141k로 V165(158k)보다 −16k에 그친다 — 실물 이득이 정적의 2배인 것도 V174 모델과 일치.
+
+**V182.** V165 + 위 ffn을 채점 함수에 넣은 프로덕션 브랜치(`V182_ffn_full_rows_production`, hop 인자 없음). lab2 컴파일: ffn 141,374 · qkv 44,792 · attn_out 28,173.
+큐 #c1~#c3(cold 3회) → 3/3 PASS면 SOTA 후보(예상 5.94). 리더보드 제출은 사용자 지시가 있을 때만.
 
 ## 2026-09-10 추가 실험 설계 (V172~V180) — "스트림 속도를 무엇이 정하는가"
 
