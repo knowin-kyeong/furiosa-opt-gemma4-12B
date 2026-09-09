@@ -278,8 +278,10 @@ pub fn decoder_feedforward(
     // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
     // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
     let (x2_hbm, erf_scale, out_scale) =
-        shared::mlp::stage_x_hi_lo_hbm(ctx, &x, up_global_scale, gate_global_scale);
-    let x = shared::mlp::feedforward(
+        shared::mlp::stage_x_hi_lo_hbm_full(ctx, &x, up_global_scale, gate_global_scale);
+    // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
+    // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
+    let x = shared::mlp::feedforward_v181(
         ctx,
         &x2_hbm,
         &erf_scale,
