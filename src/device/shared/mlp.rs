@@ -400,8 +400,8 @@ pub(crate) fn feedforward(
     let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
     let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
-    let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
-    let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
+    let down2 = load_down_rows_12(ctx, down_weight_packed, 32);
+    let down3 = load_down_rows_12(ctx, down_weight_packed, 44);
     let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
 
     // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA).
@@ -462,10 +462,10 @@ pub(crate) fn feedforward(
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down1);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
-    let p = contract_down_rows_16(ctx, &x_trf, &down2);
-    reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let p = contract_down_rows_8(ctx, &x_trf, &down3);
-    reduce_down_rows_8(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down2);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down3);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 44, &mut down);
     let p = contract_down_rows_4(ctx, &x_trf, &down4);
     reduce_down_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 56, &mut down);
 
@@ -641,5 +641,6 @@ macro_rules! down_tile_fns {
     };
 }
 down_tile_fns!(load_down_rows_16, contract_down_rows_16, reduce_down_rows_16, 16);
+down_tile_fns!(load_down_rows_12, contract_down_rows_12, reduce_down_rows_12, 12);
 down_tile_fns!(load_down_rows_8, contract_down_rows_8, reduce_down_rows_8, 8);
 down_tile_fns!(load_down_rows_4, contract_down_rows_4, reduce_down_rows_4, 4);
