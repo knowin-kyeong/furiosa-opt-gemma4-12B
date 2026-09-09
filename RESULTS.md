@@ -12,7 +12,9 @@ RNGD cycles만 점수다.
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
-| `V157_qkv_x_ring_broadcast_both_clusters` | `V154` | V155의 진단: `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 **실제 클러스터 축 `Qs / 2048`** 위에서 하고 끝에 Replicated로 reshape. (a) 실축 직접 로드 + 32 B 패킷 ring 32, (b) 더미축 로드 후 reshape → switch, (e) 실축 16부 ring 16 | — | 27,424 | 157,763 | — | — | ? | 구현됨, 컴파일 검증 중 |
+| `V158_qkv_x_ring32_broadcast` | `V82` | **프로덕션.** V157(a)를 채점 대상 `sliding_project_qkv`에 적용(변형 fn 없음). tests/는 cold/warm 반복(7회) | 44,792 | 27,424 | 157,763 | 5.55 | — | — | 구현됨, Arena 3잡 큐 (리더보드 제출은 사용자 지시 대기) |
+| `V159_ffn_attnout_x_ring_broadcast` (V159 ffn / V161 attn_out) | `V157` | 같은 기전을 축약 분할 커널에: 청크 축을 innermost 슬라이스 축에 그대로 두고 패딩 슬롯만 live로 바꾸는 `CustomBroadcast`(`m![Dummy8, 1 # 16, H / 1920]` → `m![Dummy8, Dummy256 / 16, H / 1920]`, ring 32). ffn up/gate x2 512 → 32 디스크립터, down x2 512 → 128, attn_out x2 512 → 128 | — | — | — | — | — | ? | 구현됨, 컴파일 검증 중 |
+| `V157_qkv_x_ring_broadcast_both_clusters` | `V154` | V155의 진단: `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 **실제 클러스터 축 `Qs / 2048`** 위에서 하고 끝에 Replicated로 reshape. (a) 실축 직접 로드 + 32 B 패킷 ring 32, (b) 더미축 로드 후 reshape → switch, (e) 실축 16부 ring 16 | 44,792 (a·b) / 44,998 (e) | 27,424 | 157,763 | — | job 15563: qkv v157a **108,374** (cold 117,689, stdev 1.3k) · v157b 111,920 · v157e 108,641 vs base 151,163 (cold 163,293) | **3/3 PASS** (전 실행) | **채택 후보 — qkv −28%** → 프로덕션 V158 |
 | `V155_qkv_x_ring_broadcast_forms` | `V154` | V154의 기전을 유지하고 **매핑 표기만 바꾼 4형**: (a) 32 B 패킷 시간축을 switch에 통과, (f) `Dummy256 / 32, 1 # 32` → `Dummy256 / 32, Dummy256 % 32` 단일 축 인수분해 ring 32, (e) 16부 + ring 16(정적 3.8k), (d) 4부 + ring 64. 하네스에 실패 원소의 64-그룹 히스토그램과 변형별 cold/median/stdev 요약 추가 | 44,792 (a·g) / 44,998 (e) / 45,099 (d) | 27,424 | 157,763 | — | job 15559: v155a **106,734** (stdev 1.7k) · g 107,168 · e 108,295 (stdev 207) · d 108,393 vs base 150,823 (stdev 6.2k) | 네 형 모두 FAIL — **cluster 1만 틀림**(q 행 2048~4095, k/v head 4~7), cluster 0은 완전히 맞음 | **기전 확인, 원인 = 더미 클러스터 축** → V157 |
 | `V154_qkv_x_ring32_broadcast` | `V82` (하네스는 V151 브랜치 것) | **x 복제 로드(512 디스크립터, 정적 18.4k, util 0.157) → HBM에서 클러스터당 8부(16 디스크립터) + ring-32 `CustomBroadcast`(32 × 240 flit).** 책의 문서화된 형태(`1 # 32` 패딩 슬롯 → live 축). V138이 "바이트가 아니다"를 보였으므로 디스크립터 수를 512 → 16으로 | **44.8k** (v154; switch pass 7,943) | 27,424 | 157,763 | — | job 15555/15556/15557: qkv v154 **104,968 / 111,154 / 107,652** (base 152,427 / 144,741 / 151,148) | qkv **FAIL** (q/k/v 원소 54~57%만 tol 안, max\|Δ\| 6~7) | **−40k(−28%) 확인, 정확도만 남음** → V155 |
 | `V151_hop_via_outputs_probe` (V151/V152/V153) | `V82` | **스크래치 → 접촉된 출력 버퍼 hop.** V146/V148이 보인 "스크래치 store가 scatter보다 3~4k 비싸다"를 세 커널에서 건설적으로 확인: qkv cos/sin hop을 `q_out` 행 0·1로(V151), attn_out 투영 출력 hop을 `residual_hbm`으로(V152), ffn down 출력 hop을 `residual_hbm`으로(V153). 변형 device fn 3개 + 각 변형 cold/warm 2회 하네스(tests/)를 한 잡에 | 61,472 (v151) | 27,872 (v152) | 157,763 (v153) | — | job 15551: 이득 없음, v152 FAIL | v151/v153 PASS, v152 **FAIL** | **기각** |
@@ -294,6 +296,23 @@ L=15360이면 60 × 256.
 
 **설계 원칙(갱신):** DMA 디스크립터 수(그리고 같은 HBM 영역을 여러 디스크립터가 반복 읽는 패턴)를 먼저 센다. 큰 복제 로드는 "적은 디스크립터 +
 on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적은 슬라이스)로.
+
+## V157_qkv_x_ring_broadcast_both_clusters — qkv −28%, 3/3 PASS (2026-09-09 15:38 UTC, job 15563)
+
+- **분기점:** `V154` (기전) + V155 진단(cluster 1 미충족)
+- **원인과 수정:** `BothClusters = m![Dummy2]`(더미 클러스터 축) 위의 switch pass는 cluster 0만 채운다. 복사본 로드와 switch를 실제 축
+  `m![Qs / 2048]` 위에서 수행하고 끝에 `unsafe reshape`로 `BothClusters, Replicated`로 되돌리면 두 클러스터 모두 채워진다.
+
+| 변형 | 형태 | cold | warm median (n=3) | stdev |
+|---|---|---:|---:|---:|
+| base (V82 qkv) | 512 디스크립터 복제 로드 | 163,293 | 151,163 | 2,479 |
+| **v157a** | 실축 직접 로드, 8부/클러스터, 32 B 패킷, ring 32 | 117,689 | **108,374** | 1,317 |
+| v157b | 더미축 로드 → reshape → switch | 105,642 | 111,920 | 2,222 |
+| v157e | 실축 16부/클러스터, ring 16 | 107,985 | 108,641 | 1,435 |
+
+- **정확도:** 세 변형 모두 매 실행 PASS(q/k/v, 잡 exit 0).
+- **판정:** **채택 후보.** qkv 151k → 108k(−28%)는 attn_out 52.5k·ffn 350k와 합쳐 기하평균 5.09 → **≈5.6** (1위 5.667과 동급).
+  프로덕션 브랜치 V158에 (a)형을 적용해 cold 3회를 잰 뒤 사용자 지시로 리더보드에 낸다.
 
 ## V154_qkv_x_ring32_broadcast — qkv −28% (정확도만 남음)
 
