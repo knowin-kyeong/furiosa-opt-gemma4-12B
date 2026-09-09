@@ -10,95 +10,40 @@
 # (149,244 / 56,522 / 354,825, 3/3 PASS). qkv is the only bottleneck left: its measured speedup
 # is 1.64 against attn_out 7.17 and ffn 10.45, and its real/makespan ratio (2.53) is the worst
 # of the three, so the static model is least trustworthy exactly where the work now is.
-V50_drop_false_replication
-V52_qkv_x_copies_c2
-V54_qkv_x_copies_c4
-V55_qkv_x_copies_c8
-V56_qkv_x_copies_c16
-
-# copies at the other three staging sites (the low-utilisation loads)
-V57_attnout_x_copies_c8
-V58_ffn_upgate_x_copies_c8
-V59_ffn_down_geglu_copies_c8
-V60_all_x_copies_c8
-
-# copy-count sweep at the three non-qkv sites
-V61_attnout_x_copies_c2
-V62_attnout_x_copies_c4
-V63_ffn_upgate_copies_c2
-V64_ffn_upgate_copies_c4
-V65_ffn_down_copies_c2
-V66_ffn_down_copies_c4
-V67_all_x_copies_c4
-V68_all_x_copies_c2
-
-# combination grid: qkv copy count x the other three sites' copy count
-V69_mix_qkv2_rest2
-V70_mix_qkv2_rest4
-V71_mix_qkv2_rest8
-V72_mix_qkv4_rest2
-V73_mix_qkv4_rest4
-V74_mix_qkv4_rest8
-V75_mix_qkv8_rest2
-V76_mix_qkv8_rest4
-V77_mix_qkv8_rest8
-V78_mix_qkv16_rest2
-V79_mix_qkv16_rest4
-V80_mix_qkv16_rest8
-
-# ffn row-tile sweep (up 16/16/16/12 and down 16/16/16/8/4 were makespan choices, never measured)
-V81_ffn_up_tiles_20x3
+# ---------------------------------------------------------------------------------------------
+# 2026-09-09 evening (third run, 12h+ chain). The queue was rewritten: the copies family (V52-V80)
+# is closed on hardware, the tile sweeps keep their makespans (results/*.json) and only the few
+# worth an Arena minute are re-listed below. Entry grammar now allows `BRANCH#TAG` for repeat runs
+# (same code, distinct id) because qkv moves +-8% run to run and every claim needs >= 3 draws.
+#
+# Phase A - qkv hardware ladder (accuracy fails by design on V145-V149; cycles are what we read).
+# V82 controls are interleaved so drift over the session is visible.
 V82_ffn_up_tiles_12x5
-V83_ffn_up_tiles_30x2
-V84_ffn_up_tiles_60x1
-V85_ffn_down_tiles_20x3
-V86_ffn_down_tiles_12x5
-V87_ffn_down_tiles_30x2
-V88_ffn_down_tiles_60x1
-V89_ffn_down_tiles_8x7_4
-V90_ffn_tiles_both_20x3
-V91_ffn_tiles_both_12x5
+V150_test_order_warm_repeat
+V148_qkv_ablate_weights_only
+V145_qkv_ablate_no_tail
+V146_qkv_ablate_no_scatter
+V147_qkv_ablate_no_rope_gather
+V149_qkv_ablate_no_rope
+V82_ffn_up_tiles_12x5#r3
+V148_qkv_ablate_weights_only#r2
+V145_qkv_ablate_no_tail#r2
+V146_qkv_ablate_no_scatter#r2
+V147_qkv_ablate_no_rope_gather#r2
+V149_qkv_ablate_no_rope#r2
+V150_test_order_warm_repeat#r2
+V82_ffn_up_tiles_12x5#r4
+V148_qkv_ablate_weights_only#r3
+V145_qkv_ablate_no_tail#r3
+V146_qkv_ablate_no_scatter#r3
+V147_qkv_ablate_no_rope_gather#r3
+V149_qkv_ablate_no_rope#r3
+V82_ffn_up_tiles_12x5#r5
 
-# ffn row-tile sweep, second batch (asymmetric splits; heights must be multiples of 4)
-V92_ffn_down_24_20_16
-V93_ffn_down_28_28_4
-V94_ffn_down_32_16_8_4
-V95_ffn_down_40_20
-V96_ffn_down_48_12
-V97_ffn_up_24_20_16
-V98_ffn_up_28_28_4
-V99_ffn_up_40_20
-V100_ffn_up_48_12
-V101_ffn_both_24_20_16
-
-# tile heights <= 16 only (scale VRF is 8 KB: 20 rows = 9,600 B and fails). up 12x5 won in batch 1.
-V102_ffn_up_16_16_12_8_8
-V103_ffn_up_16_12_12_12_8
-V104_ffn_up_12_12_12_8_8_8
-V105_ffn_up_8x7_4
-V106_ffn_up_4x15
-V107_ffn_up_16_16_16_4x3
-V108_ffn_up_16_12_12_8_8_4
-V109_ffn_down_12x4_8_4
-V110_ffn_down_16_12_12_12_8
-V111_ffn_down_4x15
-V112_ffn_up12x5_down12x4_8_4
-
-# ffn tile batch 3: fill in the {4,8,12,16} neighbourhood around the up 12x5 / 16-12-12-12-8 wins
-V113_ffn_up_16_16_8_8_8_4
-V114_ffn_up_16_16_12_12_4
-V115_ffn_up_12_12_8_8_8_8_4
-V116_ffn_up_16_12_8_8_8_8
-V117_ffn_up_16_16_16_8_4
+# Phase C - crumbs on the other two kernels (data movement only, PASS-safe), once each first.
 V118_ffn_up_12_12_12_12_8_4
-V119_ffn_down_16_16_12_12_4
-V120_ffn_down_16_16_16_12
-V121_ffn_down_16_16_8_8_8_4
-V122_ffn_up12x5_down16_16_16_12
-V123_ffn_up16_12_12_12_8_down16_16_16_12
-V124_ffn_up12x5_down16_16_12_12_4
-
-# attn_out O-projection tile sweep (the third kernel, untouched so far)
+V103_ffn_up_16_12_12_12_8
+V114_ffn_up_16_16_12_12_4
 V125_attnout_tiles_60x1
 V126_attnout_tiles_12x5
 V127_attnout_tiles_4x15
@@ -111,15 +56,3 @@ V133_attnout_tiles_28_16_16
 V134_attnout_tiles_32_16_12
 V135_attnout_tiles_20_20_12_8
 V136_attnout_tiles_48_12
-
-# qkv: half the replicated x bytes by carrying one f8 piece (accuracy question, screening only)
-V137_qkv_x_single_f8
-V138_single_f8_plus_up12x5
-
-# the V137 lever applied to the other three staging sites (accuracy question, screening)
-V139_attnout_x_single_f8
-V140_ffn_upgate_single_f8
-V141_ffn_down_single_f8
-V142_ffn_both_single_f8
-V143_all_single_f8
-V144_all_single_f8_up12x5

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Unattended experiment chain for the RunPod box (RULES.md §11).
 #
-# Reads auto/queue.txt from the `auto_results` branch (one entry per line: `BRANCH` or
-# `BRANCH@COMMIT`), and for every entry that has no final result yet:
+# Reads auto/queue.txt from the `auto_results` branch (one entry per line: `BRANCH`,
+# `BRANCH@COMMIT`, optionally with a `#TAG` suffix for repeat runs), and for every entry that
+# has no final result yet:
 #   1. checks out the ref (detached) in /root/furiosa-opt-gemma4-12B,
 #   2. dumps the three Stage-1 schedules (makespan),
 #   3. builds the full test binary (the crate-wide compile gate),
@@ -91,8 +92,11 @@ EOF
 
 run_entry() {
     local entry=$1 id=$2 branch ref dump_rc build_rc arena rc
-    branch=${entry%%@*}
-    if [ "$branch" = "$entry" ]; then ref="origin/$branch"; else ref=${entry#*@}; fi
+    # entry grammar: BRANCH[@COMMIT][#TAG]. A #TAG only makes the id distinct (repeat runs of
+    # the same code for noise: qkv moves +-8% run to run), it never changes what is checked out.
+    local spec=${entry%%#*}
+    branch=${spec%%@*}
+    if [ "$branch" = "$spec" ]; then ref="origin/$branch"; else ref=${spec#*@}; fi
     log "=== $id ($entry) start"
     cd "$REPO" || return
     git fetch -q origin "+refs/heads/*:refs/remotes/origin/*" 2>>"$LOG"
