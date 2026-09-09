@@ -33,6 +33,10 @@ deadline() { cat "$STATE/deadline" 2>/dev/null || echo 0; }
 past_deadline() { [ "$(date +%s)" -ge "$(deadline)" ]; }
 
 arena_ok() { timeout 60 furiosa-arena list >/dev/null 2>&1; }
+# Arena submission is switched off by `touch /root/auto/arena_off`. Entries then keep
+# `arena=pending`, which is exactly the state the driver retries once submission is switched back
+# on (rm the file): a screening-only pass costs no Arena time and loses no work.
+arena_enabled() { [ ! -f "$STATE/arena_off" ]; }
 
 ensure_worktree() {
     cd "$REPO" || return 1
@@ -133,6 +137,8 @@ run_entry() {
     arena=pending
     if [ "$build_rc" -ne 0 ]; then
         arena="n/a"
+    elif ! arena_enabled; then
+        log "$id arena skipped (arena_off); stays pending"
     elif arena_ok; then
         timeout 3600 bash "$STATE/arena.sh" "$id" > "$STATE/logs/$id.arena.log" 2>&1; rc=$?
         if [ "$rc" -eq 0 ]; then arena=pass; else arena=fail; fi
@@ -156,7 +162,9 @@ while ! past_deadline; do
         st=$(status_of "$id")
         case "$st" in
             done) continue ;;
-            pending) arena_ok || continue ;;
+            pending)
+                arena_enabled || continue
+                arena_ok || continue ;;
         esac
         run_entry "$entry" "$id"
         did=1

@@ -13,3 +13,5 @@
 V50_drop_false_replication
 V52_qkv_x_copies_c2
 V54_qkv_x_copies_c4
+V55_qkv_x_copies_c8
+V56_qkv_x_copies_c16
