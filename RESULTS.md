@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 12행×5 → 16/16/16/12(고정비 1개 제거), down은 16/16/16/8/4로 마지막 타일을 작게 해 DMA 종료 뒤 직렬 tail(dequant 6k + contract 1.7k)을 줄임 | — | — | — | — | — | — | 설계됨 |
+| `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 4-lane 곱, 91k) 제거: LUT를 contraction fetch에 융합하고 `contract_packet::<m![L / 16 % 2]>`로 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial(원소 1/16)에만 scale을 곱해 intra→inter reduce(pass B). 수치는 f32 합산 순서만 다름 | — | — | — | — | — | — | 설계됨 |
+| `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.306** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
 | `V26_qkv_hsplit_x_halved` | `V25` | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.4k, x_trf 1.2k) | — | — | — | — | — | — | 설계됨 |
 | `V25_ffn_geglu_two_clusters` | `V24` | up/gate의 HBM hop(store 4,535×2 + load 1,328×2 = 11.7k)을 없앤다: geglu를 두 클러스터 reduce 출력 레이아웃(슬라이스당 60행, V18식 패딩 패킷)에서 직접 수행; 출력 store 앞 ring-16 gather로 4,535 → 1,870 | 50,981 | 30,037 | **170,158** | **5.277** | — | — | makespan 측정 |
@@ -45,8 +46,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V25_ffn_geglu_two_clusters`**
-(…+V25 누적, 기하평균 5.277×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V28_ffn_tile_shapes`**
+(…+V28 누적, 기하평균 5.306×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -266,9 +267,54 @@ L=15360이면 60 × 256.
   (≈2.8k)가 빠진다. (2) V25 타임라인: 마지막 down 타일 로드가 153.3k에 끝난 뒤 그 타일의 dequant 6,040 + contract 1,712가
   직렬로 남고 그 뒤에야 store·norm이 온다. down을 16/16/16/8/4로 하면 마지막 타일의 dequant가 ~2k라 tail이 ~5.5k 준다
   (타일 수는 5로 동일). transpose는 `= 16 / 4`, `= 8 / 4`, `= 4 / 4`.
-- **변경 파일:** `src/device/shared/mlp.rs`
+- **변경 파일:** `src/device/shared/mlp.rs`(타일 헬퍼를 `macro_rules!`로 행 수별 생성, `project_up_and_gate`/`project_down`을
+  `feedforward`에 통합, `geglu_split` 스칼라 fold)
 - **공유 코드 영향:** mlp.rs 호출처는 `decoder_feedforward`뿐.
 - **예상:** ffn −8k.
+
+### 측정 (단계별)
+
+| 단계 | ffn | 비고 |
+|---|---:|---|
+| V25 | 170,158 | |
+| (a) up/gate 16/16/16/12, down 16/16/16/8/4 | 169,349 | DMA 155.5k → 152.7k(타일 3개 감소). 그러나 tail 불변: down 단계가 **VE-bound**(첫 down 타일 도착 117k 이후 dequant 30k + contract 8.6k + geglu가 직렬) |
+| (b) down dequant를 up/gate pass 사이에 프로그램 순서로 인터리브 | 169,349 | **스케줄 완전 동일** — 스케줄러는 프로그램 순서를 전혀 보지 않는다(의존 그래프만) |
+| (c) geglu 체인(scale·mul·gather)을 Sub 컨텍스트로 | 169,168 | Sub vector pass도 `VectorEngine`을 점유(공용 단일 자원). geglu는 global scale 소형 DMA(2×1,968, 큐 뒤 124.9k)를 기다림 |
+| (d) global scale을 입력 없는 스칼라 준비 pass로 소비(로드가 큐 선두로), gelu·mul pass에 fold | 168,760 | 스칼라는 111k에 준비됐지만 gelu pass는 여전히 135k(VE가 dequant로 점유되고 스케줄러가 작은 pass를 뒤로) |
+| (e) = (d) + geglu 체인을 Main으로 | **168,757** | 채택(수치 동일 계열: s_gate/√2, s_up·s_gate/2 f32 사전 곱) |
+| **기하평균 (V0 대비 누적)** | | **5.306** |
+
+- **측정 방식:** makespan only. DMA 152.7k / VE 121k / Main 121k.
+- **컴파일 교훈:** (1) `macro_rules!`로 `m![L % 60 = $rows]`를 찍어내는 것은 문제없다. (2) `= 4 / 4` transpose(1패킷)도 통과.
+  (3) **VectorEngine은 Main·Sub 공용 단일 자원**이고 dequant(4-lane f32 MulF, 3.8 elem/cycle)가 VE를 채우면 Sub의
+  작은 vector pass도 못 낀다. (4) 스케줄러의 DMA 순서는 소비자 우선순위로 정해지며 프로그램 순서 인터리브는 무효.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** ffn의 남은 구조적 한계는 dequant의 VE 비용(91k)이다. down 타일이 DMA 큐 뒤쪽(117k~)에 오는 한
+  그 뒤의 VE 작업 40k가 tail을 만든다. Way8에는 FP 곱이 없고(`vector_fp_binary`는 Way4 전용), fxp 경로는
+  파이프라인 순서(FpToFxp가 끝단)와 LUT 출력 타입(f8/bf16 고정)에 막힌다 → dequant 자체를 없애는 V29로.
+- **다음 후보:** V29(블록 scale을 contraction 뒤로), post-norm hop 1.6k.
+
+## V29_ffn_block_scale_after_contract
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V28_ffn_tile_shapes`
+- **가설:** FFN Main/VE 121k 중 dequant pass가 91k(4-lane f32 MulF, 3.8 elem/cycle)이고 down 단계는 이 때문에
+  VE-bound다. contraction engine의 Packet Reducer는 입력 패킷(32/64 B)을 접두 축약할 수 있으므로
+  (`config_contract_packet`: `m![L % 32]` → `m![L / 16 % 2]`), 시간 축약 없이(`contract_time::<m![R, L / 32 % 60]>`)
+  `contract_lane::<…, m![L / 16 % 2 # 8]>(Sequential)`로 **16열 블록별 partial sum**(f32)을 얻어
+  `commit_trim::<m![L / 16 % 2]>`(8 B)로 DM에 조밀 저장한다(pass A: LUT f4→f8→bf16을 fetch에 융합, VE 없음).
+  pass B는 partial `m![R, L / 128 % 15], m![L / 16 % 8]`(원소 수 1/16)을 fetch해 **기존 scale VRF 레이아웃 그대로**
+  MulF → `vector_intra_slice_reduce::<L, …>` → widen_pad → inter-slice reduce(8 chunk) → bf16 transpose commit.
+  수학적으로 Σ_b s_b Σ_{j∈b} w_j x_j = 현재 Σ_j (w_j s_b) x_j; bf16(w·s)는 유효 6비트라 현재도 exact이므로 차이는
+  f32 합산 순서뿐.
+- **예상:** VE 121k → ~45k (pass A는 LUT 속도 6~12 elem/cycle에 묶임, pass B는 원소 1/16). down 단계가 DMA-bound가
+  되어 makespan ≈ DMA 종료 150k + 4행 타일 ~2k + store/norm 8.5k ≈ 160k (−8k). 실물에서는 dequant pass가 사라진
+  만큼 확실히 이득.
+- **리스크:** `contract_lane` Sequential 모드·시간 무축약 조합의 lowering, 패딩 패킷 `m![L / 16 % 2 # 8]`의 commit_trim,
+  pass A 처리량(LUT-bound 값 미지).
+- **변경 파일:** `src/device/shared/mlp.rs`
 
 ## V13_ffn_dma_trims
 
