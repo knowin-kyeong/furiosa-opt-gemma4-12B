@@ -15,3 +15,9 @@ V52_qkv_x_copies_c2
 V54_qkv_x_copies_c4
 V55_qkv_x_copies_c8
 V56_qkv_x_copies_c16
+
+# copies at the other three staging sites (the low-utilisation loads)
+V57_attnout_x_copies_c8
+V58_ffn_upgate_x_copies_c8
+V59_ffn_down_geglu_copies_c8
+V60_all_x_copies_c8
