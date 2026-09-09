@@ -135,3 +135,7 @@ V165_qkv_broadcast_attnout_two_tiles#r9
 V165_qkv_broadcast_attnout_two_tiles#r10
 V165_qkv_broadcast_attnout_two_tiles#r11
 V165_qkv_broadcast_attnout_two_tiles#r12
+
+# Phase F - stream-ceiling probes (V172 qkv dup Q, V173 attn dup tile0, V174a/b ffn extra full-row vs segmented scale load), paired x3 each, x2 jobs.
+V172_stream_ceiling_probes
+V172_stream_ceiling_probes#r2
