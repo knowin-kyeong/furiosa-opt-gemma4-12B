@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | — | — | — | — | — | — | 설계됨 |
+| `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
 | `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
@@ -53,8 +53,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V35_attnout_trunc_split`**
-(…+V35 누적, 기하평균 5.621×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V36_qkv_scales_in_head_norms`**
+(…+V36 누적, 기하평균 5.654×; V26은 슬롯만 예약됨, V27은 V34/V35에 흡수). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -361,6 +361,22 @@ L=15360이면 60 × 256.
 - **정확도:** 지금은 bf16(f32(bf16 합)·scale) → norm; 바꾸면 bf16 합에 f32로 scale을 곱해 바로 norm(중간 bf16 반올림 1회 제거,
   오히려 정확). 실측 검증 필요.
 - **예상:** qkv −0.8k ~ −2.5k.
+
+### 측정: qkv 46,541 → **45,744** (−797), 기하평균 5.654
+
+- 첫 컴파일 통과. DMA busy 42.7k → 41.9k: scale 로드 838+838+792 → 555+555+561. 스케줄러는 세 로드를 여전히 V weight 앞에
+  둔다(k-scale 9,878, v-scale 12,977, q-scale 33,277 — 소비자 시점이 아니라 임계경로 길이 우선순위로 보임). V weight 로드 종료
+  42.0k → 41.4k, tail 4.3k(contract 1,225 → switch 328 → norm 345 → sqrt → norm 345 → scatter 929 → 600) 그대로.
+- **정확도:** 중간 bf16 반올림 1회 제거(더 정확). 실측 검증 필요.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** (1) DMA 비용 모델(K/Q weight, attn_out 타일 3점 적합): **≈ 548 고정 + bytes / 1.21 KB, 세그먼트 수는 무관**.
+  그래서 작은 로드는 크기와 무관하게 ~555이고, 타일 분할은 타일당 548을 더 낸다(V weight 2분할: 이득 612 − 548 ≈ 0).
+  qkv 큐의 비-weight DMA 15개 × ~550 고정 = 8k가 구조적 하한. (2) 복제 로드(x, 3.9 MB, 512 디스크립터)는 모델 예측 3.8k보다
+  1.4k 비싸다(같은 HBM 영역을 32 디스크립터가 읽는 비용?). attn_out x2 로드 0.5 MB는 1,318(예측 980).
+- **다음:** DMA 개수 줄이기 — x_hi/x_lo store 2회 → 1회(plain-axis tile commit으로 `[Dummy2, H%480]` 조립; qkv −553, attn_out
+  −377, ffn −2.2k), V26(x 절반: 복제 로드가 바이트 비례라면 −2.3k, 디스크립터 비례라면 0 — 먼저 ffn down x2 로드(2 MB)로 보정).
 
 ## V35_attnout_trunc_split
 
