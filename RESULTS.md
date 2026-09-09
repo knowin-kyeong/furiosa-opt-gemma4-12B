@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V23_ffn_whole_scale_loads` | `V22` | FFN block scale을 pass 타일(15개, 36k, 120 B 행) 대신 행렬당 1회 로드(슬라이스당 7.2 KB)로; V13b 재시도(두 클러스터·12행 타일 조건) | — | — | — | — | — | — | 설계됨 |
+| `V23_ffn_whole_scale_loads` | `V22` | FFN block scale을 pass 타일(15개, 36k) 대신 행렬당 1회 로드(슬라이스당 7.2 KB)로; V13b 재시도 | 51,631 | 30,487 | **181,625** | **5.131** | — | — | makespan 측정 |
 | `V22_attnout_weight_tiles` | `V21` | attn_out weight를 20행 타일 3개로 선로드해 융합 LUT+contract(5k)를 DMA(13.5k)와 겹침 | 51,631 | **30,487** | 186,976 | **5.082** | — | — | makespan 측정 |
 | `V21_qkv_rope_tables_early` | `V20` | cos/sin gather·HBM hop·VRF 스테이징을 커널 맨 앞에서 수행해 q/k rope가 V 로드와 겹치게 | 51,631 | — | — | — | — | — | **기각** (불변; 스케줄러가 gather 하나만 앞당김) |
 | `V20_qkv_tail_per_cluster` | `V19` | q/k/v의 HBM hop 제거: 클러스터별 ring-64 switch gather로 헤드/슬라이스 레이아웃을 만들고 후처리·저장·scatter를 두 클러스터에서 병렬 수행 | **51,631** | 31,113 | 186,976 | **5.048** | — | — | makespan 측정 |
@@ -40,8 +40,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V22_attnout_weight_tiles`**
-(…+V22 누적, 기하평균 5.082×). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V23_ffn_whole_scale_loads`**
+(…+V23 누적, 기하평균 5.131×). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -305,6 +305,14 @@ L=15360이면 60 × 256.
   head가 8k 늘어 실패했지만, 지금은 첫 타일이 6.3k이고 up/gate 두 행렬의 scale 로드가 각 ~5k라 판단 재시도.
 - **변경 파일:** `src/device/shared/mlp.rs`
 - **예상:** ffn −10k ~ −20k (또는 head 증가로 무효).
+
+### 측정: ffn 186,976 → **181,625** (−5.4k), 기하평균 5.131
+
+- 행렬당 scale 로드는 9,774(3.7 MB → 380 B/cycle: 120 B 행 조각이라 여전히 느림) ×3 ≈ 29k vs 36k. 이번엔 첫
+  타일(6.3k) 뒤에 배치되어 head 증가 없음. DMA busy 173k → 166k.
+
+### 판정: makespan 측정 (실측 대기)
+
 
 
 ## V21_qkv_rope_tables_early
