@@ -1944,3 +1944,309 @@ pub(crate) fn feedforward_v181(
     down
 }
 
+// ---------------------------------------------------------------------------------------------
+// V183: the down projection with each slice holding 15 whole rows of its cluster's L half
+// (256 slices x 15 rows x 7680 columns). A slice's f4 rows and block scales are 15 segments of
+// 3.84 KB / 480 B instead of 60 of 960 B / 120 B (V174: small segments cost twice per byte), x
+// is replicated by 8 copies per cluster plus a ring-32 switch (V181), and the two clusters'
+// column halves are summed in the post-FF reducing layout after a hop through HBM as f32 packets.
+type DownRowsFull = m![H / 15 % 256];
+type DownRowsGatheredFull = m![H / 60 % 64, 1 # 4];
+stage_packet_fns!(stage_packet_down_full, UpGateClusters, DownRowsFull);
+
+/// 1/s_c onto every slice of the cluster whose L half it scales: one descriptor per cluster
+/// and a ring-256 broadcast.
+fn broadcast_inv_s_full(
+    ctx: &mut Context,
+    v: &HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>,
+) -> VrfTensor<f32, Chip, UpGateClusters, DownRowsFull, m![1 # 8]> {
+    let one: DmTensor<f32, Chip, UpGateClusters, m![1 # 256], m![1 # 8]> = v.to_dm(&mut ctx.tdma);
+    let all: DmTensor<f32, Chip, UpGateClusters, m![Dummy256], m![1 # 8]> = ctx
+        .main
+        .begin(one.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .switch::<m![Dummy256], m![1]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
+        .collect::<m![1], m![1 # 8]>()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let all: DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![1 # 8]> = unsafe { all.reshape() };
+    stage_packet_down_full(ctx, &all)
+}
+
+/// The down helpers for one tile height: load `$rows` whole rows of the slice's L half (one
+/// 3.84 KB segment per row) and contract them with x into per-16-column-block partial sums,
+/// written into the tile of a 15-row partials buffer.
+macro_rules! down_full_fns {
+    ($load:ident, $contract:ident, $rows:literal) => {
+        fn $load(
+            ctx: &mut Context,
+            packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+            offset: usize,
+        ) -> DmTensor<f4e2m1, Chip, UpGateClusters, DownRowsFull, m![H % 15 = $rows, L % 7680]> {
+            packed
+                .view()
+                .tile::<m![H % 15], $rows, m![H / 15, H % 15 = $rows # 15, L]>(offset)
+                .to_dm(&mut ctx.tdma)
+        }
+
+        /// Pass A: per-16-column-block partial dot products of `$rows` packed rows with x.
+        fn $contract(
+            ctx: &mut Context,
+            x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, DownRowsFull, m![1], m![Dummy2, L % 7680]>,
+            packed: &DmTensor<f4e2m1, Chip, UpGateClusters, DownRowsFull, m![H % 15 = $rows, L % 7680]>,
+            offset: usize,
+            partials: &mut DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, L / 16 % 480]>,
+        ) {
+            ctx.main
+                .begin(packed.view())
+                .fetch::<m![H % 15 = $rows, L / 64 % 120, Dummy2], m![L % 64]>()
+                .fetch_table_lookup::<f8e4m3>()
+                .collect::<m![H % 15 = $rows, L / 64 % 120, Dummy2, L / 32 % 2], m![L % 32]>()
+                .contract_outer::<m![H % 15 = $rows, L / 64 % 120, Dummy2], m![L % 64], _, _, _>(x_trf)
+                .contract_packet::<m![L / 16 % 4]>()
+                .contract_time::<m![H % 15 = $rows, L / 64 % 120]>()
+                .contract_lane::<m![H % 15 = $rows, L / 64 % 120], m![L / 16 % 4 # 8]>(LaneMode::Sequential)
+                .commit_trim::<m![L / 16 % 4]>()
+                .commit_view(partials.view_mut().tile::<m![H % 15], $rows, m![H % 15 = $rows #{!} 15, L / 16 % 480]>(offset));
+        }
+    };
+}
+down_full_fns!(load_down_full_4, contract_down_full_4, 4);
+down_full_fns!(load_down_full_3, contract_down_full_3, 3);
+
+/// Pass B for one tile of `$rows` rows: block scales, 1/s_c and the column reduction over the
+/// slice's L half, one f32 scalar packet per row (no transpose, so any tile height works; the
+/// scale VRF holds 4 x 480 f32).
+macro_rules! down_reduce_full_fns {
+    ($reduce:ident, $rows:literal) => {
+        fn $reduce(
+            ctx: &mut Context,
+            partials: &DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, L / 16 % 480]>,
+            scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, DownRowsFull, m![H % 15, L / 16 % 480]>,
+            inv_s_vrf: &VrfTensor<f32, Chip, UpGateClusters, DownRowsFull, m![1 # 8]>,
+            offset: usize,
+            out: &mut DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, 1 # 8]>,
+        ) {
+            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15 = $rows, L / 16 % 480]> = ctx
+                .sub
+                .begin(scale_all.view().tile::<m![H % 15], $rows, m![H % 15 = $rows # 15, L / 16 % 480]>(offset))
+                .fetch::<m![H % 15 = $rows], m![L / 16 % 480]>()
+                .fetch_cast::<f32>()
+                .collect::<m![H % 15 = $rows, L / 128 % 60], m![L / 16 % 8]>()
+                .to_vrf();
+
+            ctx.main
+                .begin(partials.view().tile::<m![H % 15], $rows, m![H % 15 = $rows # 15, L / 16 % 480]>(offset))
+                .fetch::<m![H % 15 = $rows, L / 128 % 60], m![L / 16 % 8]>()
+                .collect::<m![H % 15 = $rows, L / 128 % 60], m![L / 16 % 8]>()
+                .vector_init()
+                .vector_intra_slice_tag(TagMode::Zero)
+                .vector_narrow_split::<m![H % 15 = $rows, L / 64 % 120], m![L / 16 % 4]>()
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), inv_s_vrf)
+                .vector_intra_slice_reduce::<L, m![H % 15 = $rows], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+                .vector_widen_pad::<m![1 # 8]>()
+                .vector_final()
+                .commit_trim::<m![1 # 8]>()
+                .commit_view(out.view_mut().tile::<m![H % 15], $rows, m![H % 15 = $rows #{!} 15, 1 # 8]>(offset));
+        }
+    };
+}
+down_reduce_full_fns!(reduce_down_full_4, 4);
+down_reduce_full_fns!(reduce_down_full_3, 3);
+
+/// Ring-4 gather of four slices' 15 row packets (packet-major, see `gather_pack_full`), both
+/// clusters' f32 packets through HBM, and the sum of the two column halves in the post-FF
+/// reducing layout: global scale, f32 add, cast and the dense packing by the transpose engine.
+fn down_sum_halves_full(
+    ctx: &mut Context,
+    g: &DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, 1 # 8]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    let gathered: DmTensor<f32, Chip, UpGateClusters, DownRowsGatheredFull, m![H % 15, H / 15 % 4, 1 # 8]> = ctx
+        .main
+        .begin(g.view())
+        .fetch::<m![H % 15], m![1 # 8]>()
+        .switch::<DownRowsGatheredFull, m![H % 15, H / 15 % 4]>(SwitchConfig::Broadcast1 { slice1: 4, slice0: 1 })
+        .collect::<m![H % 15, H / 15 % 4], m![1 # 8]>()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    // Stored in the packet-major order the gather produced (one 1.9 KB segment per group), and
+    // read back in H order by the packing pass's fetch.
+    let mut parts_hbm: HbmTensor<f32, Chip, m![L / 7680, H / 60, H % 15, H / 15 % 4, 1 # 8]> = HbmTensor::new();
+    gathered.view().to_hbm_view(&mut ctx.tdma, parts_hbm.view_mut());
+
+    let parts: DmTensor<f32, Chip, Cluster, ReducingSlices, m![L / 7680, H / 60 % 8, H % 15, H / 15 % 4, 1 # 8]> =
+        parts_hbm.to_dm(&mut ctx.tdma);
+    let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
+        down_global_scale.to_dm(&mut ctx.tdma);
+    let down_global_scale_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(down_global_scale.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+
+    ctx.main
+        .begin(parts.view())
+        .fetch::<m![H / 60 % 8, H / 15 % 4, H % 15, L / 7680], m![1 # 8]>()
+        .collect::<m![H % 480, L / 7680], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &down_global_scale_vrf)
+        .vector_intra_slice_reduce::<L, m![H % 480], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 480 / 4], m![H % 480 % 4 # 16]>()
+        .commit_trim::<m![H % 480 % 4]>()
+        .commit()
+}
+
+/// The geglu pieces staged as `[Dummy2, L]` so a down slice's L half is one segment per piece.
+fn stage_geglu_hi_lo_hbm_full(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, UpGateClusters, UpGateRowsGathered, m![L % 480]>,
+) -> (HbmTensor<f8e4m3, Chip, m![Dummy2, L]>, HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>) {
+    let m_local = max_square_gathered(ctx, x);
+    let m_every: DmTensor<f32, Chip, UpGateClusters, m![Dummy256], m![L / 480 % 16, 1 # 8]> = ctx
+        .main
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .switch::<m![Dummy256], m![L / 480 % 16]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
+        .collect::<m![L / 480 % 16], m![1 # 8]>()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, UpGateClusters, m![Dummy256], m![1 # 8]> = ctx
+        .sub
+        .begin(m_every.view())
+        .fetch::<m![L / 480 % 16], m![1 # 8]>()
+        .collect::<m![L / 480 % 16], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_intra_slice_reduce::<L, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Max)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let (s_all, inv_s_all) = pow2_scale_gathered_all(ctx, &m_all);
+    let s: DmTensor<f32, Chip, UpGateClusters, UpGateRowsGathered, m![1 # 8]> = unsafe { s_all.reshape() };
+    let s_vrf = stage_packet_gathered(ctx, &s);
+
+    let (x_hi, x_lo) = hi_lo_gathered(ctx, x, &s_vrf);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, L]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, L]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, L]>(1));
+
+    let inv_s_one: DmTensor<f32, Chip, UpGateClusters, m![1 # 256], m![1 # 8]> = unsafe { inv_s_all.reshape() };
+    let mut inv_s_hbm: HbmTensor<f32, Chip, m![L / 7680, 1 # 8]> = HbmTensor::new();
+    inv_s_one.view().to_hbm_view(&mut ctx.tdma, inv_s_hbm.view_mut());
+    (x2_hbm, inv_s_hbm)
+}
+
+pub(crate) fn feedforward_v183(
+    ctx: &mut Context,
+    x2: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+    erf_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
+    out_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    hop: &mut HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    // All weight tiles are issued up front into distinct buffers so the loads stream back to
+    // back while each tile is dequantized as it lands. up/gate: 4 tiles per matrix (16, 16,
+    // 16 and 12 rows); down: 5 tiles (16, 16, 16, 8 and 4 rows), the last one small so that
+    // little dequant + contract work trails the final weight load. Only the packed f4 tiles
+    // reach DM: the f4 -> f8 lookup and f8 -> f32 cast run in the fetch stage of the scale
+    // pass.
+    // V181: whole rows per slice - one contiguous segment each for the f4 rows and the block
+    // scales - and x replicated to every slice by 8 copies per cluster plus a ring-32 switch.
+    let up_w: DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let up_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> = up_weight_scale.to_dm(&mut ctx.tdma);
+    let gate_w: DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]> = gate_weight_packed.to_dm(&mut ctx.tdma);
+    let gate_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> = gate_weight_scale.to_dm(&mut ctx.tdma);
+    // V183: down rows whole per slice (15 x 3.84 KB segments), tiles 4/4/4/3, the last small.
+    let down0 = load_down_full_4(ctx, down_weight_packed, 0);
+    let down_scale: DmTensor<f8e4m3, Chip, UpGateClusters, DownRowsFull, m![H % 15, L / 16 % 480]> =
+        down_weight_scale.to_dm(&mut ctx.tdma);
+    let down1 = load_down_full_4(ctx, down_weight_packed, 4);
+    let down2 = load_down_full_4(ctx, down_weight_packed, 8);
+    let down3 = load_down_full_3(ctx, down_weight_packed, 12);
+
+    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, 1 # 32], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
+        .main
+        .begin(x8.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]> = unsafe { x.reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let up_partials = contract_up_gate_full(ctx, &x_trf, &up_w);
+    let gate_partials = contract_up_gate_full(ctx, &x_trf, &gate_w);
+    let mut up: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
+    let mut gate: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 8, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 8, &mut gate);
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 16, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 16, &mut gate);
+    reduce_up_gate_full_6(ctx, &up_partials, &up_scale, 24, &mut up);
+    reduce_up_gate_full_6(ctx, &gate_partials, &gate_scale, 24, &mut gate);
+
+    let g = geglu_full(ctx, up, gate, erf_scale, out_scale);
+    let x = gather_pack_full(ctx, &g);
+    let (x2_hbm, inv_s_hbm) = stage_geglu_hi_lo_hbm_full(ctx, &x);
+    let inv_s_vrf = broadcast_inv_s_full(ctx, &inv_s_hbm);
+
+    // Each slice holds both f8 pieces of its cluster's L half of the geglu output: 8 copies per
+    // cluster from HBM and a ring-32 switch to the rest (V181's x path, 480 packets).
+    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, 1 # 32], m![Dummy2, L % 7680]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, Dummy256 / 8], m![Dummy2, L % 7680]> = ctx
+        .main
+        .begin(x8.view())
+        .fetch::<m![Dummy2, L / 32 % 240], m![L % 32]>()
+        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, L / 32 % 240]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .collect::<m![Dummy2, L / 32 % 240], m![L % 32]>()
+        .commit_trim::<m![L % 32]>()
+        .commit();
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, DownRowsFull, m![Dummy2, L % 7680]> = unsafe { x.reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, DownRowsFull, m![1], m![Dummy2, L % 7680]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, L / 32 % 240], m![L % 32]>()
+        .collect::<m![Dummy2, L / 32 % 240], m![L % 32]>()
+        .to_trf();
+
+    let mut partials: DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, L / 16 % 480]> = DmTensor::new();
+    let mut rows: DmTensor<f32, Chip, UpGateClusters, DownRowsFull, m![H % 15, 1 # 8]> = DmTensor::new();
+    contract_down_full_4(ctx, &x_trf, &down0, 0, &mut partials);
+    reduce_down_full_4(ctx, &partials, &down_scale, &inv_s_vrf, 0, &mut rows);
+    contract_down_full_4(ctx, &x_trf, &down1, 4, &mut partials);
+    reduce_down_full_4(ctx, &partials, &down_scale, &inv_s_vrf, 4, &mut rows);
+    contract_down_full_4(ctx, &x_trf, &down2, 8, &mut partials);
+    reduce_down_full_4(ctx, &partials, &down_scale, &inv_s_vrf, 8, &mut rows);
+    contract_down_full_3(ctx, &x_trf, &down3, 12, &mut partials);
+    reduce_down_full_3(ctx, &partials, &down_scale, &inv_s_vrf, 12, &mut rows);
+
+    let _ = hop;
+    down_sum_halves_full(ctx, &rows, down_global_scale)
+}
