@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Ds, E, Gs, Ns};
+use crate::axes::{Ds, Dummy2, E, Gs, Ns};
 use crate::device::layout::{Cluster, Slice};
 
 type KvHeadsAcrossSlices = m![1 # 32, Ns];
@@ -268,18 +268,23 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
     // absent from the table replicates. It does not (V50): the slices that were not written
     // read uninitialised HBM, and q and k came out non-finite from d = 129 on while v, which
     // takes no RoPE, stayed correct.
+    // The two gathered rows share one staging buffer, so the head layout is filled by a single
+    // load instead of two. V189 priced the table's trip through HBM at 2.2k real cycles per
+    // round trip and the pair of gathers at 1.8k; dropping one load was worth 3.4k warm.
     let cos_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = cos.dma_gather_scaled(rope_offset);
     let sin_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = sin.dma_gather_scaled(rope_offset);
-    let mut cos_hbm: HbmTensor<bf16, Chip, m![Ds]> = HbmTensor::new();
-    cos_row.view().to_hbm_view(&mut ctx.tdma, cos_hbm.view_mut());
-    let mut sin_hbm: HbmTensor<bf16, Chip, m![Ds]> = HbmTensor::new();
-    sin_row.view().to_hbm_view(&mut ctx.tdma, sin_hbm.view_mut());
-    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos_hbm.to_dm(&mut ctx.tdma);
-    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin_hbm.to_dm(&mut ctx.tdma);
+    let mut cs_hbm: HbmTensor<bf16, Chip, m![Dummy2, Ds]> = HbmTensor::new();
+    cos_row
+        .view()
+        .to_hbm_view(&mut ctx.tdma, cs_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(0));
+    sin_row
+        .view()
+        .to_hbm_view(&mut ctx.tdma, cs_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(1));
+    let cs: DmTensor<bf16, Chip, C, S, m![Dummy2, Ds]> = cs_hbm.to_dm(&mut ctx.tdma);
 
     let cos_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
-        .begin(cos.view())
+        .begin(cs.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(0))
         .fetch::<m![Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds / 8], m![Ds % 8]>()
@@ -287,7 +292,7 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
 
     let sin_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
-        .begin(sin.view())
+        .begin(cs.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1))
         .fetch::<m![Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds / 8], m![Ds % 8]>()
