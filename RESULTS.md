@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거; cos gather가 V 로드 뒤 tail에 걸리던 것도 완화 | — | — | — | — | — | — | 설계됨 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
@@ -295,6 +296,17 @@ L=15360이면 60 × 256.
   그 뒤의 VE 작업 40k가 tail을 만든다. Way8에는 FP 곱이 없고(`vector_fp_binary`는 Way4 전용), fxp 경로는
   파이프라인 순서(FpToFxp가 끝단)와 LUT 출력 타입(f8/bf16 고정)에 막힌다 → dequant 자체를 없애는 V29로.
 - **다음 후보:** V29(블록 scale을 contraction 뒤로), post-norm hop 1.6k.
+
+## V30_qkv_rope_tables_direct_gather
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V29_ffn_block_scale_after_contract`
+- **가설:** `apply_rope_heads`는 cos/sin 행을 `Cluster, Slice`로 gather(934)한 뒤 HBM에 쓰고(337) 헤드 레이아웃으로 다시 읽는다(555).
+  V15의 규칙("HBM에 없는 축을 슬라이스/클러스터 매핑에 쓰면 복제")이 gather에도 적용되면 `dma_gather_scaled`의 목적
+  레이아웃을 `HeadClusters, HeadSlicesPerCluster, m![Ds]`로 두어 8개 live 슬라이스가 같은 512 B 행을 직접 받을 수 있다.
+  DMA 큐에서 −1.8k, 그리고 cos gather(43.1k, V 로드 뒤)→store→load 체인이 tail에서 짧아진다.
+- **변경 파일:** `src/device/sliding/rope.rs`
+- **예상:** qkv −1.5k ~ −2.5k.
 
 ## V29_ffn_block_scale_after_contract
 
