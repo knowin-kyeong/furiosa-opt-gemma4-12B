@@ -30,6 +30,13 @@
 
 **qkv는 이제 다른 두 커널과 같은 DMA 스트림 하한(~290 B/cycle)에 있다.** 남은 격차는 커널 구조가 아니라 채점 1회 draw의 분산(±5%)이다.
 
+### 1.0a Arena SOTA 후보 (공식 미제출): `V182_ffn_full_rows_production` (2026-09-09 18:35 UTC)
+
+V165 + ffn up/gate를 슬라이스당 30행 × H 전체(연속 1세그먼트 로드)로 바꾼 V181의 ffn(`stage_x_hi_lo_hbm_full` + `feedforward_v181`). 커밋 `53ba401`.
+Arena job 15622/15623/15624(커널당 5회 × 3잡) **45/45 PASS**, cold median **qkv 110,234 / attn_out 52,928 / ffn 319,094** → 기하평균 **5.86**
+(V165를 같은 Arena-cold 기준으로 재면 5.72; 공식 draw 기대치 ≈ 5.9). ffn −8.6%, qkv·attn_out은 V165와 같은 분포.
+**공식 리더보드 제출은 사용자 지시가 있을 때만**(RULES §5.4). 제출 전까지 공식 SOTA는 V165 그대로.
+
 ## 1.1 공식 리더보드 (moa-submitter)
 
 | 날짜 | submission | 코드 | qkv | attn_out | ffn | score | 순위 |
