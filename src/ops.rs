@@ -97,14 +97,9 @@ pub fn sliding_project_qkv(
         v_weight_scale,
     );
 
-    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
-        ctx,
-        &q,
-        &k,
-        rope_offset,
-        cos,
-        sin,
-    );
+    // V149 ablation: no RoPE (the head RMSNorms stay), so that the hardware cost of the RoPE
+    // stage alone - two indexed gathers, an HBM hop, the rotate passes - can be read off the
+    // cycle count (accuracy fails by design for q and k).
 
     q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
     k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
