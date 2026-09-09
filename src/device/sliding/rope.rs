@@ -262,16 +262,10 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
     DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
     DmTensor<bf16, Chip, C, S, m![Ds]>,
 ) {
-    // The gathered rows land on one cluster; stage them through HBM so both clusters can
-    // load them into the head layout (a DM-to-DM DMA cannot change the cluster mapping).
-    let cos_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = cos.dma_gather_scaled(rope_offset);
-    let sin_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = sin.dma_gather_scaled(rope_offset);
-    let mut cos_hbm: HbmTensor<bf16, Chip, m![Ds]> = HbmTensor::new();
-    cos_row.view().to_hbm_view(&mut ctx.tdma, cos_hbm.view_mut());
-    let mut sin_hbm: HbmTensor<bf16, Chip, m![Ds]> = HbmTensor::new();
-    sin_row.view().to_hbm_view(&mut ctx.tdma, sin_hbm.view_mut());
-    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos_hbm.to_dm(&mut ctx.tdma);
-    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin_hbm.to_dm(&mut ctx.tdma);
+    // The gathered rows go straight to the head layout: a cluster or slice axis absent from
+    // the table is a replication, so each live slice of both clusters receives the row.
+    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos.dma_gather_scaled(rope_offset);
+    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin.dma_gather_scaled(rope_offset);
 
     let cos_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
