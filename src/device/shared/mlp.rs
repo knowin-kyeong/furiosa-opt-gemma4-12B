@@ -5,6 +5,7 @@ use crate::Chip;
 use crate::axes::{Dummy2, Dummy256, Dummy8, H, L};
 use crate::device::layout::{Cluster, Slice};
 use crate::device::shared::rmsnorm::{self, ReducingSlices};
+use crate::{hi_lo_fns, max_square_fns, pow2_scale_fns, stage_packet_fns};
 
 const INVSQRT2: f32 = 0.70710678118f32;
 
@@ -20,168 +21,16 @@ type UpGateRowsByColumns = m![L / 60 % 128, H / 1920];
 type UpGateRowsGathered = m![L / 480 % 16, 1 # 16];
 
 
-/// From `m` (a max of squares, one `1 # 8` packet per slice) to `s = 2^floor(log2(128 / sqrt m))`
-/// and `1 / s`: a power of two that brings max |x| into (64, 128], so that x * s is exact in bf16
-/// and its two f8e4m3 pieces keep 8 significant bits down to max |x| / 4096.
-macro_rules! pow2_scale_fns {
-    ($name:ident, $cl:ty, $sl:ty) => {
-        fn $name(
-            ctx: &mut Context,
-            m: &DmTensor<f32, Chip, $cl, $sl, m![1 # 8]>,
-        ) -> (DmTensor<f32, Chip, $cl, $sl, m![1 # 8]>, DmTensor<f32, Chip, $cl, $sl, m![1 # 8]>) {
-            let t: DmTensor<f32, Chip, $cl, $sl, m![1 # 8]> = ctx
-                .sub
-                .begin(m.view())
-                .fetch::<m![1], m![1 # 8]>()
-                .collect::<m![1], m![1 # 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_trim::<m![1 # 4]>()
-                .vector_fp_unary(FpUnaryOp::Sqrt)
-                .vector_fp_div_with_mode(BinaryArgMode::Mode10, 128f32)
-                .vector_widen_pad::<m![1 # 8]>()
-                .vector_final()
-                .commit_trim::<m![1 # 8]>()
-                .commit();
-            // Keeping only the exponent field rounds t down to a power of two.
-            let s: DmTensor<f32, Chip, $cl, $sl, m![1 # 8]> = ctx
-                .sub
-                .begin(t.view())
-                .fetch::<m![1], m![1 # 8]>()
-                .collect::<m![1], m![1 # 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_logic(LogicBinaryOpF32::BitAnd, f32::INFINITY)
-                .vector_final()
-                .commit_trim::<m![1 # 8]>()
-                .commit();
-            let inv_s: DmTensor<f32, Chip, $cl, $sl, m![1 # 8]> = ctx
-                .sub
-                .begin(s.view())
-                .fetch::<m![1], m![1 # 8]>()
-                .collect::<m![1], m![1 # 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_trim::<m![1 # 4]>()
-                .vector_fp_div_with_mode(BinaryArgMode::Mode10, 1f32)
-                .vector_widen_pad::<m![1 # 8]>()
-                .vector_final()
-                .commit_trim::<m![1 # 8]>()
-                .commit();
-            (s, inv_s)
-        }
-    };
-}
 pow2_scale_fns!(pow2_scale_reducing, Cluster, ReducingSlices);
 pow2_scale_fns!(pow2_scale_gathered_all, UpGateClusters, m![Dummy256]);
-
-/// A `1 # 8` f32 packet staged into the VRF (any layout).
-macro_rules! stage_packet_fns {
-    ($name:ident, $cl:ty, $sl:ty) => {
-        fn $name(
-            ctx: &mut Context,
-            v: &DmTensor<f32, Chip, $cl, $sl, m![1 # 8]>,
-        ) -> VrfTensor<f32, Chip, $cl, $sl, m![1 # 8]> {
-            ctx.sub
-                .begin(v.view())
-                .fetch::<m![1], m![1 # 8]>()
-                .collect::<m![1], m![1 # 8]>()
-                .to_vrf()
-        }
-    };
-}
 stage_packet_fns!(stage_packet_reducing, Cluster, ReducingSlices);
 stage_packet_fns!(stage_packet_gathered, UpGateClusters, UpGateRowsGathered);
 stage_packet_fns!(stage_packet_pairs, UpGateClusters, UpGateRowsPairs);
 stage_packet_fns!(stage_packet_down, DownClusters, DownRowsByColumns);
-
-/// Max of x^2 over one slice's elements of a bf16 vector, as a `1 # 8` packet.
-macro_rules! max_square_fns {
-    ($name:ident, $cl:ty, $sl:ty, $ax:ident, $n16:literal, $n8:literal, $n4:literal) => {
-        fn $name(
-            ctx: &mut Context,
-            x: &DmTensor<bf16, Chip, $cl, $sl, m![$ax % 480]>,
-        ) -> DmTensor<f32, Chip, $cl, $sl, m![1 # 8]> {
-            ctx.sub
-                .begin(x.view())
-                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
-                .fetch_cast::<f32>()
-                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
-                .vector_stash()
-                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
-                .vector_intra_slice_reduce::<$ax, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Max)
-                .vector_widen_pad::<m![1 # 8]>()
-                .vector_final()
-                .commit_trim::<m![1 # 8]>()
-                .commit()
-        }
-    };
-}
-max_square_fns!(max_square_reducing, Cluster, ReducingSlices, H, 30, 60, 120);
-max_square_fns!(max_square_gathered, UpGateClusters, UpGateRowsGathered, L, 30, 60, 120);
-
-/// The two f8 pieces of a scaled vector: `hi = f8(x * s)` and `lo = f8(x * s - hi)`. Their sum is
-/// bf16(x) * s exactly (x has 8 significant bits, each f8e4m3 piece carries 4, and s is a power of
-/// two), so an f8 x f8 contraction against both reproduces the bf16 x f8 one, up to 1/s.
-macro_rules! hi_lo_fns {
-    ($name:ident, $cl:ty, $sl:ty, $ax:ident, $n32:literal, $n16:literal, $n8:literal, $n4:literal) => {
-        fn $name(
-            ctx: &mut Context,
-            x: &DmTensor<bf16, Chip, $cl, $sl, m![$ax % 480]>,
-            s_vrf: &VrfTensor<f32, Chip, $cl, $sl, m![1 # 8]>,
-        ) -> (
-            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % 480]>,
-            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % 480]>,
-        ) {
-            let x_hi: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % 480]> = ctx
-                .sub
-                .begin(x.view())
-                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
-                .fetch_cast::<f32>()
-                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
-                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s_vrf)
-                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .vector_final()
-                .cast::<f8e4m3, m![$ax % 8 # 32]>()
-                .commit_trim::<m![$ax % 8]>()
-                .commit();
-
-            let x_hi_vrf: VrfTensor<f32, Chip, $cl, $sl, m![$ax % 480]> = ctx
-                .sub
-                .begin(x_hi.view())
-                .fetch::<m![$ax / 32 % $n32], m![$ax % 32]>()
-                .fetch_cast::<f32>()
-                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .to_vrf();
-
-            let x_lo: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % 480]> = ctx
-                .sub
-                .begin(x.view())
-                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
-                .fetch_cast::<f32>()
-                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
-                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s_vrf)
-                .vector_fp_binary(FpBinaryOp::SubF, &x_hi_vrf)
-                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
-                .vector_final()
-                .cast::<f8e4m3, m![$ax % 8 # 32]>()
-                .commit_trim::<m![$ax % 8]>()
-                .commit();
-            (x_hi, x_lo)
-        }
-    };
-}
-hi_lo_fns!(hi_lo_reducing, Cluster, ReducingSlices, H, 15, 30, 60, 120);
-hi_lo_fns!(hi_lo_gathered, UpGateClusters, UpGateRowsGathered, L, 15, 30, 60, 120);
+max_square_fns!(max_square_reducing, Cluster, ReducingSlices, H, 480, 30, 60, 120);
+max_square_fns!(max_square_gathered, UpGateClusters, UpGateRowsGathered, L, 480, 30, 60, 120);
+hi_lo_fns!(hi_lo_reducing, Cluster, ReducingSlices, H, 480, 15, 30, 60, 120);
+hi_lo_fns!(hi_lo_gathered, UpGateClusters, UpGateRowsGathered, L, 480, 15, 30, 60, 120);
 
 /// The FFN input as two f8 pieces of x * s (see `hi_lo_fns`; s is chosen from max x^2 over the
 /// vector), written to one HBM scratch laid out so that every slice's column half of both pieces

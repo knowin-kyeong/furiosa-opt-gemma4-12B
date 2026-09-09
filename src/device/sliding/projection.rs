@@ -3,6 +3,7 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
+use crate::{hi_lo_fns, max_square_fns, stage_packet_fns};
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
@@ -191,8 +192,8 @@ pub(crate) fn project_output(
     // Both clusters do real work: the hidden rows are split across the two clusters and
     // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
     // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
-    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the fused
-    // lookup + contraction of one tile overlaps the loads of the rest. The eight chunk
+    // rows come in 3 tiles of 20, all issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
     // partials are summed across slices within a cluster and the per-channel scale is
     // applied in the same epilogue.
     let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![H % 60 = 20, Qs % 512]> = weight
@@ -208,12 +209,42 @@ pub(crate) fn project_output(
         .tile::<m![H % 60], 20, m![H / 60, H % 60 = 20 # 60, Qs]>(20 * 2)
         .to_dm(&mut ctx.tdma);
 
-    let x: DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
-    let x_trf: TrfTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Qs % 512]> = ctx
+    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
+    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
+    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
+    // absorbs s.
+    let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let m_local = max_square_x(ctx, &xs);
+    let sixteen: DmTensor<f32, Chip, Cluster, XSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 0f32)
+        .vector_fp_binary(FpBinaryOp::AddF, 16f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let s_vrf = stage_packet_x(ctx, &sixteen);
+    let (x_hi, x_lo) = hi_lo_x(ctx, &xs, &s_vrf);
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    x_hi.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+    x_lo.view()
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
         .sub
         .begin(x.view())
-        .fetch::<m![Qs / 16 % 32], m![Qs % 16]>()
-        .collect::<m![Qs / 16 % 32], m![Qs % 16]>()
+        .fetch::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 16], m![Qs % 32]>()
         .to_trf();
     let weight_scale: DmTensor<bf16, Chip, TwoClusters, HiddenRows, m![H % 60]> = weight_scale.to_dm(&mut ctx.tdma);
 
@@ -227,10 +258,9 @@ pub(crate) fn project_output(
         .to_vrf();
     ctx.main
         .begin(tile0.view())
-        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
-        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .fetch::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 20, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![H % 60 = 20]>()
         .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
@@ -254,10 +284,9 @@ pub(crate) fn project_output(
         .to_vrf();
     ctx.main
         .begin(tile1.view())
-        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
-        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .fetch::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 20, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![H % 60 = 20]>()
         .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
@@ -281,10 +310,9 @@ pub(crate) fn project_output(
         .to_vrf();
     ctx.main
         .begin(tile2.view())
-        .fetch::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32]>()
-        .fetch_table_lookup::<bf16>()
-        .collect::<m![H % 60 = 20, Qs / 16 % 32], m![Qs % 16]>()
-        .contract_outer::<m![H % 60 = 20, Qs / 32 % 16], m![Qs % 32], _, _, _>(&x_trf)
+        .fetch::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 60 = 20, Qs / 64 % 8, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 60 = 20, Qs / 64 % 8, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![H % 60 = 20]>()
         .contract_lane::<m![H % 60 = 20], m![1 # 8]>(LaneMode::Interleaved)
@@ -312,6 +340,11 @@ pub(crate) fn project_output(
 type TwoClusters = m![H / 1920];
 type HiddenRows = m![H / 60 % 32, 1 # 8];
 type HiddenRowsByColumns = m![H / 60 % 32, Qs / 512];
+/// The attention output on eight slices, 512 elements each, for the f8 split.
+type XSlices = m![1 # 32, Qs / 512];
+stage_packet_fns!(stage_packet_x, Cluster, XSlices);
+max_square_fns!(max_square_x, Cluster, XSlices, Qs, 512, 32, 64, 128);
+hi_lo_fns!(hi_lo_x, Cluster, XSlices, Qs, 512, 16, 32, 64, 128);
 
 fn apply_output_channel_scale(
     ctx: &mut Context,
