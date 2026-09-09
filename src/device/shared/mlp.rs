@@ -1695,18 +1695,20 @@ fn gather_pack_full(
     ctx: &mut Context,
     g: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
 ) -> DmTensor<bf16, Chip, UpGateClusters, UpGateRowsGathered, m![L % 480]> {
-    let gathered: DmTensor<f32, Chip, UpGateClusters, UpGateRowsGathered, m![L / 30 % 16, L % 30, 1 # 8]> = ctx
+    // The ring delivers packet-major: every slice's packet r before packet r + 1 (V167 read it
+    // slice-major and came out permuted), so the gathered buffer is [L % 30, L / 30 % 16] and the
+    // packing pass fetches it back in L order.
+    let gathered: DmTensor<f32, Chip, UpGateClusters, UpGateRowsGathered, m![L % 30, L / 30 % 16, 1 # 8]> = ctx
         .main
         .begin(g.view())
         .fetch::<m![L % 30], m![1 # 8]>()
-        .switch::<UpGateRowsGathered, m![L / 30 % 16, L % 30]>(SwitchConfig::Broadcast1 { slice1: 16, slice0: 1 })
-        .collect::<m![L / 30 % 16, L % 30], m![1 # 8]>()
+        .switch::<UpGateRowsGathered, m![L % 30, L / 30 % 16]>(SwitchConfig::Broadcast1 { slice1: 16, slice0: 1 })
+        .collect::<m![L % 30, L / 30 % 16], m![1 # 8]>()
         .commit_trim::<m![1 # 8]>()
         .commit();
-    let gathered: DmTensor<f32, Chip, UpGateClusters, UpGateRowsGathered, m![L % 480, 1 # 8]> = unsafe { gathered.reshape() };
     ctx.main
         .begin(gathered.view())
-        .fetch::<m![L % 480], m![1 # 8]>()
+        .fetch::<m![L / 30 % 16, L % 30], m![1 # 8]>()
         .collect::<m![L % 480], m![1 # 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
