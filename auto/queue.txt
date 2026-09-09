@@ -115,3 +115,11 @@ V136_attnout_tiles_48_12
 # qkv: half the replicated x bytes by carrying one f8 piece (accuracy question, screening only)
 V137_qkv_x_single_f8
 V138_single_f8_plus_up12x5
+
+# the V137 lever applied to the other three staging sites (accuracy question, screening)
+V139_attnout_x_single_f8
+V140_ffn_upgate_single_f8
+V141_ffn_down_single_f8
+V142_ffn_both_single_f8
+V143_all_single_f8
+V144_all_single_f8_up12x5
