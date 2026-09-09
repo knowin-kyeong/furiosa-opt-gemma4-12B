@@ -558,7 +558,7 @@ pub(crate) fn project_output_into_v167(
         .main
         .begin(contraction.view())
         .fetch::<m![H % 60 / 12], m![H % 60 % 12 # 16]>()
-        .switch::<Slice, m![H / 60 % 32]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 8 })
+        .switch::<Slice, m![H / 60 % 32, H % 60 / 12]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 8 })
         .collect::<m![H / 60 % 32, H % 60 / 12], m![H % 60 % 12 # 16]>()
         .commit_trim::<m![H % 60 % 12]>()
         .commit();
