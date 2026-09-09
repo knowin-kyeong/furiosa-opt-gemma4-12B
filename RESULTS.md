@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V49_hbm_copies_real_stores` | `V41` | 사본 축(`Dummy8`/`Dummy256/16`)은 store를 복제하지 않는다(위 §첫 RNGD 실측). 사본마다 `to_hbm_view`를 명시적으로 호출해 네 곳(qkv x 16부, ffn up/gate·down, attn_out)을 실제로 채운다. 사본 수는 store 추가 비용과 load 분산 이득의 균형으로 다시 튜닝 | — | — | — | — | — | — | 설계됨 (V15~V41 계보 전체의 정확도를 되살리는 것이 목적) |
+| `V49_hbm_copies_real_stores` | `V41` | 사본 축(`Dummy8`/`Dummy256/16`)은 store를 복제하지 않는다(위 §첫 RNGD 실측). 사본마다 `to_hbm_view`를 명시적으로 호출해 네 곳(qkv x 16부, ffn up/gate·down, attn_out)을 실제로 채운다. 사본 수는 store 추가 비용과 load 분산 이득의 균형으로 다시 튜닝 | — | 144,128 | — | — | — | — | **기각** (사본 수 1/2/4/8/16 전수 측정; c=1이 최적) |
+| `V50_drop_false_replication` | `V38` | 소스에 없는 축은 DMA write를 복제하지 않는다. 그 전제에 기댄 두 곳(qkv x의 16부 HBM 사본, V30의 RoPE 테이블 head-layout 직접 gather)을 되돌린다 | **58,962** | 27,424 | 158,182 | 5.310 | **149,244 / 56,522 / 354,825 (4.972)** | **3/3 PASS** | **채택 — 현재 SOTA (첫 유효 5×대)** |
 | `V48_qkv_shared_spm_index` | `V39` | cos/sin gather 934×2·k/v scatter 929×2가 각각 HBM 인덱스를 따로 읽는다(`*_scaled`). byte-offset 인덱스를 SPM에 한 번 만들어 `dma_gather_unscaled`/`dma_scatter_unscaled`로 4개 DMA의 인덱스 로드를 공유 | — | — | — | — | — | — | 설계됨 (기대 qkv −0.5k~−1k; 인덱스 비용 분해 미확인) |
 | `V47_ffn_global_scale_into_eps` | `V39` | down global scale pass(401, tail)는 post-FF RMSNorm이 스케일 불변이라 불필요. eps만 s²로 나눠(`vector_clip(Add, &eps_vrf)`) 접고 pass 제거 | — | — | — | — | — | — | 설계됨 (기대 ffn −0.4k) |
 | `V46_ffn_scalar_broadcast_merge` | `V39` | geglu 스칼라 2개(erf_scale·out_scale)의 broadcast_scalar_pairs가 각각 로드 521 + switch config 719를 낸다. 두 스칼라를 DM `[2, 1 # 8]` 하나에 tile-view 로드해 ring-256 switch 1회로 | — | — | — | — | — | — | 설계됨 (기대 ffn −1.2k) |
@@ -133,18 +134,22 @@ V38이 qkv만 깨지고 attn_out·ffn은 PASS인 것이 이 표의 직접적인 
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: **`V14_two_clusters` — 기하평균 3.936×** (183,005 / 78,708 / 418,837, 3/3 PASS).
-정확도가 확인된 브랜치 중 가장 빠르다. makespan 기준 선두였던 `V41_x2_hbm_copies`(5.801×)는 실측에서
-3/3 FAIL로 **기각**됐고, V15~V38도 qkv가 NaN이라 전부 보류다 (위 §첫 RNGD 실측의 사본 store 버그).
-문서 최신본은 이 브랜치(`V41_x2_hbm_copies`)에 있다 — 코드는 기각이지만 문서 계보의 끝이다.
+실측(RNGD) 기준: **`V50_drop_false_replication` — 기하평균 4.972×** (149,244 / 56,522 / 354,825,
+3/3 PASS, job 15360). V38에서 "소스에 없는 축이 DMA write를 복제한다"는 잘못된 전제에 기댄 두 곳
+(qkv의 16부 HBM 사본, V30의 RoPE 테이블 gather)을 되돌린 것이다. 이전 실측 SOTA는 V14(3.936×).
+V15~V41은 전부 정확도 FAIL이라 점수가 없다. 문서 최신본은 이 브랜치에 있다.
 야간 자동 체인의 실측/빌드 결과는 pod `/root/auto/wt/auto/BOARD.md`(RULES §11). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
 - **소스에 없는 `Dummy` 축을 목적지에 붙여 HBM store를 복제하기** (V15/V31/V41) — 복제되지 않는다.
   store 디스크립터도 바이트도 그대로이고(그래서 "공짜"로 보인다), 사본 1개만 채워진 채 나머지를
-  읽는다. `to_hbm_view`는 축 검사를 하지 않아 조용히 컴파일된다. **HBM 사본이 필요하면 사본마다
-  `to_hbm_view`를 호출한다.** 실측 없이 makespan만 보고 채택한 변경이 어떻게 되는지의 표본이다.
+  읽는다. `to_hbm_view`는 축 검사를 하지 않아 조용히 컴파일된다. 같은 전제가 `dma_gather_scaled`의
+  목적지 cluster/slice 축에도 적용됐다(V30의 RoPE 테이블) — 역시 복제되지 않는다. 실측 없이
+  makespan만 보고 채택한 변경이 어떻게 되는지의 표본이다.
+- **사본마다 store를 불러 위를 고치기** (V49) — store 1개마다 Core 디스크립터 명령이 3개 붙고
+  Core는 in-order라, 사본 수 1/2/4/8/16 어디서도 c=1(사본 없음)을 못 이긴다. 사본이라는 아이디어
+  자체를 버려야 한다(V50). 단 **실측에서는** 정적 모델보다 사본의 값어치가 크므로 c=2의 실물 A/B는 열려 있다.
 
 - **switch 기반 브로드캐스트 변형으로 x 복제 비용 줄이기** — book(Switch Engine)이
   명시: 모든 SwitchConfig의 비용 = `ring_size × Time × flits_per_packet`. 1개 슬라이스의
@@ -441,11 +446,79 @@ HBM 사본은 좋은 생각이었지만 **한 번도 실제로 쓰이지 않았�
 사본 수 c에 대해 load ≈ 18,400/c + 고정, store ≈ 434 × c × (조각 수)이므로 최적 c는 8보다 작을 수 있다.
 **c = 1, 2, 4, 8, 16을 네 곳에서 각각 재보고 고른다.**
 
+### 측정 (qkv, 사본 수 전수; lab 컴파일)
+
+사본마다 `to_hbm_view`를 부르면 store는 실제로 나간다(16부 = store 32개, 합 17,696). 그런데
+**store 1개마다 Core 디스크립터 명령이 3개씩 붙고 Core는 in-order 발행**이라 그게 임계경로가 된다.
+
+| 사본 수 | qkv makespan | x load | store 합 | Core 합 |
+|---:|---:|---:|---:|---:|
+| **1 (사본 없음)** | **58,962** | 18,400 | 1,557 | 2,056 |
+| 2 | 61,867 | 6,109 | 2,663 | 4,568 |
+| 4 | 72,824 | 5,182 | 4,875 | 8,344 |
+| 8 | 96,592 | 5,182 | 9,299 | 15,896 |
+| 16 (head와 같은 사본 수) | 144,128 | 5,182 | 17,696 | 29,760 |
+
+load는 18,400 → 6,109으로 실제로 3배 빨라지지만(사본이 원래 노렸던 것), Core 비용이 그보다 빨리
+늘어 **어느 사본 수에서도 c=1을 못 이긴다**. 16부에서는 반복 하나가 5,942 cycle 간격으로 직렬화된다.
+
+### 판정: **기각** (올바른 복제는 아끼는 load보다 비싸다)
+
+사본이라는 아이디어 자체가 틀렸다. 남는 결론은 "사본을 없앤다"이고 그것이 V50이다.
+단, **실측에서는 사본이 있는 쪽이 qkv를 더 줄인다**(V38 109,309 vs V50 149,244): 같은 주소를 512개
+디스크립터가 읽는 부하를 정적 모델이 과소평가한다. 올바른 사본을 실측으로 A/B하는 것은 아직 열려 있다
+(makespan은 c=1을 고르지만 실물은 c=2를 고를 수 있다).
+
+## V50_drop_false_replication
+
+분기점: `V38_post_norm_store_from_reducing` (V39~V49는 전부 기각/보류)
+
+### 가설
+
+**소스에 없는 축은 DMA write를 복제하지 않는다**(§첫 RNGD 실측, V49). 이 전제에 기댄 변경을 전부
+되돌리면 계보의 성능 대부분을 지키면서 정확도가 돌아온다.
+
+### 되돌린 두 곳
+
+1. **qkv x의 HBM 사본** (`stage_x_hi_lo_copies_hbm` → `stage_x_hi_lo_qkv_hbm`, V15가 bf16 8부로 도입,
+   V31이 f8 16부로 확대). 사본 1개만 기록되어 15/16의 슬라이스가 초기화되지 않은 HBM을 x로 읽었다.
+   → qkv가 index 0부터 non-finite.
+2. **V30의 RoPE 테이블 직접 gather** (`apply_rope_heads`). V30 커밋 메시지가 같은 전제를 명시한다:
+   *"A cluster or slice axis absent from the table replicates"*. cos/sin을 두 클러스터 head 레이아웃으로
+   곧장 gather했지만 기록되지 않은 슬라이스는 쓰레기를 읽는다. **RoPE를 거치지 않는 v만 통과**했다.
+   V30 이전의 HBM 왕복(store 337 + load 555 × 2)을 복원했다.
+
+### 두 번째 버그를 찾은 방법 (기록해 둘 가치가 있다)
+
+1번만 고치고 제출하니(job 15358) v·attn_out·ffn은 PASS인데 q·k만 FAIL이고, **non-finite 위치가
+index 0에서 q=641, k=385로 이동**했다. Ds=256이므로 641 = 2×256+129, 385 = 1×256+129 — 둘 다
+**같은 채널 d=129, 같은 kv head n=1**. v만 통과한다는 것과 합치면 남는 경로는 RoPE뿐이고, RoPE는
+Ds를 128씩 반으로 나누므로 d=129는 두 번째 half의 두 번째 원소다. 여기서 곧장 V30이 나왔다.
+**실패 위치의 인덱스는 커널 디버깅에서 가장 값싼 단서다.**
+
 ### 측정
 
-(미측정)
+| | qkv | attn_out | ffn | 기하평균 |
+|---|---:|---:|---:|---:|
+| makespan | 58,962 | 27,424 | 158,182 | 5.310 |
+| **RNGD 실측 (job 15359)** | 159,405 | 55,910 | 353,981 | **4.885** |
+| **RNGD 실측 (job 15360, 커밋 확인)** | 149,244 | 56,522 | 354,825 | **4.972** |
 
-### 판정: 설계됨
+qkv의 실행 편차가 6%로 세 커널 중 가장 크다(같은 바이너리, 같은 픽스처). attn_out·ffn은 1% 이내.
+비용은 qkv뿐이다: 사본을 잃어 실측 109,309(V38, 무효) → 149,244, V30 복원으로 makespan +2,419.
+
+### 판정: **채택 — 현재 SOTA**
+
+V14의 3.936× → **4.972×** (+26%). 정확도가 확인된 첫 5×대 근처 구성이다.
+
+### 다음 후보
+
+- qkv가 이제 유일한 병목이다(실측 speedup 1.64로 나머지 두 커널의 7.2 / 10.4에 크게 못 미친다).
+  기하평균이므로 여기가 레버리지다.
+- 사본을 실측으로 A/B (V49의 결론은 makespan 기준. c=2를 실물에서 재볼 값어치가 있다).
+- V30을 정직하게 다시 하기: cos/sin을 두 클러스터로 보내되 복제를 명시적으로 기록.
+- V15 이후 계보에서 아직 실측되지 않은 최적화(V16~V37)는 대부분 정확도 위험이 없다. V50 위에서
+  다시 쌓되, **채택 판정은 실측으로만** 한다.
 
 ## V48_qkv_shared_spm_index
 
