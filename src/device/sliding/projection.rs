@@ -196,7 +196,7 @@ pub(crate) fn project_output(
     x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
     weight_scale: &HbmTensor<bf16, Chip, m![H]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+) -> HbmTensor<bf16, Chip, m![H]> {
     // Both clusters do real work: the hidden rows are split across the two clusters and
     // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
     // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
@@ -309,11 +309,13 @@ pub(crate) fn project_output(
         .commit_trim::<m![H % 60 = 20 % 4]>()
         .commit_view(contraction.view_mut().tile::<m![H % 60], 20, m![H % 60 = 20 #{!} 60]>(20 * 2));
 
-    // Gather the [H] vector from both clusters through HBM (each cluster writes its half,
-    // then the Slice layout is loaded back); the channel scale is already applied.
+    // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
+    // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
+    // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
+    // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
     let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
-    gathered_hbm.to_dm(&mut ctx.tdma)
+    gathered_hbm
 }
 
 type TwoClusters = m![H / 1920];

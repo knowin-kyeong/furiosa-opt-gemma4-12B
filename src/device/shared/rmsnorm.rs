@@ -7,14 +7,33 @@ use crate::{Chip, EPS};
 
 const H_F32: f32 = H::SIZE as f32;
 
+/// The layout the RMSNorm reduces in: eight slices, 480 elements each.
+pub(crate) type ReducingSlices = m![1 # 32, H / 480];
+
+/// Loads an [H] vector from HBM straight into the reducing layout (eight descriptors); loading
+/// it onto one slice and relaying it out costs a second, descriptor-bound DMA (449 cycles).
+pub(crate) fn load_reducing<Cluster: M>(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    x.to_dm(&mut ctx.tdma)
+}
+
 pub(crate) fn normalize<Cluster: M, Slice: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
     rms_weight: &HbmTensor<bf16, Chip, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    type ReducingSlices = m![1 # 32, H / 480];
-
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = x.to_dm(&mut ctx.tdma);
+    normalize_reduced::<Cluster, Slice>(ctx, &x, rms_weight)
+}
+
+/// `normalize` for x already in the reducing layout.
+pub(crate) fn normalize_reduced<Cluster: M, Slice: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
 
     let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .main
@@ -111,9 +130,18 @@ pub(crate) fn normalize_add<Cluster: M, Slice: M>(
     rms_weight: &HbmTensor<bf16, Chip, m![H]>,
     residual: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    type ReducingSlices = m![1 # 32, H / 480];
-
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = x.to_dm(&mut ctx.tdma);
+    let residual: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = residual.to_dm(&mut ctx.tdma);
+    normalize_add_reduced::<Cluster, Slice>(ctx, &x, rms_weight, &residual)
+}
+
+/// `normalize_add` for x and residual already in the reducing layout.
+pub(crate) fn normalize_add_reduced<Cluster: M, Slice: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    residual: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
 
     let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .main
@@ -169,10 +197,9 @@ pub(crate) fn normalize_add<Cluster: M, Slice: M>(
         .collect::<m![H / 8 % 60], m![H % 8]>()
         .to_vrf();
 
-    let residual_dm: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = residual.to_dm(&mut ctx.tdma);
     let residual_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .sub
-        .begin(residual_dm.view())
+        .begin(residual.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![H / 8 % 60], m![H % 8]>()
@@ -221,9 +248,19 @@ pub(crate) fn normalize_add_gate<Cluster: M, Slice: M>(
     residual: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
     layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
 ) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
-    type ReducingSlices = m![1 # 32, H / 480];
-
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = x.to_dm(&mut ctx.tdma);
+    let residual: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = residual.to_dm(&mut ctx.tdma);
+    normalize_add_gate_reduced::<Cluster, Slice>(ctx, &x, rms_weight, &residual, layer_scalar)
+}
+
+/// `normalize_add_gate` for x and residual already in the reducing layout.
+pub(crate) fn normalize_add_gate_reduced<Cluster: M, Slice: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    residual: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
 
     let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .main
@@ -279,10 +316,9 @@ pub(crate) fn normalize_add_gate<Cluster: M, Slice: M>(
         .collect::<m![H / 8 % 60], m![H % 8]>()
         .to_vrf();
 
-    let residual_dm: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = residual.to_dm(&mut ctx.tdma);
     let residual_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .sub
-        .begin(residual_dm.view())
+        .begin(residual.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![H / 8 % 60], m![H % 8]>()

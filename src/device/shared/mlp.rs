@@ -3,7 +3,8 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{H, L};
-use crate::device::layout::{Cluster, Slice};
+use crate::device::layout::Cluster;
+use crate::device::shared::rmsnorm::{self, ReducingSlices};
 
 const INVSQRT2: f32 = 0.70710678118f32;
 
@@ -174,7 +175,7 @@ pub(crate) fn feedforward(
     up_global_scale: &HbmTensor<f32, Chip, m![1]>,
     gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
     down_global_scale: &HbmTensor<f32, Chip, m![1]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
     let (up, gate) = project_up_and_gate(
         ctx,
         x,
@@ -188,28 +189,32 @@ pub(crate) fn feedforward(
     // costs 11.7k cycles, an HBM round trip a fraction of that (see V7).
     let mut x_hbm: HbmTensor<bf16, Chip, m![L]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let down = project_down(ctx, &x_hbm, down_weight_packed, down_weight_scale);
+    let down_hbm = project_down(ctx, &x_hbm, down_weight_packed, down_weight_scale);
 
-    let down_global_scale: DmTensor<f32, Chip, Cluster, Slice, m![1 # 8]> =
+    // The global scale is applied in the layout the post-FF RMSNorm reduces in (8 slices x
+    // 480 elements, loaded straight from HBM) rather than on one slice: 1/8 of the pass and
+    // no relayout afterwards.
+    let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
+    let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
-    let down_global_scale_vrf: VrfTensor<f32, Chip, Cluster, Slice, m![1 # 8]> = ctx
+    let down_global_scale_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
         .sub
         .begin(down_global_scale.view())
         .fetch::<m![1], m![1 # 8]>()
         .collect::<m![1], m![1 # 8]>()
         .to_vrf();
 
-    let down: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = ctx
+    let down: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .main
         .begin(down.view())
-        .fetch::<m![H / 16], m![H % 16]>()
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![H / 8], m![H % 8]>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![H / 4], m![H % 4]>()
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &down_global_scale_vrf)
-        .vector_widen_concat::<m![H / 8], m![H % 8]>()
+        .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
         .vector_final()
         .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
@@ -348,7 +353,7 @@ pub(crate) fn project_down(
     x: &HbmTensor<bf16, Chip, m![L]>,
     down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
     down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
-) -> DmTensor<bf16, Chip, Cluster, Slice, m![H]> {
+) -> HbmTensor<bf16, Chip, m![H]> {
     // All 5 tiles are issued up front into distinct buffers so the
     // loads stream back to back while each tile is dequantized as it lands.
     let tile0 = load_down_rows(ctx, down_weight_packed, 0);
@@ -381,10 +386,10 @@ pub(crate) fn project_down(
     contract_down_rows(ctx, &x_trf, &w, 4, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
-    // rejected by the synchronization checker) onto the Slice layout.
+    // rejected by the synchronization checker); the caller loads it in the layout it needs.
     let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     down.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut());
-    down_hbm.to_dm(&mut ctx.tdma)
+    down_hbm
 }
 
 /// Loads `ROWS_PER_PASS` packed rows x each slice's L / 1920 column chunk of the down matrix.

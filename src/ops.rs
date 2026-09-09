@@ -61,8 +61,8 @@ pub fn sliding_project_qkv(
     // their consumer, not by issue order) and overlaps the lookup with x's staging.
     let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
 
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = x.to_dm(&mut ctx.tdma);
-    let x = shared::rmsnorm::normalize(ctx, &x, input_rms_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
+    let x = shared::rmsnorm::normalize_reduced::<Cluster, Slice>(ctx, &x, input_rms_weight);
 
     // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
     // staging the 7.5 KB vector in HBM and loading it back replicated runs at HBM DMA speed.
@@ -163,11 +163,12 @@ pub fn sliding_attention_output(
     // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
     // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        sliding::projection::project_output(ctx, x, o_weight, o_weight_scale);
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = residual_hbm.to_dm(&mut ctx.tdma);
+    let x_hbm = sliding::projection::project_output(ctx, x, o_weight, o_weight_scale);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::rmsnorm::normalize_add(ctx, &x, post_attn_rms_weight, &residual);
+        shared::rmsnorm::normalize_add_reduced::<Cluster, Slice>(ctx, &x, post_attn_rms_weight, &residual);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
@@ -241,14 +242,16 @@ pub fn decoder_feedforward(
     post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
     layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
 ) {
-    let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = residual_hbm.to_dm(&mut ctx.tdma);
-    let x = shared::rmsnorm::normalize(ctx, &residual, pre_ff_rms_weight);
+    // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
+    // the pre-FF normalization and the final residual add.
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let x = shared::rmsnorm::normalize_reduced::<Cluster, Slice>(ctx, &residual, pre_ff_rms_weight);
 
     // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
     // (54k cycles), an HBM-to-DM replicated load at ~3x that.
     let mut x_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());
-    let x: DmTensor<bf16, Chip, Cluster, Slice, m![H]> = shared::mlp::feedforward(
+    let x = shared::mlp::feedforward(
         ctx,
         &x_hbm,
         up_weight_packed,
@@ -263,7 +266,7 @@ pub fn decoder_feedforward(
     );
 
     let residual: DmTensor<bf16, Chip, Cluster, Slice, m![H]> =
-        shared::rmsnorm::normalize_add_gate(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
+        shared::rmsnorm::normalize_add_gate_reduced::<Cluster, Slice>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
