@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
+use crate::axes::{Ds, Dummy2, Dummy256, Dummy8, Gs, H, Ns, Ps, Qs};
 use crate::hi_lo_trunc_fns;
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
@@ -165,14 +165,19 @@ pub(crate) fn project_output(
     let xs: DmTensor<bf16, Chip, Cluster, XSlices, m![Qs % 512]> = x.to_dm(&mut ctx.tdma);
     // s = 16 is safe without measuring: the attention output is a convex combination of the
     // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    // Eight HBM copies of the pieces (the `Dummy8` axis, absent from the source, replicates
+    // the store at no extra descriptor cost): the 64 readers of each chunk are spread over the
+    // copies instead of all reading the same bytes (V15, V36).
     let (x_hi, x_lo) = hi_lo_x(ctx, &xs, 16f32);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, Qs / 512, Dummy2, Qs % 512]> = HbmTensor::new();
     x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(0));
     x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, Qs / 512, Dummy2 = 1 #{!} 2, Qs % 512]>(1));
 
-    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, m![Dummy256 / 64, Dummy8, Qs / 512], m![Dummy2, Qs % 512]> =
+        x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![Dummy2, Qs % 512]> = unsafe { x.reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns, m![1], m![Dummy2, Qs % 512]> = ctx
         .sub
         .begin(x.view())

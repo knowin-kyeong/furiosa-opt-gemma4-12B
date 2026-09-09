@@ -44,7 +44,7 @@ pub(crate) fn stage_x_hi_lo_hbm(
     up_global_scale: &HbmTensor<f32, Chip, m![1]>,
     gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
 ) -> (
-    HbmTensor<f8e4m3, Chip, m![H / 1920, Dummy2, H % 1920]>,
+    HbmTensor<f8e4m3, Chip, m![Dummy8, H / 1920, Dummy2, H % 1920]>,
     HbmTensor<f32, Chip, m![1 # 8]>,
     HbmTensor<f32, Chip, m![1 # 8]>,
 ) {
@@ -76,15 +76,18 @@ pub(crate) fn stage_x_hi_lo_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
     let inv_s_vrf = stage_packet_reducing(ctx, &inv_s);
 
+    // Eight copies (the `Dummy8` axis, absent from the source, replicates the store): each
+    // column half is read by 256 slices, and descriptors that all read the same HBM bytes run
+    // well below the DMA rate (V15, V36), so the load spreads over the copies.
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![H / 1920, Dummy2, H % 1920]> = HbmTensor::new();
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, H / 1920, Dummy2, H % 1920]> = HbmTensor::new();
     x_hi.view().to_hbm_view(
         &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(0),
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(0),
     );
     x_lo.view().to_hbm_view(
         &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(1),
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, H / 1920, Dummy2 = 1 #{!} 2, H % 1920]>(1),
     );
 
     // The geglu scalars.
@@ -196,7 +199,7 @@ pub(crate) fn stage_x_hi_lo_copies_hbm(
 fn stage_geglu_hi_lo_hbm(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, UpGateClusters, UpGateRowsGathered, m![L % 480]>,
-) -> (HbmTensor<f8e4m3, Chip, m![L / 1920, Dummy2, L % 1920]>, HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>) {
+) -> (HbmTensor<f8e4m3, Chip, m![Dummy8, L / 1920, Dummy2, L % 1920]>, HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>) {
     let m_local = max_square_gathered(ctx, x);
     let m_every: DmTensor<f32, Chip, UpGateClusters, m![Dummy256], m![L / 480 % 16, 1 # 8]> = ctx
         .main
@@ -223,15 +226,16 @@ fn stage_geglu_hi_lo_hbm(
     let s: DmTensor<f32, Chip, UpGateClusters, UpGateRowsGathered, m![1 # 8]> = unsafe { s_all.reshape() };
     let s_vrf = stage_packet_gathered(ctx, &s);
 
+    // Eight copies of every chunk (see stage_x_hi_lo_hbm): each chunk is read by 64 slices.
     let (x_hi, x_lo) = hi_lo_gathered(ctx, x, &s_vrf);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![L / 1920, Dummy2, L % 1920]> = HbmTensor::new();
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy8, L / 1920, Dummy2, L % 1920]> = HbmTensor::new();
     x_hi.view().to_hbm_view(
         &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(0),
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(0),
     );
     x_lo.view().to_hbm_view(
         &mut ctx.tdma,
-        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(1),
+        x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy8, L / 1920, Dummy2 = 1 #{!} 2, L % 1920]>(1),
     );
 
     let inv_s_one: DmTensor<f32, Chip, UpGateClusters, m![1 # 256], m![1 # 8]> = unsafe { inv_s_all.reshape() };
@@ -369,7 +373,7 @@ up_gate_reduce_fns!(reduce_up_gate_rows_12, 12);
 
 pub(crate) fn feedforward(
     ctx: &mut Context,
-    x2: &HbmTensor<f8e4m3, Chip, m![H / 1920, Dummy2, H % 1920]>,
+    x2: &HbmTensor<f8e4m3, Chip, m![Dummy8, H / 1920, Dummy2, H % 1920]>,
     erf_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
     out_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
     up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
@@ -400,8 +404,12 @@ pub(crate) fn feedforward(
     let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
     let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
 
-    // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA).
-    let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![Dummy2, H % 1920]> = x2.to_dm(&mut ctx.tdma);
+    // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA). The slices are
+    // spread over the eight HBM copies (a copy axis in the slice mapping selects a copy, an
+    // absent axis replicates); the tensor is then relabelled with the projection's row groups.
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy256 / 16, Dummy8, H / 1920], m![Dummy2, H % 1920]> =
+        x2.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![Dummy2, H % 1920]> = unsafe { x.reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![1], m![Dummy2, H % 1920]> = ctx
         .sub
         .begin(x.view())
@@ -444,8 +452,11 @@ pub(crate) fn feedforward(
     let (x2_hbm, inv_s_hbm) = stage_geglu_hi_lo_hbm(ctx, &x);
     let inv_s_vrf = broadcast_inv_s_down(ctx, &inv_s_hbm);
 
-    // Each slice loads only its 1920-wide chunk of the geglu output (both f8 pieces) from HBM.
-    let x: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![Dummy2, L % 1920]> = x2_hbm.to_dm(&mut ctx.tdma);
+    // Each slice loads only its 1920-wide chunk of the geglu output (both f8 pieces) from HBM,
+    // the 64 readers of a chunk spread over its eight copies.
+    let x: DmTensor<f8e4m3, Chip, DownClusters, m![Dummy256 / 64, Dummy8, L / 1920], m![Dummy2, L % 1920]> =
+        x2_hbm.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![Dummy2, L % 1920]> = unsafe { x.reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![1], m![Dummy2, L % 1920]> = ctx
         .sub
         .begin(x.view())
