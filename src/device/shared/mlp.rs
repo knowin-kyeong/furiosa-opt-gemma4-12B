@@ -143,15 +143,19 @@ pub(crate) fn stage_x_hi_lo_hbm(
     (x2_hbm, erf_hbm, out_hbm)
 }
 
-/// The QKV input as two f8 pieces of x * s (see `stage_x_hi_lo_hbm`), written sixteen times so that
-/// the replicated load can spread over HBM channels (V15: eight copies took the load from 18.4k to
-/// 5.4k cycles; sixteen shave another 185). The projections' outputs come out
-/// multiplied by s; the head RMSNorms that follow are scale-invariant (eps aside), so nothing
-/// undoes it.
-pub(crate) fn stage_x_hi_lo_copies_hbm(
+/// The QKV input as two f8 pieces of x * s (see `stage_x_hi_lo_hbm`), staged in HBM once. The
+/// projections' outputs come out multiplied by s; the head RMSNorms that follow are
+/// scale-invariant (eps aside), so nothing undoes it.
+///
+/// V15..V41 wrote this sixteen times so that the replicated load could spread over HBM channels,
+/// by giving the destination a copy axis the source did not have. That does not replicate a store
+/// (V50): one copy was written and fifteen were read out of uninitialised HBM. Making the copies
+/// real costs one store descriptor set each, which the Core issues in order and which outweighs
+/// the load it saves at every copy count (V49).
+pub(crate) fn stage_x_hi_lo_qkv_hbm(
     ctx: &mut Context,
     normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
-) -> HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, Dummy2, H]> {
+) -> HbmTensor<f8e4m3, Chip, m![Dummy2, H]> {
     let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
         .main
         .begin(normalized.view())
@@ -180,11 +184,11 @@ pub(crate) fn stage_x_hi_lo_copies_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy256 / 16, Dummy2, H]> = HbmTensor::new();
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
     x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(0));
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(0));
     x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy256 / 16, Dummy2 = 1 #{!} 2, H]>(1));
+        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(1));
     x2_hbm
 }
 
