@@ -58,3 +58,15 @@ V88_ffn_down_tiles_60x1
 V89_ffn_down_tiles_8x7_4
 V90_ffn_tiles_both_20x3
 V91_ffn_tiles_both_12x5
+
+# ffn row-tile sweep, second batch (asymmetric splits; heights must be multiples of 4)
+V92_ffn_down_24_20_16
+V93_ffn_down_28_28_4
+V94_ffn_down_32_16_8_4
+V95_ffn_down_40_20
+V96_ffn_down_48_12
+V97_ffn_up_24_20_16
+V98_ffn_up_28_28_4
+V99_ffn_up_40_20
+V100_ffn_up_48_12
+V101_ffn_both_24_20_16
