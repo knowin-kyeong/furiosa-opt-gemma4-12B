@@ -297,16 +297,21 @@ pub(crate) fn apply_rope_heads_hop<C: M, S: M>(
 ) {
     let cos_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = cos.dma_gather_scaled(rope_offset);
     let sin_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = sin.dma_gather_scaled(rope_offset);
-    let rows: HbmTensorViewMut<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view_mut().reshape() };
-    cos_row.view().to_hbm_view(&mut ctx.tdma, rows.tile::<m![Gf], 1, m![Gf = 1 #{!} 16, Ds]>(0));
-    let rows: HbmTensorViewMut<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view_mut().reshape() };
-    sin_row.view().to_hbm_view(&mut ctx.tdma, rows.tile::<m![Gf], 1, m![Gf = 1 #{!} 16, Ds]>(1));
+    // Stores go to head 0 and head 1 of the [Ns, Gs, Ds] buffer (a [Ds] row fills the first half
+    // of a head's [Gs, Ds] tile; mir accepts a tile of the tensor's own axes but not a reshaped
+    // mutable view). Loads read the same bytes as rows 0 and 2 of the buffer seen as [Gf, Ds].
+    cos_row
+        .view()
+        .to_hbm_view(&mut ctx.tdma, hop.view_mut().tile::<m![Ns], 1, m![Ns = 1 #{!} 8, Gs, Ds]>(0));
+    sin_row
+        .view()
+        .to_hbm_view(&mut ctx.tdma, hop.view_mut().tile::<m![Ns], 1, m![Ns = 1 #{!} 8, Gs, Ds]>(1));
     let rows: HbmTensorView<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view().reshape() };
     let cos: DmTensor<bf16, Chip, C, S, m![Gf = 1, Ds]> =
         rows.tile::<m![Gf], 1, m![Gf = 1 # 16, Ds]>(0).to_dm(&mut ctx.tdma);
     let rows: HbmTensorView<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view().reshape() };
     let sin: DmTensor<bf16, Chip, C, S, m![Gf = 1, Ds]> =
-        rows.tile::<m![Gf], 1, m![Gf = 1 # 16, Ds]>(1).to_dm(&mut ctx.tdma);
+        rows.tile::<m![Gf], 1, m![Gf = 1 # 16, Ds]>(2).to_dm(&mut ctx.tdma);
     let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = unsafe { cos.reshape() };
     let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = unsafe { sin.reshape() };
     rope_heads_from_tables(ctx, q, k, &cos, &sin)
