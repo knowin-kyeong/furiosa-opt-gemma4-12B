@@ -103,6 +103,74 @@ macro_rules! max_square_fns {
     };
 }
 
+/// `hi_lo_const_fns!` with `hi` truncated in the vector engine instead of rounded by the cast:
+/// keeping the top 4 significant bits of bf16 x (`BitAnd` with the top 12 bits of the f32 pattern)
+/// makes `hi = 16 trunc(x)` exact in f8e4m3, and `lo = 16 (x - trunc(x))` carries the remaining
+/// 4 bits, so both passes read only x and issue back to back (the rounded split re-reads hi from
+/// DM before it can form lo). The mask commutes with the power-of-two scale, which the pipeline
+/// order (logic before fp) requires.
+pub const TRUNC_MASK_F32: f32 = f32::from_bits(0xFFF0_0000);
+#[macro_export]
+macro_rules! hi_lo_trunc_fns {
+    ($name:ident, $cl:ty, $sl:ty, $ax:ident, $n:literal, $n16:literal, $n8:literal, $n4:literal) => {
+        fn $name(
+            ctx: &mut Context,
+            x: &DmTensor<bf16, Chip, $cl, $sl, m![$ax % $n]>,
+            s: f32,
+        ) -> (
+            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]>,
+            DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]>,
+        ) {
+            let x_vrf: VrfTensor<f32, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .sub
+                .begin(x.view())
+                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .to_vrf();
+
+            // On the main context so that it overlaps the VRF load of x on the sub context (the
+            // sub context runs its passes in order, and lo needs both).
+            let x_hi: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .main
+                .begin(x.view())
+                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_init()
+                .vector_intra_slice_tag(TagMode::Zero)
+                .vector_logic(LogicBinaryOpF32::BitAnd, crate::device::shared::f8split::TRUNC_MASK_F32)
+                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s)
+                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_final()
+                .cast::<f8e4m3, m![$ax % 8 # 32]>()
+                .commit_trim::<m![$ax % 8]>()
+                .commit();
+
+            let x_lo: DmTensor<f8e4m3, Chip, $cl, $sl, m![$ax % $n]> = ctx
+                .sub
+                .begin(x.view())
+                .fetch::<m![$ax / 16 % $n16], m![$ax % 16]>()
+                .fetch_cast::<f32>()
+                .collect::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_init()
+                .vector_intra_slice_tag(TagMode::Zero)
+                .vector_logic(LogicBinaryOpF32::BitAnd, crate::device::shared::f8split::TRUNC_MASK_F32)
+                .vector_narrow_split::<m![$ax / 4 % $n4], m![$ax % 4]>()
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), -1f32)
+                .vector_fp_binary(FpBinaryOp::AddF, &x_vrf)
+                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), s)
+                .vector_widen_concat::<m![$ax / 8 % $n8], m![$ax % 8]>()
+                .vector_final()
+                .cast::<f8e4m3, m![$ax % 8 # 32]>()
+                .commit_trim::<m![$ax % 8]>()
+                .commit();
+            (x_hi, x_lo)
+        }
+    };
+}
+
 /// `hi_lo_fns!` with the scale as an immediate: for a consumer whose input is bounded a priori
 /// (the attention output, |x| <= sqrt(Ds) = 16) no scale has to be measured.
 #[macro_export]

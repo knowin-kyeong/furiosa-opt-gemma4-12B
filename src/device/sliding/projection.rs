@@ -3,7 +3,7 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
-use crate::hi_lo_const_fns;
+use crate::hi_lo_trunc_fns;
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
@@ -326,7 +326,7 @@ type HiddenRows = m![H / 60 % 32, 1 # 8];
 type HiddenRowsByColumns = m![H / 60 % 32, Qs / 512];
 /// The attention output on eight slices, 512 elements each, for the f8 split.
 type XSlices = m![1 # 32, Qs / 512];
-hi_lo_const_fns!(hi_lo_x, Cluster, XSlices, Qs, 512, 16, 32, 64, 128);
+hi_lo_trunc_fns!(hi_lo_x, Cluster, XSlices, Qs, 512, 32, 64, 128);
 
 fn apply_output_channel_scale(
     ctx: &mut Context,
