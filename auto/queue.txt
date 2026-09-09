@@ -156,3 +156,5 @@ V188_attnout_tile_sweep
 V188_attnout_tile_sweep#r2
 V188_attnout_tile_sweep#f2
 V188_attnout_tile_sweep#f3
+V189_rope_table_trip
+V189_rope_table_trip#r2
