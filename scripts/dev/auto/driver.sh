@@ -91,7 +91,8 @@ run_entry() {
     echo "$commit" > "$STATE/logs/$id.commit"
 
     # 1. schedule dump (makespan)
-    timeout 2400 bash scripts/dev/dump_schedules.sh "$id" > "$STATE/logs/$id.dump.log" 2>&1; dump_rc=$?
+    # (own copy of scripts/dev/dump_schedules.sh: old branches such as V0_baseline lack it)
+    timeout 2400 bash "$STATE/dump.sh" "$id" > "$STATE/logs/$id.dump.log" 2>&1; dump_rc=$?
     python3 "$STATE/summarize.py" "$id" > "$STATE/logs/$id.makespan.json" 2>>"$STATE/logs/$id.dump.log"
     log "$id dump rc=$dump_rc: $(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print({k:(v or {}).get('makespan') for k,v in d.items()})" "$STATE/logs/$id.makespan.json" 2>/dev/null)"
 
