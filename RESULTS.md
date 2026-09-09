@@ -18,7 +18,8 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거; cos gather가 V 로드 뒤 tail에 걸리던 것도 완화 | — | — | — | — | — | — | 설계됨 |
+| `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k)로 TRF에 주고 f8×f8 contraction(V29 기법)으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요(eps만 s²배 작아짐) | — | — | — | — | — | — | 설계됨 |
+| `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | 설계됨 |
@@ -47,8 +48,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V29_ffn_block_scale_after_contract`**
-(…+V29 누적, 기하평균 5.324×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V30_qkv_rope_tables_direct_gather`**
+(…+V30 누적, 기하평균 5.408×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -307,6 +308,28 @@ L=15360이면 60 × 256.
   DMA 큐에서 −1.8k, 그리고 cos gather(43.1k, V 로드 뒤)→store→load 체인이 tail에서 짧아진다.
 - **변경 파일:** `src/device/sliding/rope.rs`
 - **예상:** qkv −1.5k ~ −2.5k.
+
+### 측정: qkv 50,981 → **48,638** (−2,343), 기하평균 5.408
+
+- 첫 컴파일 통과. gather는 934 그대로(8 디스크립터가 같은 512 B 행을 읽어도 비용 불변), store 337×2·load 555×2 제거.
+  DMA busy 46.5k → 44.7k. tail: V 로드 종료 42.6k → V contract 2,663 → 후처리 → scatter 2개 → 48.6k.
+- **정확도:** 데이터 이동만 변경.
+
+### 판정: makespan 측정 (실측 대기)
+
+## V31_qkv_f8_contraction_no_lut
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V30_qkv_rope_tables_direct_gather`
+- **가설:** qkv의 Q/K/V 가중치는 f8e4m3라 LUT(f8→bf16)를 거쳐 bf16 contraction을 한다: Q는 별도 LUT pass 5,063(Main), K/V는 융합
+  contract 2,663(LUT-bound ~5.8 elem/cycle), 그리고 LUT pass마다 `?` DmaLoad 838(DMA-bound 커널에서 2.5k). V29의 기법으로 x를
+  f8 두 조각(hi/lo of x·2^k)으로 TRF `m![Dummy2, H]`에 올리고 weight 패킷을 Dummy2 시간축으로 두 번 스트림하면 LUT 없이
+  f8×f8 contraction(f32 누산)이 되고 `?`도 사라진다. 결과 q/k/v는 2^k배 커지지만 뒤따르는 head RMSNorm(q, k)과 value normalize가
+  스케일 불변(rms(s·q) = s·rms(q); eps 항만 s²분의 1로 작아져 상대 1e-6 이하)이라 되돌릴 필요가 없다. 2^k는 head의
+  ReducingSlices에서 max x²로(V29 head와 동일 체인). x 복제는 V15의 8부 사본을 유지하되 f8 2조각(바이트 동일).
+- **변경 파일:** `src/device/sliding/projection.rs`, `src/ops.rs`, `src/device/shared/mlp.rs`의 스케일 체인 재사용 여부
+- **정확도 리스크:** hi/lo 분해는 max|x|/4096 이상에서 exact; 그 아래는 ≤ 2^-10/s 절대오차(V29와 동일). rms 불변성은 eps에서만 깨짐.
+- **예상:** qkv −3k ~ −4k (`?` 2.5k + tail의 V contract 2,663 → ~1.9k + Q LUT 제거로 x 스테이징 경로 단축).
 
 ## V29_ffn_block_scale_after_contract
 

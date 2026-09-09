@@ -37,7 +37,8 @@
 | `V24_gather_before_hbm_store` (…+V24 누적) | 50,981 | 30,037 | 179,922 | 5.180× |
 | `V25_ffn_geglu_two_clusters` (…+V25 누적) | 50,981 | 30,037 | 170,158 | 5.277× |
 | `V28_ffn_tile_shapes` (…+V28 누적; V26·V27 미구현) | 50,981 | 30,037 | 168,757 | 5.292× |
-| `V29_ffn_block_scale_after_contract` (…+V29 누적) | 50,981 | 30,037 | 165,733 | **5.324×** |
+| `V29_ffn_block_scale_after_contract` (…+V29 누적) | 50,981 | 30,037 | 165,733 | 5.324× |
+| `V30_qkv_rope_tables_direct_gather` (…+V30 누적) | 48,638 | 30,037 | 165,733 | **5.408×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
