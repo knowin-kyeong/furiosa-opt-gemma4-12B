@@ -274,6 +274,26 @@ L=15360이면 60 × 256.
   낮다 — 상대는 **weight/x 경로 자체**를 우리보다 싸게 흘린다(예: DMA 인터리브·x 분배 방식). 이것이 남은 캠페인의 표적이다.
 - 사용자 지시: Arena는 자유(50+/일), **moa-submitter는 사용자가 시킬 때까지 보류**.
 
+## 2026-09-10 — 실물 비용 모델 (런타임 소스 조사 + V145~V155)
+
+`furiosa-opt-std 0.6.0`의 npu 백엔드와 vendored `libdevice_runtime.a`를 읽은 결과("드라이버 리버싱"):
+
+1. **커널은 PE의 ARM 코어에서 도는 AArch64 프로그램**이며 DMA 디스크립터를 런타임에 ARM 코어가 직렬로 만든다(슬롯 alloc → memcpy → `dsb` →
+   TUC 명령 큐 push; 아레나 64슬롯, 명령 큐 62, 완료 id 32). 따라서 **실물 DMA 비용은 디스크립터 수에 비례**하고 바이트는 부차적이다.
+   정적 모델(548 + bytes/1.21 KB)이 qkv에서 틀린 이유다. 증거: V154(512 → 16 디스크립터 + switch) −40k, V138(바이트 절반) 0, V146(head 레이아웃
+   store 2개) +8.6k.
+2. cycle 스팬은 PE 쪽 `binary_executor`가 `start_arm_cycle/end_arm_cycle`로 찍고, 호스트의 `Kernel::run`은 스팬 밖이다. 프로그램은 프로세스당
+   1회 로드(`OnceCell`), 스크래치는 컴파일러가 프로그램 stack 영역에 고정 배치 — 런타임 할당·제로화 없음 → V151~V153(hop) 무효과와 일치.
+3. **cold = 명령 청크(64 KB 단위) DRAM→SRAM 스테이징**("stage_chunk … resident (skip DMA)"). 다중 청크 프로그램은 청크별 cycle 쌍을 내고 하네스는
+   그 합집합을 재므로 cold 페널티가 점수에 들어간다. 프로그램 크기(명령 수)가 cold 점수에 영향을 줄 수 있다.
+4. switch 제약(컴파일러 메시지): 시간축의 축을 슬라이스축으로 옮기는 분배는 불가(`OutSlice slot must source from InSlice or a fresh broadcast tile,
+   not InTime`, V156 시도) → 축약 분할 커널(attn_out `Qs/512`, ffn `H/1920`·`L/1920`)의 x 청크 분배는 switch로 못 한다. 단일 축 인수분해
+   (`Dummy256 / k, Dummy256 % k`)도 거부(`snoop bitmap disagrees`); 두 축 표기만 통과.
+5. 컴파일러 env 노브(`NO_HINT`, `SCHEDULER_MANUAL_ORDERING_PATH`, `FORCE_WAIT_BEGIN` 등)는 존재하지만 채점 서버가 우리 환경을 쓰지 않으므로 무의미.
+
+**설계 원칙(갱신):** DMA 디스크립터 수(그리고 같은 HBM 영역을 여러 디스크립터가 반복 읽는 패턴)를 먼저 센다. 큰 복제 로드는 "적은 디스크립터 +
+on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적은 슬라이스)로.
+
 ## V154_qkv_x_ring32_broadcast — qkv −28% (정확도만 남음)
 
 - **상태:** 측정 완료, 정확도 FAIL → V155에서 표기 변형으로 추적 (2026-09-09 15:16 UTC, job 15555~15557)
