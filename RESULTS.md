@@ -18,6 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V39_x2_single_store` | `V38` | x의 f8 hi/lo 두 조각을 HBM 스크래치에 tile store 2회(qkv 553×2, attn_out 377×2, ffn head 553×2·down 1,653×2)로 쓴다. 두 pass가 한 DM 버퍼(`m![Axis % 960]`, 실제 축의 480-tile 2개에 `commit_view`)에 쓰고 `[Dummy2, Axis % 480]`로 reshape해 store 1회로. 절단 split(V35)을 qkv/ffn에도 적용해 hi 재로드 없이 두 pass가 x만 읽게 | — | — | — | — | — | — | 설계됨 |
 | `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | — | — | makespan 측정 |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
@@ -347,6 +348,20 @@ L=15360이면 60 × 256.
   **실측 검증 필요.**
 
 ### 판정: makespan 측정 (실측 대기)
+
+## V39_x2_single_store
+
+- **상태:** 설계됨 (2026-09-09)
+- **분기점:** `V38_post_norm_store_from_reducing`
+- **가설:** DMA 비용은 개수에 묶인다(548 고정 + 디스크립터당 ~35 store). hi/lo를 HBM `[…, Dummy2, …]` 스크래치에 두 번 tile
+  store하는 곳이 네 군데(qkv 553×2, attn_out 377×2, ffn head 553×2, ffn down 1,653×2). Dummy2 크기-1 tile로의 `commit_view`는
+  lir ICE(V29)였으므로, 대신 **실제 축의 2배 버퍼** `m![H % 960]`(ReducingSlices) / `m![Qs % 1024]` / `m![L % 960]`에 hi pass는
+  tile 0(`H % 960 = 480 #{!} 960`), lo pass는 tile 1로 `commit_view`하고 `unsafe reshape`로 `[Dummy2, H % 480]`을 만들어 store
+  1회. 스트림 축(`H % 480`에서 파생)과 tile 축(`H % 960 = 480`)의 일치 여부가 관건(타입/segment 검사). hi를 DM에서 재로드하지
+  않도록 절단 split(V35: `BitAnd 0xFFF00000` → ×s, lo = s·(x − trunc x), s는 2^k라 가환)을 qkv/ffn에도 쓴다.
+- **변경 파일:** `src/device/shared/f8split.rs`(`hi_lo_trunc_pair_fns!`), `src/device/shared/mlp.rs`, `src/device/sliding/projection.rs`
+- **정확도:** hi/lo 합은 여전히 exact(같은 바닥). qkv/ffn의 hi가 반올림 → 절단으로 바뀌어 f32 부분합 분포만 달라짐.
+- **예상:** qkv −553, attn_out −377, ffn −2.2k (≈ 기하평균 +1.3%).
 
 ## V38_post_norm_store_from_reducing
 
