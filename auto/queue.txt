@@ -92,3 +92,7 @@ V159_ffn_attnout_x_ring_broadcast#r2
 # Phase B7 - are the weight loads descriptor-bound? Q on 128 slices x 16 rows, K/V 128 x 8 (V160 vs v157a), x2 jobs.
 V160_qkv_weights_half_descriptors
 V160_qkv_weights_half_descriptors#r2
+
+# Phase B8 - attn_out two weight tiles (48/12 = v162, 40/20 = v163) on top of the x2 broadcast (v161), base interleaved x4, x2 jobs.
+V162_attnout_two_tiles_broadcast
+V162_attnout_two_tiles_broadcast#r2
