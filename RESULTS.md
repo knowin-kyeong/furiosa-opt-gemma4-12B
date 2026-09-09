@@ -18,6 +18,15 @@ RNGD cycles만 점수다.
 | `V168_ffn_gather_before_store` | `V167` | V167과 같은 기전을 ffn down 출력 hop store(DownRows `1 # 8`, 64 디스크립터)에: switch gather(ring 256) 후 클러스터당 1 디스크립터 store. 정적 중립(157,766) | — | — | 157,766 (v168) | — | job 15585 (n=4): base 346,393 · **v168 355,930** (+9.5k) | v168 **FAIL** (14% tol 안) | **기각** (V167과 같은 결론: 패딩 레이아웃 64-디스크립터 store는 싸고 ring-256 gather가 비싸다) |
 | `V167_attnout_gather_before_store` | `V162` | attn_out 투영 출력 store를 64 디스크립터(패딩 `1 # 8` 레이아웃)에서 **클러스터당 switch gather(ring 256, `Broadcast1 { slice1: 32, slice0: 8 }`, 12원소 패킷) 후 2 디스크립터 store**로. V24(a)의 실물 A/B: 정적 중립(28,180 vs 28,223), 실물은 패딩 레이아웃 store가 V146에서 +4k/store였으므로 이득 가능. 컴파일 교훈: switch OutTime에 fetch의 패킷 시간축을 함께 적는다 | — | 28,180 (v167) | — | — | job 15584 (n=5): base 55,816 · v162 53,301 · **v167 57,168** (stdev 0.5k) | v167 **FAIL** (23% tol 안: collect 순서가 어긋남) | **기각** — 맞아도 +1.4k 느리다. 패딩 레이아웃 64-디스크립터 store는 실물에서 싸다(V146의 +4k는 store가 아니라 다른 경로 차이) |
 | `V166_ffn_down_three_tiles` | `V165` | ffn down DMA 타일 5(16/16/16/8/4) → 3(28/28/4; V40(a) `7c4abaa`를 cherry-pick, pass A 큰 타일 + pass B 16/12행 뷰). 정적 +3k이지만 실물 타일당 ~2k(attn_out 근거) → 디스크립터 −1,024 | 44,792 | 28,173 | 160,809 | — | job 15582/83: ffn cold **350,878 / 346,780**, warm 346,786 / 347,054 (V165: cold 348.7~352.3k, warm 344.5~347.8k) | PASS ×2 | **중립 → 채택 안 함** (실물 타일당 비용이 정적 +3k와 상쇄; ffn 노이즈 ±5k 안) |
+| `V172_qkv_fetch_interference_probe` | `V165` | **탐침(A).** 세 커널이 같은 ~290 B/cycle에 묶인 원인 후보 중 소스에서 만질 수 있는 것은 "DMA는 DM 뱅크 우선순위가 가장 낮다"(책) — 스트리밍 중 이전 타일의 contraction fetch가 DMA를 늦춘다. Q contraction을 **한 번 더**(결과는 스크래치 store) 돌려 초과 비용을 잰다: 간섭이 없으면 +pass 자체(정적 2.2k ≈ 실물 4.5k), 그 이상이면 간섭 | — | — | — | — | — | PASS(중복 계산은 무해) | 설계됨 → 구현 |
+| `V173_attnout_fetch_interference_probe` | `V165` | 탐침(A) attn_out판: tile0 contraction 중복(+스크래치 store) | — | — | — | — | — | PASS | 설계됨 → 구현 |
+| `V174_ffn_scale_fullrow_probe` | `V165` | **탐침(B).** 1위의 ffn 315k(우리 349k)를 설명할 후보 = block-scale을 120 B 세그먼트 60개/슬라이스가 아니라 full row(240 B × 60 = 1 세그먼트, 바이트 2배)로 읽는 것(V44). 슬라이스별 열 오프셋이 불가하므로 **모든 슬라이스가 앞 절반을 쓰는 FAIL-by-design** 판으로 up/gate scale 2개의 실물 세그먼트 비용만 잰다. −10k 이상이면 cluster 축 H-split 재설계(V177)로 | — | — | — | — | — | FAIL(by design) | 설계됨 → 구현 |
+| `V175_ffn_fetch_interference_probe` | `V165` | 탐침(A) ffn판: up pass A(LUT+contract, 정적 19k) 중복 | — | — | — | — | — | PASS | 설계됨 |
+| `V176_loads_first_ordering` | `V165` | **조건부 후보.** V172~V175에서 간섭이 커널의 8% 이상이면: x 스테이징이 마지막 weight 타일에 의존하게 만들어(1행 VRF 피연산자 ×1.0) 모든 weight가 fetch 없는 상태로 스트리밍된 뒤 계산. 이득 = 간섭 − 노출되는 계산 | — | — | — | — | — | PASS | 설계됨 (조건부) |
+| `V177_ffn_h_split_on_cluster_axis` | `V165` | **조건부 후보(큰 재설계).** V174가 크면: up/gate의 H 반쪽을 슬라이스 축이 아니라 **클러스터 축**에 두어(클러스터당 L 전체 × H 절반) scale이 슬라이스당 1세그먼트가 되게. 대가: 클러스터 간 partial 합산이 HBM 경유(f32 [L] 2×60 KB 왕복) | — | — | — | — | — | ? | 설계됨 (조건부, Stage 2 후보) |
+| `V178_qkv_head_norm_fusion` | `V165` | **작은 확정 이득.** q/k/v head norm의 mean-square·sqrt를 commit_view로 모은 [4, Ds] 버퍼에서 한 pass씩(9 → 5 pass), normalize는 행별 VRF 피연산자(scale·gamma). 실물 ≈ −2k, 프로그램 축소로 cold 분산도 완화 기대 | — | — | — | — | — | PASS(수치 동일) | 설계됨 |
+| `V179_qkv_rope_ternary_fusion` | `V165` | **작은 확정 이득.** q_cos·q_sin·add 3 pass → ternary MulAdd로 2 pass(q, k 각각), VRF 스테이징 1개 감소. 실물 ≈ −1k | — | — | — | — | — | PASS(수치 동일) | 설계됨 |
+| `V180_attnout_tiles_52_8_44_16` | `V165` | 48/12는 단발 스윕에서 골랐다. 52/8·44/16·36/24를 짝 하네스(4회씩)로 1k 해상도 비교 | — | — | — | — | — | PASS | 설계됨 |
 | `V171_qkv_broadcast_v82_attnout_ffn` | `V158` | **사용자 요청: V165의 qkv만 취하고 attn_out·ffn은 V82 그대로.** V158과 src/는 동일(ops.rs의 qkv 17줄만 V82와 다름, `src/device/` 무변경), tests/도 V82로 되돌려 diff가 그 hunk 하나뿐 | 44,792 | 27,424 (= V82) | 157,763 (= V82) | — | job 15600/15601 cold: qkv **109,246 / 106,598**, attn_out 56,332 / 57,874, ffn 356,910 / 351,194 | **PASS ×2 (5/5)** | **확인** — V82의 attn_out·ffn 그대로(cold 값도 V82 범위), qkv만 −28%. 제출용 대안 브랜치 |
 | `V165_qkv_broadcast_attnout_two_tiles` | `V158` | **프로덕션 후보.** V158 + attn_out O-weight 타일 20×3 → 48/12 (V136의 diff). tests/는 cold/warm 7회 | 44,792 | 28,173 | 157,763 | — | Arena cold 12회 median qkv 107,405 / attn_out 53,639 / ffn 349,168; **공식 채점 `d0239b5b`: 105,544 / 53,374 / 349,160 = 5.7576** | **PASS** (Arena 12/12 + 공식) | **채택 — 현재 SOTA (공식 5.7576, 2026-09-09 17:15 UTC)** |
 | `V160b_qkv_weights_half_descriptors_contig` | `V160` | V160의 정확도 수정 시도: live 128 슬라이스를 연속(`m![1 # 2, Qs / 16 % 128]`)으로 두고 head gather를 ring 32(`slice0: 1`)로, head 레이아웃 `m![1 # 2, Ns % 4, 1 # 32]` | **71,140** (정적 +26k) | — | — | — | job 15581: v160 median **132,378** vs v157a 108,634 (+24k) | PASS | **기각** — 정확도는 잡혔지만 정적 예측대로 느림(연속 128 슬라이스 + ring-32 gather가 직렬화). weight 디스크립터 절반 방향 종료 |
@@ -345,6 +354,24 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 - 정확도 PASS(형태는 옳다). 이득이 없으므로 **"디스크립터 수"가 일반 법칙은 아니다**: qkv의 x2 로드가 특별했던 이유는 512개
   디스크립터가 **같은 7.7 KB 한 영역**을 읽는 것(HBM 채널 직렬화)이고, ffn(영역당 256개)·attn_out(영역당 64개)은 그 문턱 아래다.
 - 부수 관찰: 이 잡의 ffn base warm median 342k는 평소 cold 350k보다 낮다(ffn도 cold 페널티 ~8k가 있다).
+
+## 2026-09-10 추가 실험 설계 (V172~V180) — "스트림 속도를 무엇이 정하는가"
+
+**출발점.** V165에서 세 커널은 모두 weight 스트림 ≈ **290 B/cycle**(qkv 31.5 MB → 105k, attn_out 15.7 MB → 53k, ffn 99 MB → 349k)이고,
+V160b(슬라이스 절반에 2배 바이트)가 정적 예측만큼만 느려진 것은 이 한계가 슬라이스별이 아니라 **칩 전체(DMA 엔진/HBM/NoC)** 수준임을 뜻한다.
+V170 ladder에서 tail·geglu·scale 로드 하나를 빼도 ffn이 안 줄었으므로 계산 정밀도(fp8/fp4, 1위 팀 힌트)는 지금 병목이 아니다 —
+우리 contraction은 이미 f8×f8 → f32 누산 → bf16 epilogue이고, 활성값을 한 조각으로 줄인 V137/V142는 tolerance에서 떨어졌다.
+
+**가설 세 갈래와 탐침.**
+1. *DM 뱅크 간섭*: 책은 "DMA는 DM 뱅크 우선순위가 가장 낮다"고 한다. 스트리밍 중 돌아가는 contraction fetch(qkv Q 30 KB/슬라이스, ffn pass A 57.6 KB/슬라이스)가
+   DMA를 늦출 수 있다. 1타일 attn_out(V125, fetch 없는 스트림)의 암묵적 스트림 속도 316 vs 2타일 302 B/cycle이 약한 증거. → V172/V173/V175(중복 contraction의 초과 비용).
+   크면 V176(loads-first).
+2. *세그먼트/정렬*: ffn의 scale(120 B × 60/슬라이스)과 weight(960 B, 256 B 비정렬)는 attn_out(512 B 정렬)과 다르지만 속도가 같다 — 그러나 1위의 ffn 315k는
+   여기서 나올 가능성이 남아 있다. → V174(full-row scale, FAIL-by-design 탐침). 크면 V177(클러스터 축 H-split).
+3. *채점 draw 분산*: V165 cold 12회의 점수 범위 5.5~5.9. 프로그램 축소로 분산을 줄일 수 있는지 → V178/V179(작은 pass 융합)와 재제출 정책.
+
+**판정 규칙(사전 등록).** 탐침 초과 비용 = 실측 Δ − (중복 pass의 정적 시간 × 2.05). 초과가 커널의 8% 이상이면 조건부 후보를 구현, 아니면 닫는다.
+탐침 잡은 짝 하네스(base ×4, 변형 ×4)로 1잡씩.
 
 ## V170_ffn_ablation_ladder — ffn은 DMA 스트림 하한에 있다 (2026-09-09 16:19 UTC, job 15590)
 
