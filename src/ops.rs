@@ -983,7 +983,7 @@ pub fn sliding_project_qkv_v164(
         .vector_final()
         .commit_trim::<m![1 # 8]>()
         .commit();
-    let zero: DmTensor<i32, Chip, Cluster, Slice, m![1]> = unsafe { zero.reshape() };
+    let zero: DmTensor<i32, Chip, Cluster, Slice, m![1 # 2]> = unsafe { zero.reshape() };
     let mut zero_hbm: HbmTensor<i32, Chip, m![1]> = HbmTensor::new();
     zero.view().to_hbm_view(&mut ctx.tdma, zero_hbm.view_mut());
     q.dma_scatter::<m![1], _, _>(&zero_hbm, q_out);
