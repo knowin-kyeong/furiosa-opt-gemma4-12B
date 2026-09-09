@@ -88,3 +88,7 @@ V158_qkv_x_ring32_broadcast#r3
 # Phase B6 - ffn/attn_out x2 ring broadcasts (V159 ffn, V161 attn_out) with base interleaved, x2 jobs.
 V159_ffn_attnout_x_ring_broadcast
 V159_ffn_attnout_x_ring_broadcast#r2
+
+# Phase B7 - are the weight loads descriptor-bound? Q on 128 slices x 16 rows, K/V 128 x 8 (V160 vs v157a), x2 jobs.
+V160_qkv_weights_half_descriptors
+V160_qkv_weights_half_descriptors#r2
