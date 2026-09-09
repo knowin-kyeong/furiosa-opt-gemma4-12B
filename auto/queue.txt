@@ -111,3 +111,6 @@ V133_attnout_tiles_28_16_16
 V134_attnout_tiles_32_16_12
 V135_attnout_tiles_20_20_12_8
 V136_attnout_tiles_48_12
+
+# qkv: half the replicated x bytes by carrying one f8 piece (accuracy question, screening only)
+V137_qkv_x_single_f8
