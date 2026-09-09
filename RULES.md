@@ -450,6 +450,21 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
+### 10.0a 2026-09-10 밤 3차 체인(12h+)이 남긴 상태 (최신)
+
+- **실측 SOTA 후보: `V165_qkv_broadcast_attnout_two_tiles`** (= V82 + qkv x 복제를 16 디스크립터 + ring-32 `CustomBroadcast`로(V158)
+  + attn_out O-weight 타일 48/12). cold 6회 median qkv 109.5k / attn_out 53.9k / ffn 350.7k, 전부 PASS → 공식 baseline 기준 ≈5.66.
+  **리더보드 제출은 사용자 지시가 있을 때만**(팀 Goat Chovy #1557, 현재 공식 5.086 = V82; 1위 5.667). 제출: pod `/root/lab`에서
+  브랜치 체크아웃 후 `moa-submitter submit --source /root/lab` (로그인 토큰 30일).
+- **핵심 발견(RESULTS "실물 비용 모델"):** 커널은 PE ARM 코어 프로그램이고 DMA 디스크립터를 런타임에 직렬 생성 → "같은 작은 영역을
+  512 디스크립터가 읽는" 로드가 실물에서 ~45k(정적 18k). qkv x2가 그것이었고 ring broadcast로 −43k. 더미 클러스터 축 위의 switch pass는
+  cluster 0만 채운다(실제 축으로 로드·switch 후 reshape).
+- **측정 방법:** tests/의 TESTS를 [변형 ×4 ...]로 두는 다중 변형 하네스(cold = 첫 실행, warm median/stdev 요약). Arena는 자유,
+  잡당 반복으로 median/stdev를 본다. cold(채점 환경)는 ±5%.
+- **닫힌 길(2026-09-09/10):** 스크래치→출력버퍼 hop(V151~153), ffn/attn_out x2 broadcast(V159/161), weight 디스크립터 절반(V160/V160b),
+  q scatter(V164, API), rope idx8 gather(V169, 정렬), ffn down 3타일(V166 중립), store 전 switch gather(V167/V168: FAIL·느림).
+- 드라이버: `/root/env.sh`에 `AUTO_CPU_TEST=0`, `AUTO_POLL_SECONDS=45`; 큐 문법 `BRANCH[@COMMIT][#TAG]`.
+
 ### 10.0 2026-09-09 첫 RNGD 실측 세션이 남긴 상태 (최신)
 
 - **Arena 로그인 완료**(`knowin-kyeong`), 첫 실측 7건 확보. 자세한 표·근본 원인은 RESULTS.md

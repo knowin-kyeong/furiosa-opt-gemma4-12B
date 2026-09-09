@@ -13,6 +13,7 @@ RNGD cycles만 점수다.
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
 | `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
 | `V164_qkv_q_scatter_zero_index` | `V160` 브랜치(v157a 위) | q의 최종 store(head 레이아웃 `1 # 64`에서 `to_hbm_view`, V146이 이 경로를 scatter보다 +4k로 측정)를 **on-device zero index(kv_offset − kv_offset, `SubFxp` + Stash)로 `dma_scatter`**로 대체 | — | — | — | — | — | — | **막힘** — `dma_scatter`는 소스에 없는 테이블 축(k_cache의 Ts처럼)을 인덱스 키로 relabel해야 하는데 `q_out [Ns, Gs, Ds]`는 전 축이 소스에 있고, device fn 안에서 `&mut HbmTensor`를 다른 타입으로 볼 수 없다 |
+| `V170_ffn_ablation_ladder` (f3/f6/f7) | `V168` 브랜치 | **ffn 실물 ablation.** f3: gate block-scale 로드 생략(up의 것을 재사용) = scale 로드 1개(512 디스크립터 × 60 세그먼트)의 실물 비용; f6: post-FF RMSNorm/residual/gate tail 생략; f7: geglu 체인(gelu·곱·스칼라 broadcast 2개) 생략. 정확도 FAIL by design | — | — | 152,342 (f3) / 157,261 (f6) / 154,998 (f7) | — | — | FAIL(by design) | 구현됨 (`7c2fd7c`), Arena 2잡 큐 |
 | `V169_qkv_rope_gather_idx8` | `V160` 브랜치(v157a 위) | cos/sin을 HBM hop 없이 head 레이아웃으로 직접 gather: `rope_offset`을 복제 로드로 `[Ns]` 인덱스(8부)로 만들어 `dma_gather_scaled` | — | — | — | — | — | — | **막힘** — i32 스칼라의 복제 로드가 `tail_size % min_align (4)` 정렬 검사에 걸림(4 B 원소는 broadcast 불가). 기대 이득 ≤2k(V147)라 추가 반복 안 함 |
 | `V168_ffn_gather_before_store` | `V167` | V167과 같은 기전을 ffn down 출력 hop store(DownRows `1 # 8`, 64 디스크립터)에: switch gather(ring 256) 후 클러스터당 1 디스크립터 store. 정적 중립(157,766) | — | — | 157,766 (v168) | — | job 15585 (n=4): base 346,393 · **v168 355,930** (+9.5k) | v168 **FAIL** (14% tol 안) | **기각** (V167과 같은 결론: 패딩 레이아웃 64-디스크립터 store는 싸고 ring-256 gather가 비싸다) |
 | `V167_attnout_gather_before_store` | `V162` | attn_out 투영 출력 store를 64 디스크립터(패딩 `1 # 8` 레이아웃)에서 **클러스터당 switch gather(ring 256, `Broadcast1 { slice1: 32, slice0: 8 }`, 12원소 패킷) 후 2 디스크립터 store**로. V24(a)의 실물 A/B: 정적 중립(28,180 vs 28,223), 실물은 패딩 레이아웃 store가 V146에서 +4k/store였으므로 이득 가능. 컴파일 교훈: switch OutTime에 fetch의 패킷 시간축을 함께 적는다 | — | 28,180 (v167) | — | — | job 15584 (n=5): base 55,816 · v162 53,301 · **v167 57,168** (stdev 0.5k) | v167 **FAIL** (23% tol 안: collect 순서가 어긋남) | **기각** — 맞아도 +1.4k 느리다. 패딩 레이아웃 64-디스크립터 store는 실물에서 싸다(V146의 +4k는 store가 아니라 다른 경로 차이) |
@@ -352,6 +353,12 @@ on-chip switch"로, 출력 store는 디스크립터가 적은 경로(scatter/적
 | 15578 | 109,572 | 104,670 · 105,568 | **54,009** | 51,824 | 348,688 · 347,166 |
 | 15579 | 107,318 | 109,074 · 103,630 | **51,513** | 55,049 | 349,470 · 347,838 |
 | 15580 | 109,408 | 104,582 · 104,798 | **54,919** | 53,994 | 352,346 · 344,516 |
+| 15587 | 104,740 | 104,462 · 108,888 | **54,430** | 53,827 | 350,326 · 350,328 |
+| 15588 | 110,796 | 105,654 · 109,144 | **53,904** | 56,653 | 351,370 · 349,326 |
+| 15589 | 110,445 | 105,758 · 109,205 | **53,661** | 55,325 | 351,054 · 352,238 |
+
+  cold 6회 median: qkv **109,490** · attn_out **53,957** · ffn **350,690** → 공식 baseline 기준 (2.29 × 7.50 × 10.56)^(1/3) ≈ **5.66**
+  (최고 draw 조합 104.7k / 51.5k / 348.7k → 5.84). 1위(5.667)와 동률권; 채점 1회의 draw가 순위를 가른다.
 
 - **V158 대비:** attn_out cold median 56,870 → **54,009** (−5%); qkv·ffn 불변. 공식 baseline 기준 추정 기하평균
   (2.29 × 7.49 × 10.60)^(1/3) ≈ **5.67**, 최고 draw 기준 ≈5.71 (1위 5.667).
