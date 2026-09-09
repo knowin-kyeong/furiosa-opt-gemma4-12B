@@ -40,7 +40,8 @@
 | `V29_ffn_block_scale_after_contract` (…+V29 누적) | 50,981 | 30,037 | 165,733 | 5.324× |
 | `V30_qkv_rope_tables_direct_gather` (…+V30 누적) | 48,638 | 30,037 | 165,733 | 5.408× |
 | `V31_qkv_f8_contraction_no_lut` (…+V31 누적) | 46,541 | 30,037 | 165,733 | 5.488× |
-| `V32_attnout_f8_contraction_no_lut` (…+V32 누적) | 46,541 | 29,318 | 165,733 | **5.533×** |
+| `V32_attnout_f8_contraction_no_lut` (…+V32 누적) | 46,541 | 29,318 | 165,733 | 5.533× |
+| `V33_attnout_immediate_scale` (…+V33 누적) | 46,541 | 28,002 | 165,733 | **5.616×** |
 
 실측이 나오기 전까지는 SOTA가 아니다. Arena 승인 후 `./scripts/rngd_test.sh`로 확정한다.
 
