@@ -73,3 +73,5 @@ V154_qkv_x_ring32_broadcast#r3
 # Harness repeats: base x4, each of 4 variants x4, with failing-slice histogram and median/stdev.
 V155_qkv_x_ring_broadcast_forms
 V155_qkv_x_ring_broadcast_forms#r2
+V155_qkv_x_ring_broadcast_forms#fix1
+V155_qkv_x_ring_broadcast_forms#fix2
