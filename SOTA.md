@@ -8,15 +8,28 @@
 
 | 항목 | 값 |
 |---|---|
-| 브랜치 | `V0_baseline` |
-| 커밋 | (아래 이력 참조) |
-| `sliding_project_qkv` | makespan 116,583 (RNGD 실측 대기) |
-| `sliding_attention_output` | makespan 194,020 (RNGD 실측 대기) |
-| `decoder_feedforward` | makespan 1,693,200 (RNGD 실측 대기) |
-| **기하평균 speedup** | 1.000 (기준) |
-| 측정일 | 2026-09-09 (makespan) |
+| 브랜치 | **`V14_two_clusters`** |
+| 커밋 | `b07ddaa` |
+| `sliding_project_qkv` | **183,005** (V0 244,885 → 1.338×) |
+| `sliding_attention_output` | **78,708** (V0 405,253 → 5.149×) |
+| `decoder_feedforward` | **418,837** (V0 3,706,465 → 8.849×) |
+| **기하평균 speedup** | **3.936×** |
+| 정확도 | 3/3 PASS |
+| 측정일 | 2026-09-09 (RNGD 실측, Arena job 15350) |
 
-## 잠정 (makespan 기준, 실측 전)
+### 2026-09-09 — 첫 실측이 SOTA를 되돌렸다
+
+Arena 접속 전까지 이 문서의 "현재 SOTA"는 makespan이었다. 첫 실측(job 15346~15352)에서
+**V15 이상 전 계보가 정확도 FAIL**로 드러났다: V15가 도입한 HBM 사본 관용구가 사본 축을
+목적지에만 붙여 store를 복제한다고 가정했는데, 복제되지 않는다(RESULTS.md §첫 RNGD 실측).
+사본 1개만 채워지고 나머지는 초기화되지 않은 HBM이라, bf16 경로는 NaN, f8 경로는
+220%대 오차가 됐다. makespan 5.801×의 `V41_x2_hbm_copies`는 3/3 FAIL로 기각.
+
+그래서 **정확도가 확인된 최선**인 V14가 첫 실측 SOTA다. V14 자체의 발견(칩의 두 클러스터 중
+하나만 쓰고 있었다)은 실측에서도 가장 큰 단일 이득이다: attn_out 5.15×, ffn 8.85×.
+사본을 진짜로 쓰는 V49가 성공하면 계보 전체(5.5×대)가 한 번에 되살아난다.
+
+## 잠정 (makespan 기준, 실측 전 — V15 이상은 정확도 FAIL이므로 점수가 아니다)
 
 | 브랜치 | qkv | attn_out | ffn | 기하평균 |
 |---|---:|---:|---:|---:|

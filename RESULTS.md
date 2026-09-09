@@ -11,13 +11,14 @@ RNGD cycles만 점수다.
 
 | 브랜치 | 분기점 | 가설 한 줄 | qkv makespan | attn_out makespan | ffn makespan | 기하평균 (makespan 기준) | RNGD 실측 | 정확도 | 상태 |
 |---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|
-| `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | — | — | **기준** |
+| `V0_baseline` | `main` | 원본 skeleton (기준) | 116,583 | 194,020 | 1,693,200 | 1.000 | 244,885 / 405,253 / 3,706,465 (**1.000**) | **PASS** | **기준 (실측)** |
 | `V1_ffn_down_chunked_dequant` | `V0_baseline` | down proj: 슬라이스별 L/8 청크만 dequant, 재배치 DMA 제거 | 116,583 | 194,020 | **609,223** | **1.406** | — | — | makespan 측정 |
 | `V2_attnout_rows_over_256_slices` | `V1` | O proj: 32→256 슬라이스 (H/60 × Qs/1024), 4-way inter-slice reduce | 116,583 | **106,461** | 609,223 | **1.723** | — | — | makespan 측정 |
-| `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | — | — | makespan 측정 |
+| `V7_qkv_x_replicate_via_hbm` | `V2` | x 복제를 switch(62k)/DM→DM DMA 대신 HBM 경유 로드로 (qkv: `HbmTensor::new()` 스크래치, attn_out: 입력 HBM에서 청크 직접 로드) | **95,433** | **58,015** | 609,223 | **2.250** | 190,342 / 111,005 / 1,213,877 (**2.430**) | **PASS** | **채택** (실측) |
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
+| `V49_hbm_copies_real_stores` | `V41` | 사본 축(`Dummy8`/`Dummy256/16`)은 store를 복제하지 않는다(위 §첫 RNGD 실측). 사본마다 `to_hbm_view`를 명시적으로 호출해 네 곳(qkv x 16부, ffn up/gate·down, attn_out)을 실제로 채운다. 사본 수는 store 추가 비용과 load 분산 이득의 균형으로 다시 튜닝 | — | — | — | — | — | — | 설계됨 (V15~V41 계보 전체의 정확도를 되살리는 것이 목적) |
 | `V48_qkv_shared_spm_index` | `V39` | cos/sin gather 934×2·k/v scatter 929×2가 각각 HBM 인덱스를 따로 읽는다(`*_scaled`). byte-offset 인덱스를 SPM에 한 번 만들어 `dma_gather_unscaled`/`dma_scatter_unscaled`로 4개 DMA의 인덱스 로드를 공유 | — | — | — | — | — | — | 설계됨 (기대 qkv −0.5k~−1k; 인덱스 비용 분해 미확인) |
 | `V47_ffn_global_scale_into_eps` | `V39` | down global scale pass(401, tail)는 post-FF RMSNorm이 스케일 불변이라 불필요. eps만 s²로 나눠(`vector_clip(Add, &eps_vrf)`) 접고 pass 제거 | — | — | — | — | — | — | 설계됨 (기대 ffn −0.4k) |
 | `V46_ffn_scalar_broadcast_merge` | `V39` | geglu 스칼라 2개(erf_scale·out_scale)의 broadcast_scalar_pairs가 각각 로드 521 + switch config 719를 낸다. 두 스칼라를 DM `[2, 1 # 8]` 하나에 tile-view 로드해 ring-256 switch 1회로 | — | — | — | — | — | — | 설계됨 (기대 ffn −1.2k) |
@@ -25,19 +26,19 @@ RNGD cycles만 점수다.
 | `V44_ffn_scale_segments` | `V39` | block-scale 로드 9,774×3 = DMA 큐의 18.5%. 원인은 바이트(3.7 MB)가 아니라 **120 B 세그먼트 30,720개**(모델 ≈ 548 + bytes/1.21 KB + 0.2/세그먼트). 슬라이스가 full row(240 B × 60 = 1 세그먼트)를 읽고 자기 절반만 쓰려면 슬라이스별 fetch offset이 필요한데 fetch view는 전 슬라이스 공통이라 불가. 남은 길: (a) pair가 행(30/30)을 나누고 partials를 ring-2 switch로 교환 → scale 1 세그먼트(순 ≈ −1.5k/행렬) (b) 슬라이스 패리티 마스크(`TagMode::AxisToggle`은 Ident라 device fn 불가) | — | — | — | — | — | — | 설계됨 (보류: 분석 완료, 구현 경로 (a)만 유효) |
 | `V43_qkv_v_weight_tail_split` | `V39` | qkv tail 4.3k의 V contract 1,225: V weight를 슬라이스당 3행 + 1행 두 tile로 로드해 마지막 contract를 ~1/4로 | — | — | — | — | — | — | **기각 (설계)** — 슬라이스당 4행을 나누면 출력 commit_trim이 6 B/2 B가 되어 8 B 최소(bf16 4개)에 걸림; f32 출력이면 head norm 재작성 필요 |
 | `V42_attnout_tile_shapes` | `V39` | attn_out weight 타일 20/20/20 → 28/28/4: 마지막 타일 contract 956 → ~250이 tail에서 빠지길 기대 | 45,744 | **28,466** | 158,182 | 5.706 | — | — | **기각** (+1,042: 스케줄러가 4행 타일을 두 번째로 로드, 마지막 로드가 28행) |
-| `V41_x2_hbm_copies` | `V39` | ffn up/gate x2 로드 3,411·down x2 로드 2,934·attn_out x2 로드 1,318은 같은 HBM 구간을 64~256 슬라이스가 반복해 읽는 패턴. V15처럼 HBM 스크래치에 8부 사본을 쓰고(`[Dummy8, …]`, store 디스크립터 불변) 슬라이스 매핑으로 사본을 분산 | 45,744 | **27,272** | **157,282** | **5.801** | — | — | makespan 측정 (ffn −900, attn_out −152; 체인 대기) |
+| `V41_x2_hbm_copies` | `V39` | ffn up/gate x2 로드 3,411·down x2 로드 2,934·attn_out x2 로드 1,318은 같은 HBM 구간을 64~256 슬라이스가 반복해 읽는 패턴. V15처럼 HBM 스크래치에 8부 사본을 쓰고(`[Dummy8, …]`, store 디스크립터 불변) 슬라이스 매핑으로 사본을 분산 | 45,744 | **27,272** | **157,282** | **5.801** | 103,373 / 55,598 / 345,309 (5.702) | **3/3 FAIL** | **기각** (사본 버그를 attn_out·ffn까지 확대) |
 | `V40_ffn_down_pass_a_big_tiles` | `V39` | ffn down 타일 5개(16/16/16/8/4)마다 DMA 고정 548 + LUT 테이블 838. pass A만 큰 타일로(타일별 60행 partials 버퍼에 tile commit), pass B는 ≤16행 tile view로 → 타일 수 감소 | 45,744 | 27,424 | 159,050 (a) / 159,781 (b) | 5.756 | — | — | **기각** — (a) 28/28/4 +868 (b) 16/24/16/4 +1,599 (c) pass B를 sub로: 컴파일 실패. pass A(316/행)가 다음 타일 로드(481/행+1,386) 안에 끝나려면 타일이 0.66배씩 줄어야 해 4행 마지막 타일 기준 5개가 최소 |
 | `V39_x2_single_store` | `V38` | x의 f8 hi/lo 두 조각을 HBM 스크래치에 tile store 2회(qkv 553×2, attn_out 377×2, ffn head 553×2·down 1,653×2)로 쓴다. 두 pass가 한 DM 버퍼(`m![Axis % 960]`, 실제 축의 480-tile 2개에 `commit_view`)에 쓰고 `[Dummy2, Axis % 480]`로 reshape해 store 1회로. 절단 split(V35)을 qkv/ffn에도 적용해 hi 재로드 없이 두 pass가 x만 읽게 | — | — | — | — | — | — | **실패** (StreamUnmatchedSegment) |
-| `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | — | — | makespan 측정 |
+| `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | 109,309 / 56,152 / 357,983 (5.511) | qkv **FAIL** | **보류** (V15 사본 버그 상속) |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
 | `V35_attnout_trunc_split` | `V33` | attn_out tile0 로드는 x_lo pass 발행에 묶인다(V34 교훈). x_lo가 x_hi의 DM 왕복(cast f8 → VRF 재로드 327 + 지연)을 기다리지 않도록 hi를 VE 안에서 절단(`BitAnd 0xFFF00000`, 유효 4비트)으로 만들고 lo = 16·(x − trunc x)를 x VRF에서 직접 계산: 두 pass가 x만 읽어 연속 발행. (c) V34 fold 재적용 | 46,541 | **27,954** | 165,733 | **5.621** | — | — | makespan 측정 |
 | `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
 | `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
-| `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
+| `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | 113,089 / 72,831 / 393,884 (4.840) | qkv **FAIL** | **보류** (V15 사본 버그 상속) |
 | `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
-| `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
+| `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | 126,473 / 66,775 / 383,693 (4.842) | qkv **FAIL** | **보류** (V15 사본 버그 상속) |
 | `V28_ffn_tile_shapes` | `V25` | FFN 타일 재편: up/gate 16/16/16/12, down 16/16/16/8/4(마지막 타일 작게) + geglu의 global scale을 스칼라 준비 pass(s_gate/√2, s_up·s_gate/2)로 gelu·mul pass에 fold | 50,981 | 30,037 | **168,757** | **5.292** | — | — | makespan 측정 |
 | `V27_attnout_scale_in_rmsnorm` | `V26` | attn_out 채널 scale(64 디스크립터 로드 1,318이 DMA 큐 선두에서 첫 타일을 막음)을 epilogue 대신 post-attn rmsnorm 두 pass에 접어 넣어 로드를 tail로 | — | — | — | — | — | — | V34로 대체 |
 | `V26_qkv_hsplit_x_halved` | `V39` (2026-09-09 밤 구현; 원안 분기점 V25) | qkv 투영을 H/1920 열 반으로 나눠(Q 16행×1920, K/V 8행×1920, 2-way inter-slice reduce) 복제 x 바이트를 절반으로 (x 로드 5.2k, x_trf 1.2k×2). x2 HBM 스크래치를 `[Dummy256/16, H/1920, Dummy2, H%1920]`로 두어 슬라이스당 1세그먼트 | — | — | — | — | — | — | 구현됨 (컴파일 결과는 아래 상세·체인 보드 참조) |
@@ -52,7 +53,7 @@ RNGD cycles만 점수다.
 | `V17_qkv_hoist_weight_loads` | `V16` | qkv: Q weight의 LUT pass를 rmsnorm 앞에 발행해 Q 로드가 DMA 큐 선두로 (K/V까지 같은 방식은 무효) | **59,216** | 34,776 | 186,976 | **4.649** | — | — | makespan 측정 |
 | `V16_rmsnorm_fused_residual` | `V15` | post-attn/post-FF rmsnorm의 마지막 vector pass에 residual add(+layer gate)를 접어 넣어 tail pass 제거 (새 함수 `normalize_add[_gate]`) | 60,412 | **34,776** | **186,976** | **4.618** | — | — | makespan 측정 |
 | `V15_x_replicate_hbm_copies` | `V14` | qkv의 x 복제 로드가 같은 7.5 KB HBM 구간을 512번 읽는 패턴(420 B/cycle) → x를 HBM에 8부 쓰고 슬라이스별로 다른 사본 읽기 | **60,412** | 38,240 | 191,122 | **4.434** | — | — | makespan 측정 |
-| `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | — | — | makespan 측정 |
+| `V14_two_clusters` | `V13` | 모든 DM 텐서가 `Cluster = m![1 # 2]`(클러스터 1개만 live)였다. 세 커널의 투영을 두 클러스터에 실제로 나눠 512 슬라이스 사용; DMA 처리량·연산 2배 | **73,445** | **38,240** | **191,122** | **4.147** | 183,005 / 78,708 / 418,837 (**3.936**) | **PASS** | **채택 — 현재 실측 SOTA** |
 | `V12_ffn_rows_per_pass_12` | `V11` | FFN `ROWS_PER_PASS` 4→12: up/gate는 1920열 절반씩 dequant(scale VRF 5.8 KB), down은 그대로; pass 수 90→30 | 93,127 | 50,110 | **352,164** | **2.857** | — | — | makespan 측정 |
 | `V11_residual_1920_tiles` | `V10` | `residual::add`를 480×8 타일에서 1920×2 타일로 (공유 코드) | 93,127 | **50,110** | **408,566** | **2.716** | — | — | makespan 측정 |
 | `V9_ffn_x_via_hbm` | `V7` | ffn의 x→Replicated DM→DM DMA(54k)를 V7 기법(HBM 스크래치 경유, 18.4k)으로 | 95,433 | 58,015 | **574,845** | **2.295** | — | — | makespan 측정 |
@@ -63,13 +64,87 @@ RNGD cycles만 점수다.
 
 > 단위: cycle. `—` 미측정. `FAIL(accuracy)` tolerance 위반. 상태 전이는 RULES §2.1.
 
+## 2026-09-09 첫 RNGD 실측 (Arena) — 계보의 절반이 무효
+
+Arena 로그인이 끝나 **처음으로 실물 cycle과 정확도가 나왔다**(job 15346~15352). 정적 makespan만
+보고 쌓아 온 계보의 절반이 정확도로 무효라는 것이 여기서 드러났다.
+
+| 브랜치 | qkv | attn_out | ffn | 실측 기하평균 | 정확도 |
+|---|---:|---:|---:|---:|:---|
+| `V0_baseline` | 244,885 | 405,253 | 3,706,465 | 1.000 | PASS |
+| `V7_qkv_x_replicate_via_hbm` | 190,342 | 111,005 | 1,213,877 | 2.430 | PASS |
+| `V14_two_clusters` | 183,005 | 78,708 | 418,837 | **3.936** | **PASS** |
+| `V29_ffn_block_scale_after_contract` | 126,473 | 66,775 | 383,693 | (4.842) | qkv FAIL |
+| `V31_qkv_f8_contraction_no_lut` | 113,089 | 72,831 | 393,884 | (4.840) | qkv FAIL |
+| `V38_post_norm_store_from_reducing` | 109,309 | 56,152 | 357,983 | (5.511) | qkv FAIL |
+| `V41_x2_hbm_copies` | 103,373 | 55,598 | 345,309 | (5.702) | **3/3 FAIL** |
+
+**makespan은 상대 스크리닝 도구로는 유효하다.** 실측/makespan 비율이 세 커널 모두 2.0~2.4로 균일하고
+(V0 2.10/2.09/2.19, V38 2.39/2.05/2.26), 실측 기하평균의 순서가 makespan 기하평균의 순서와 같다
+(V38 5.511 vs 5.779, V41 5.702 vs 5.801). 같은 잡을 두 번 돌린 V41의 편차는 1.5%다
+(104,942/57,370/350,081 → 103,373/55,598/345,309). **다만 makespan은 정확도를 전혀 보지 못한다.**
+
+### 근본 원인: `Dummy` 사본 축은 store를 복제하지 않는다
+
+V15가 도입하고 V31·V41이 확대한 "HBM 사본" 관용구는 이렇게 생겼다.
+
+```rust
+let mut x_hbm: HbmTensor<bf16, Chip, m![Dummy8, H]> = HbmTensor::new();  // 목적지에만 사본 축
+x.view().to_hbm_view(&mut ctx.tdma, x_hbm.view_mut());                   // 소스엔 없음
+let x: DmTensor<_, _, _, m![Dummy256 / 8, Dummy8], m![H]> = x_hbm.to_dm(&mut ctx.tdma);
+```
+
+가정은 *"소스에 없는 축은 store를 복제한다(디스크립터 추가 비용 0)"* 였다. **틀렸다.** 스케줄이 그대로 말한다.
+
+| | store `to_hbm_view` | load `to_dm` |
+|---|---:|---:|
+| V14 (사본 1개) | `ops.rs:65` **434** | `ops.rs:66` 18,400 |
+| V15 (사본 8개) | `ops.rs:67` **434** | `ops.rs:68` 5,367 |
+| V38 attn_out (사본 1개) | `projection.rs:170/172` **377 / 377** | `:175` 1,318 |
+| V41 attn_out (사본 8개) | `projection.rs:173/175` **377 / 377** | `:179` 1,166 |
+
+목적지가 8배 커졌는데 store 시간은 1 cycle도 늘지 않고, load만 흩어져 빨라졌다. 즉 **8곳에서 읽는데
+1곳에만 쓴다.** 나머지 7/8 슬라이스는 초기화되지 않은 HBM 스크래치를 읽는다. bf16이면 쓰레기 비트가
+NaN/Inf가 되어 `non-finite device output at 0`으로, f8e4m3이면 거의 모든 비트 패턴이 유한값이라
+"유한하지만 220%대로 틀린 값"으로 나타난다 — 관측된 두 실패 양상이 정확히 이것이다.
+
+`to_hbm_view`([furiosa-opt-std-0.6.0 `src/tensor/memory.rs:506`])는 `to_dm_view`와 달리
+`assert_dma_layout`/`assert_dm_to_dm_dimension_preserved`를 부르지 않는다. 그래서 축이 안 맞아도
+조용히 컴파일된다.
+
+**감염된 위치 (head 기준):**
+
+| 위치 | 도입 | 사본 | 증상 |
+|---|---|---:|---|
+| qkv x — `shared::mlp::stage_x_hi_lo_copies_hbm` (`mlp.rs:186`) | V15 (bf16 8부) → V31 (f8 16부) | 16 | qkv NaN |
+| ffn up/gate x2 — `stage_x_hi_lo_hbm` (`mlp.rs:83`) | V41 | 8 | ffn 233% |
+| ffn down geglu — `stage_geglu_hi_lo_hbm` (`mlp.rs:231`) | V41 | 8 | ffn 233% |
+| attn_out x2 — `projection::project_output` (`projection.rs:172`) | V41 | 8 | attn_out 222% |
+
+V38이 qkv만 깨지고 attn_out·ffn은 PASS인 것이 이 표의 직접적인 확인이다. **`HbmTensor::new()`
+자체(V7/V9의 HBM hop)는 무죄다** — V7은 PASS했고, 사본 축이 없는 store는 정상이다.
+
+### 이것이 뜻하는 것
+
+- **V15 이상 전 계보(V15~V41)가 정확도로 무효다.** 지금 점수가 되는 최선은 `V14_two_clusters`의 **3.936×**.
+- 사본을 진짜로 쓰면(사본마다 명시적 store) 계보 전체가 되살아난다 — 그 실험이 **V49**다.
+- V15의 makespan 이득(load 18,400 → 5,367 = −13,033)은 store 7개 추가(+3,038)로 대부분 남는다.
+  16부 사본(V31)은 store 30개 추가라 사본 수 자체를 다시 튜닝해야 한다.
+
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V41_x2_hbm_copies`**
-(V38 + x2 8부 사본, 기하평균 5.801×; V39·V40·V42·V43·V26 기각, V27은 V34/V35에 흡수). 문서 최신본도 이 브랜치에 있다.
+실측(RNGD) 기준: **`V14_two_clusters` — 기하평균 3.936×** (183,005 / 78,708 / 418,837, 3/3 PASS).
+정확도가 확인된 브랜치 중 가장 빠르다. makespan 기준 선두였던 `V41_x2_hbm_copies`(5.801×)는 실측에서
+3/3 FAIL로 **기각**됐고, V15~V38도 qkv가 NaN이라 전부 보류다 (위 §첫 RNGD 실측의 사본 store 버그).
+문서 최신본은 이 브랜치(`V41_x2_hbm_copies`)에 있다 — 코드는 기각이지만 문서 계보의 끝이다.
 야간 자동 체인의 실측/빌드 결과는 pod `/root/auto/wt/auto/BOARD.md`(RULES §11). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
+
+- **소스에 없는 `Dummy` 축을 목적지에 붙여 HBM store를 복제하기** (V15/V31/V41) — 복제되지 않는다.
+  store 디스크립터도 바이트도 그대로이고(그래서 "공짜"로 보인다), 사본 1개만 채워진 채 나머지를
+  읽는다. `to_hbm_view`는 축 검사를 하지 않아 조용히 컴파일된다. **HBM 사본이 필요하면 사본마다
+  `to_hbm_view`를 호출한다.** 실측 없이 makespan만 보고 채택한 변경이 어떻게 되는지의 표본이다.
 
 - **switch 기반 브로드캐스트 변형으로 x 복제 비용 줄이기** — book(Switch Engine)이
   명시: 모든 SwitchConfig의 비용 = `ring_size × Time × flits_per_packet`. 1개 슬라이스의
@@ -340,6 +415,37 @@ Arena 제출을 수행하고 `auto/BOARD.md`에 기록한다(RULES §11). 아래
 - **변경 파일:** `src/device/shared/mlp.rs`, `src/device/shared/rmsnorm.rs`(`normalize_add_gate_reduced`에 eps VRF 인자), `src/ops.rs`
 - **정확도:** f32 나눗셈 순서만 변경; eps 항 동일.
 - **예상:** ffn −0.4k.
+
+## V49_hbm_copies_real_stores
+
+분기점: `V41_x2_hbm_copies` (문서 계보의 끝; 코드는 V41의 사본 확대를 포함한다)
+
+### 가설
+
+HBM 사본은 좋은 생각이었지만 **한 번도 실제로 쓰이지 않았다**(위 §첫 RNGD 실측의 근본 원인). 사본마다
+`to_hbm_view`를 명시적으로 호출하면 load 분산 이득은 그대로 두고 정확도를 되찾는다. store가 사본 수만큼
+늘어나므로 사본 수는 다시 튜닝 대상이다.
+
+### 대상 (4곳)
+
+| 위치 | 현재 사본 | store 1개 비용 | 사본당 추가 store |
+|---|---:|---:|---|
+| `shared::mlp::stage_x_hi_lo_copies_hbm` (qkv x, f8 hi/lo) | 16 | ~434 | 2개 (hi, lo) |
+| `shared::mlp::stage_x_hi_lo_hbm` (ffn up/gate) | 8 | ~377 | 2개 |
+| `shared::mlp::stage_geglu_hi_lo_hbm` (ffn down) | 8 | ? | 2개 |
+| `sliding::projection::project_output` (attn_out) | 8 | 377 | 2개 |
+
+### 비용 모델 (V14→V15 실측 스케줄 기준)
+
+사본 1개 → 8개로 load 18,400 → 5,367 (−13,033), store 434 × 7 추가 (+3,038) ⇒ 순 −9,995.
+사본 수 c에 대해 load ≈ 18,400/c + 고정, store ≈ 434 × c × (조각 수)이므로 최적 c는 8보다 작을 수 있다.
+**c = 1, 2, 4, 8, 16을 네 곳에서 각각 재보고 고른다.**
+
+### 측정
+
+(미측정)
+
+### 판정: 설계됨
 
 ## V48_qkv_shared_spm_index
 

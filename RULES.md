@@ -326,6 +326,17 @@ URL은 이전 README 버전에 있던 `https://arena.furiosa.ai`.
 **④ 로그인은 사람이 해야 한다.** `furiosa-arena login`은 GitHub device flow(브라우저에서
 코드 입력)라 자동화가 안 된다. 로그인 전에는 `health`조차 실패한다.
 
+**⑤ 실행시간 상한은 70초다.** `rngd submit --timeout`이 70을 넘으면 컨트롤러가
+`Error: timeout_sec 3000 exceeds server maximum 70`으로 **거부**한다. `scripts/rngd_test.sh`의
+기본값은 1800이라 그대로 쓰면 아무것도 제출되지 않는다. 세 커널 테스트는 70초 안에 끝난다.
+
+**⑥ `rngd_test.sh`는 제출 에러를 삼킨다.** `submit_output=$(rngd submit …)`가 `set -e` 아래
+있어서, 거부되면 `echo "$submit_output"` 전에 스크립트가 죽는다. 증상은 "빈 로그"다. 무인 체인은
+이 때문에 드라이버 전용 `arena.sh`(§11.2)로 제출한다.
+
+**⑦ 로그인 계정은 `knowin-kyeong`이다** (2026-09-09 완료, 토큰은 pod의
+`/root/.config/furiosa-arena/token`). pod가 사라지면 device flow를 다시 해야 한다.
+
 위 ①~③은 `/root/env.sh`에 모아두었고 `~/.bashrc`가 이를 source한다.
 **비대화형 ssh 명령은 `.bashrc`를 읽지 않으므로** 원격 명령 앞에 항상 `. /root/env.sh`를 붙인다.
 
@@ -431,7 +442,24 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0 2026-09-09 밤 세션이 남긴 상태 (최신 — 아래 10.1은 그 전 낮 세션의 기록)
+### 10.0 2026-09-09 첫 RNGD 실측 세션이 남긴 상태 (최신)
+
+- **Arena 로그인 완료**(`knowin-kyeong`), 첫 실측 7건 확보. 자세한 표·근본 원인은 RESULTS.md
+  §"2026-09-09 첫 RNGD 실측".
+- **실측 SOTA는 `V14_two_clusters` 3.936×** (3/3 PASS). **V15~V41은 전부 정확도 FAIL**이라 점수가 없다.
+  makespan 선두였던 V41은 3/3 FAIL로 기각.
+- **원인은 하나다: 소스에 없는 `Dummy` 사본 축은 HBM store를 복제하지 않는다.** V15가 도입, V31이 16부로,
+  V41이 attn_out·ffn까지 확대했다. store 디스크립터·시간이 그대로인 것이 증거이자 함정이었다
+  (스케줄에서 "공짜 복제"로 보였다). 감염 위치 4곳은 RESULTS.md의 표에 있다.
+- **다음 일은 `V49_hbm_copies_real_stores`** — 사본마다 `to_hbm_view`를 명시적으로 호출하고 사본 수
+  (1/2/4/8/16)를 네 곳에서 다시 고른다. 성공하면 계보 전체(실측 5.5×대)가 되살아난다.
+- **makespan은 상대 스크리닝으로는 유효하다**(실측/makespan 2.0~2.4로 균일, 순서 보존). 다만 정확도는
+  전혀 보지 못한다. **실측 없이 채택 판정을 내리지 않는다** — 이번 사고의 교훈이다.
+- 야간 체인은 `/root/auto/STOP`으로 멈춰 있다. 재개하려면 STOP을 지우고 keeper를 다시 띄운다(§11.2).
+  큐(`origin/auto_results:auto/queue.txt`)는 V15~V28 계보 순회로 갱신돼 있다(V15가 첫 FAIL일 것이라는
+  예측의 확인용이며, 근본 원인은 스케줄 비교로 이미 확정됐다).
+
+### 10.0.1 2026-09-09 밤 세션이 남긴 상태 (그 전 — makespan만 있던 시점)
 
 - **선두 브랜치: `V41_x2_hbm_copies`** (V38 + x2 8부 사본; makespan 45,744 / 27,272 / 157,282, 기하평균 5.808×). 문서
   최신본(RESULTS/SOTA/RULES)도 여기. 계보: … V36 ─ V37 ─ V38 ─ V39(기각) ─ V41. V40(ffn down 타일 수), V42(attn_out 타일 형상),
@@ -529,5 +557,6 @@ main ─ V0_baseline ─ V1_ffn_down_chunked_dequant ─ V2_attnout_rows_over_25
   멈춰 체인이 서 있었다). push 자격증명이 없으므로 결과는 `scp`로 가져와 랩탑에서 커밋한다. push까지 자동화하려면 pod에
   deploy key(쓰기)를 등록한다(§10.0).
 - 드라이버는 브랜치의 스크립트에 의존하지 않는다(V0_baseline에는 `scripts/dev`가 없다): 덤프는 `/root/auto/dump.sh`,
-  Arena는 상류 `scripts/rngd_test.sh --no-build`.
+  Arena는 `/root/auto/arena.sh`(§6.3.1 ⑤⑥ 때문에 상류 `rngd_test.sh`를 쓰지 않는다. 실행시간 상한
+  `ARENA_TIMEOUT`(70)과 큐 대기 `ARENA_WAIT`(1800)이 분리돼 있고, 제출 출력과 exit code를 항상 남긴다).
 - 스크리닝 클론 `/root/lab`, `/root/lab2`(target 사본)에서 대화형 컴파일을 하면 드라이버와 CPU를 나눠 쓴다(각 ~2분/커널).
