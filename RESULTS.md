@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | — | — | — | — | — | — | 설계됨 |
+| `V34_attnout_scale_in_rmsnorm` | `V33` | (V27 계획을 V33 위에서) attn_out 채널 scale 로드(594)가 DMA 큐 선두에서 tile0을 막고 타일 epilogue마다 narrow/MulF/widen이 붙는다. 투영은 scale 없이 bf16으로 내고 post-attn RMSNorm의 두 pass(mean-square, normalize)에 `MulF(Mul1, scale)`로 접는다; scale은 tail에서 ReducingSlices로 로드 | 46,541 | 28,002 | 165,733 | 5.618 | — | — | **기각** (동일) |
 | `V33_attnout_immediate_scale` | `V32` | attn_out x 스테이징 체인(max x² 413 → 상수 패킷 410 → VRF 327 → hi 410 → lo 410)이 DMA 큐 선두를 1.2k 비운다(tile0 로드가 3,922에 시작). s=16이 상수이므로 hi/lo pass의 MulF에 즉치 16을 써서 앞 세 pass를 없앤다 | 46,541 | **28,002** | 165,733 | **5.618** | — | — | makespan 측정 |
 | `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
 | `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
@@ -358,6 +358,21 @@ L=15360이면 60 × 256.
 - **정확도:** bf16 반올림 지점이 바뀐다: 지금은 bf16(f32합·scale), 바꾸면 bf16(f32합)·scale(f32). 상대 오차 크기 동일(2^-9),
   값은 비트 단위로 다를 수 있음. 실측 검증 필요.
 - **예상:** attn_out −0.6k ~ −0.9k.
+
+### 측정: attn_out 28,002 → 28,002 (동일)
+
+- 큐 선두에서 scale 로드 594는 빠졌지만 tile0 로드는 여전히 2,554에 시작: **tile0 로드는 x_lo pass의 발행 시점에 묶여 있다**
+  (V33·V34 모두 x_lo pass 시작 = tile0 로드 시작 = 2,554; x_hi store가 2,404에 끝나도 무관). 즉 리스트 스케줄러는 tile0
+  contract의 다른 입력(x2 체인)이 발행될 때 tile0 로드를 발행한다. 큐의 나머지는 V33과 동일(tile2 로드 종료 18,862).
+- tail: store 2,510 뒤 scale·gamma 로드가 hop 공백(1,600)을 채우고 gathered 로드는 22,380+1,600 = 23,980에 시작 → norm 체인
+  24,526–26,968(pass 5개 직렬, reduce 뒤 549 공백) → store 434 → 28,002. 타일 pass는 epilogue를 빼도 956(contraction 스트림 시간).
+- **정확도:** bf16 반올림 지점 변경(이득 없이 리스크만) → 기각, V33 유지.
+
+### 판정: **기각** (makespan 동일)
+
+- **배운 것:** (1) DMA 로드 발행 시점은 "큐가 비었을 때"가 아니라 소비자의 다른 입력 체인이 발행되는 시점이다. 큐 선두를 당기려면
+  **x_lo pass의 발행을 앞당겨야** 한다(x_hi DM 왕복 없이 hi/lo 둘 다 x에서 직접: 절단 마스크 `BitAnd 0xFFF00000`). (2) tail은
+  hop 1,600 + norm 5-pass 직렬 2.4k + switch 744가 전부 임계 경로.
 
 ## V33_attnout_immediate_scale
 
