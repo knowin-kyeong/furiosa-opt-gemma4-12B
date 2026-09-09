@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V39_x2_single_store` | `V38` | x의 f8 hi/lo 두 조각을 HBM 스크래치에 tile store 2회(qkv 553×2, attn_out 377×2, ffn head 553×2·down 1,653×2)로 쓴다. 두 pass가 한 DM 버퍼(`m![Axis % 960]`, 실제 축의 480-tile 2개에 `commit_view`)에 쓰고 `[Dummy2, Axis % 480]`로 reshape해 store 1회로. 절단 split(V35)을 qkv/ffn에도 적용해 hi 재로드 없이 두 pass가 x만 읽게 | — | — | — | — | — | — | 설계됨 |
+| `V39_x2_single_store` | `V38` | x의 f8 hi/lo 두 조각을 HBM 스크래치에 tile store 2회(qkv 553×2, attn_out 377×2, ffn head 553×2·down 1,653×2)로 쓴다. 두 pass가 한 DM 버퍼(`m![Axis % 960]`, 실제 축의 480-tile 2개에 `commit_view`)에 쓰고 `[Dummy2, Axis % 480]`로 reshape해 store 1회로. 절단 split(V35)을 qkv/ffn에도 적용해 hi 재로드 없이 두 pass가 x만 읽게 | — | — | — | — | — | — | **실패** (StreamUnmatchedSegment) |
 | `V38_post_norm_store_from_reducing` | `V37` | attn_out·ffn의 post-norm tail은 정규화 pass 뒤에 switch pass(Broadcast1 8→1, 744 + config 로드 719)로 [H]를 한 슬라이스에 모아 store한다. 정규화 pass에서 bf16으로 cast해 ReducingSlices(8슬라이스 × 480) 그대로 HBM에 store(8 디스크립터)하면 switch pass가 tail에서 사라진다 | 45,744 | **27,424** | **158,182** | **5.779** | — | — | makespan 측정 |
 | `V37_ffn_upgate_pass_a_big_tiles` | `V36` | ffn DMA 큐의 타일당 고정비 = DMA 548 + LUT 테이블 로드 838(`?` 4 KB, pass마다) ≈ 1.4k × 13타일. up/gate의 16행 한도는 pass B의 scale VRF(8 KB)에서 오므로 pass A(LUT+contract)만 큰 타일(20/30/60행)로 하고 60행 partials 버퍼에 tile commit, pass B는 16/16/16/12 tile view로 유지 | 45,744 | 27,954 | **158,712** | **5.736** | — | — | makespan 측정 |
 | `V36_qkv_scales_in_head_norms` | `V35` | qkv DMA 큐의 K/V weight-scale 로드가 838×2(512 디스크립터 × 8 B), Q scale 로드 792가 V weight 로드 바로 앞에 선다(합 2.5k). 세 scale을 투영 epilogue 대신 head RMSNorm(한 head/슬라이스, 64 디스크립터 ~555)의 mean-square·normalize pass에 `MulF(Mul1)`로 접는다; 소비자가 tail이라 로드도 V weight 뒤로 갈 가능성 | **45,744** | 27,954 | 165,733 | **5.654** | — | — | makespan 측정 |
@@ -362,6 +362,23 @@ L=15360이면 60 × 256.
 - **변경 파일:** `src/device/shared/f8split.rs`(`hi_lo_trunc_pair_fns!`), `src/device/shared/mlp.rs`, `src/device/sliding/projection.rs`
 - **정확도:** hi/lo 합은 여전히 exact(같은 바닥). qkv/ffn의 hi가 반올림 → 절단으로 바뀌어 f32 부분합 분포만 달라짐.
 - **예상:** qkv −553, attn_out −377, ffn −2.2k (≈ 기하평균 +1.3%).
+
+### 측정: 컴파일 실패 (qkv 프로브)
+
+- `commit_view`(pair `m![H % 960]`의 tile `H % 960 = 480 #{!} 960`) ← 스트림(`x: m![H % 480]`에서 fetch) →
+  `visa: Commit: cannot write an input axis into DM (StreamUnmatchedSegment)`. 타입은 통과하나 segment 검사에서 스트림 축
+  (`H % 480` 파생)과 tile 축(`H % 960 = 480`)이 다른 구조로 판정된다. 통하는 경우(attn_out contraction 타일)는 **fetch 원본도
+  같은 `= n` tile view**여서 스트림이 tile 축을 그대로 갖는다.
+- 우회는 x(그리고 그것을 만드는 pass의 입력·VRF 피연산자)까지 2배 버퍼의 tile view로 타입을 바꿔야 해서(normalize 마지막
+  pass → cast pass → hi/lo, gamma VRF 포함) 비용 대비 과하다. pair API(`vector_intra_slice_unzip` … `*_zip`)는 두 그룹을
+  이항 연산으로 **하나로 합치는** 용도라 [hi, lo] 두 출력을 내지 못한다. `TagMode::AxisToggle`은 Ident라 device fn에서 불가.
+- 코드는 되돌림(브랜치에 매크로 미커밋).
+
+### 판정: **실패** (StreamUnmatchedSegment; 단일 store는 tile-view 타입 체인 없이는 불가)
+
+- **배운 것:** `commit_view` tile의 축은 스트림이 **fetch한 view의 축과 같은 sub-axis 구조**여야 한다. HBM→DM tile-view 로드는
+  이 제약이 없으므로, HBM에서 바로 오는 텐서(attn_out x)만 싸게 tile view로 만들 수 있다 — 그러나 f8 cast + commit_view
+  tile은 V29e의 lir ICE 전례가 있어 별도 검증 필요.
 
 ## V38_post_norm_store_from_reducing
 
