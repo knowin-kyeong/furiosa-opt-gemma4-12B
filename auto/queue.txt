@@ -152,3 +152,5 @@ V183_ffn_down_full_rows#v184
 V185_ffn_upgate_row_tiles
 V187_overhead_probes
 V187_overhead_probes#r2
+V188_attnout_tile_sweep
+V188_attnout_tile_sweep#r2
