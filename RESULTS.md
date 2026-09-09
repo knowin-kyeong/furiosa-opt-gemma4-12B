@@ -18,7 +18,7 @@ RNGD cycles만 점수다.
 | `V8_weight_rows_interleaved_dma` | `V7` | weight 행을 4행 블록으로 슬라이스에 교차 배치해 HBM→DM DMA 인터리빙 | 95,433 | 59,225 | 609,223 | 2.235 | — | — | **기각** (makespan; DMA 노드 불변) |
 | `V10_attn_weight_tiles_fused_lut` | `V6` | attn_out weight 5×12행 타일 선로드 + f8→bf16 LUT를 contraction 체인에 융합(V5 흡수); qkv는 융합만(타일화는 역효과) | **93,127** | **53,848** | 412,304 | **2.646** | — | — | makespan 측정 |
 | `V13_ffn_dma_trims` | `V12` | (a) geglu 출력을 HBM 경유로 ByColumns 로드 **채택**; (b) scale 행렬당 1회 로드는 head 증가로 **기각**(354,617) | 93,127 | 50,110 | **348,874** | **2.866** | — | — | makespan 측정 |
-| `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수 | — | — | — | — | — | — | 설계됨 |
+| `V32_attnout_f8_contraction_no_lut` | `V31` | attn_out도 O weight가 f8: x([Qs])를 8슬라이스에서 f8 hi/lo(×2^k)로 만들어 HBM `[Qs/512, Dummy2, Qs%512]`에 두고 슬라이스별 청크를 로드, f8×f8 contraction으로 융합 LUT 3개(`?` 838×3, 타일 pass 1,863→~1k)를 없앰; post-attn RMSNorm이 스케일 흡수. 스케일은 동적 2^k 대신 **상수 16**(attention 출력은 RMS-정규화된 value 행의 볼록결합이라 \|x\| ≤ √256 = 16, \|x·16\| ≤ 256 < 448) | 46,541 | **29,318** | 165,733 | **5.533** | — | — | makespan 측정 |
 | `V31_qkv_f8_contraction_no_lut` | `V30` | qkv 가중치는 이미 f8: x를 f8 hi/lo(×2^k, 16부 사본)로 TRF에 주고 f8×f8 contraction으로 LUT pass 3개(`?` 838×3 DMA, Q LUT 5k Main)를 없앰; q/k/v RMSNorm이 스케일 불변이라 1/s 불필요 | **46,541** | 30,037 | 165,733 | **5.488** | — | — | makespan 측정 |
 | `V30_qkv_rope_tables_direct_gather` | `V29` | rope의 cos/sin 행을 `dma_gather_scaled`로 헤드 레이아웃(두 클러스터, 슬라이스당 1행 복제)에 직접 가져와 HBM hop(store 337 + load 555)×2를 제거 | **48,638** | 30,037 | 165,733 | **5.408** | — | — | makespan 측정 |
 | `V29_ffn_block_scale_after_contract` | `V28` | FFN dequant pass(VE 91k) 제거: f4→f8 LUT를 **f8×f8 contraction**에 직결, 16열 블록 partial을 f32로 내보낸 뒤(pass A) 블록 partial에만 scale(pass B). x는 f8 두 조각(hi/lo, 합이 bf16 x·2^k와 정확히 같음)으로 TRF에, weight 패킷을 Dummy2 시간축으로 2회 스트림해 Time Reducer가 합산. 2^k는 벡터별 max로 동적 선택 | 50,981 | 30,037 | **165,733** | **5.324** | — | — | makespan 측정 |
@@ -49,8 +49,8 @@ RNGD cycles만 점수다.
 
 ## 현재 SOTA
 
-실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V31_qkv_f8_contraction_no_lut`**
-(…+V31 누적, 기하평균 5.488×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
+실측(RNGD) 기준: `V0_baseline` (아직 실측 없음). **makespan 기준 잠정 선두: `V32_attnout_f8_contraction_no_lut`**
+(…+V32 누적, 기하평균 5.533×; V26·V27은 슬롯만 예약됨). 자세한 서사는 [SOTA.md](SOTA.md).
 
 ## 죽은 길 (다시 시도하지 말 것)
 
@@ -352,6 +352,30 @@ L=15360이면 60 × 256.
   타일 pass가 f8×f8 contraction(~1k)이 되고 `?`가 사라진다. 결과는 2^k배지만 post-attn RMSNorm이 흡수(eps만 변화).
 - **변경 파일:** `src/device/sliding/projection.rs`, `src/device/shared/f8split.rs`(V29/V31의 스케일·hi/lo 매크로를 공유 모듈로 이동), `src/ops.rs`
 - **예상:** attn_out −2k ~ −2.5k (DMA −2.5k `?` + 1.1k store; tail pass −0.9k).
+
+### 측정 (변형별, attn_out)
+
+| 변형 | attn_out | 비고 |
+|---|---:|---|
+| V31 | 30,037 | 융합 LUT 타일 3개, `?` 838×3 |
+| V32a (동적 2^k: max x² intra/inter reduce → sqrt → DivF → BitAnd → DivF, hi/lo, HBM 2회 store) | 30,342 | **+0.3k.** DMA 23.6k → 22.4k인데 x 스테이징 체인(8슬라이스 VE pass 7개 + inter reduce + store 2 + load)이 타일 로드보다 앞에 서서 타일 contract 시작이 늦어짐 |
+| V32b (상수 s=16을 `vector_narrow_trim`으로 만듦) | 실패 | `pruning valid value is not allowed`: 전부 live인 패킷은 narrow_trim 불가 |
+| **V32c (상수 s=16을 max x² 패킷(`1 # 8`, 4 live)에서 MulF 0 → AddF 16으로; inter reduce·pow2 체인 제거)** | **29,318** | 채택. DMA busy 22,393. 기하평균 5.533 |
+
+- **상수 스케일의 근거:** attention 출력 = Σ_j p_j v_j, Σ p_j = 1, p_j ≥ 0이고 v_j는 head RMSNorm(gamma 없음) 출력이라
+  rms(v_j) ≈ 1 → 원소 절댓값 ≤ √Ds = 16(Ds = 256; 등호는 한 원소에 에너지가 몰릴 때). 따라서 |x·16| ≤ 256 < 448(e4m3 max),
+  hi/lo 분해는 max|x|/4096 이상에서 exact. 일반적으로 |x| ≪ 16이라 s=16은 동적 2^k보다 작을 수 있어(정밀도 손실 구간이
+  4096분의 1 → 절대오차 ≤ 2^-10/16 = 6e-5) **실측 정확도 검증이 필요**하다. 동적 스케일(V32a)이 필요하다면 +1k 비용.
+- **컴파일러 교훈 (신규):** `vector_narrow_trim`은 live 원소를 잘라내지 못한다(패딩 lane만 제거). 상수 패킷은 기존 패킷에
+  `MulF(Mul0, 0)` → `AddF c`로 만든다. `max_square_fns!`/`hi_lo_fns!`는 슬라이스당 원소 수를 인자로 받도록 일반화해
+  `shared/f8split.rs`로 옮겼다(`#[macro_export]`).
+- **정확도:** hi + lo = bf16(x)·16 exact(|x| ≥ max/4096 구간); post-attn RMSNorm이 16을 흡수(eps 항만 1/256). 실측 검증 필요.
+
+### 판정: makespan 측정 (실측 대기)
+
+- **배운 것:** 이 커널의 x 준비 체인은 타일 로드와 같은 DMA 큐 선두를 두고 경쟁한다. 스테이징 pass 수를 줄이는 게 DMA 바이트를
+  줄이는 것보다 컸다(V32a→V32c −1k). 남은 것: store 2,510(HBM `[H]` 8 KB, 256 desc?) + `[H]` hop, weight-scale 로드 1,318 배치(V27).
+- **다음 후보:** V27(weight-scale 로드를 큐 선두에서 빼기), attn_out tail(store + hop), V26 qkv H-split, ffn down x2 store 1회.
 
 ## V29_ffn_block_scale_after_contract
 
