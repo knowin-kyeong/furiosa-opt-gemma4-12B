@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Ds, E, Gs, Ns};
+use crate::axes::{Ds, E, Gf, Gs, Ns};
 use crate::device::layout::{Cluster, Slice};
 
 type KvHeadsAcrossSlices = m![1 # 32, Ns];
@@ -276,7 +276,53 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
     sin_row.view().to_hbm_view(&mut ctx.tdma, sin_hbm.view_mut());
     let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = cos_hbm.to_dm(&mut ctx.tdma);
     let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = sin_hbm.to_dm(&mut ctx.tdma);
+    rope_heads_from_tables(ctx, q, k, &cos, &sin)
+}
 
+/// `apply_rope_heads` with the cos/sin hop staged in `hop` - an output buffer the host has
+/// already touched, overwritten later by its real contents - instead of two compiler-placed HBM
+/// scratches. On hardware a store into a fresh scratch costs 3-4k cycles more than the same bytes
+/// into a touched buffer (V146/V148 against V82/V145); the two rows go to head rows 0 and 1.
+pub(crate) fn apply_rope_heads_hop<C: M, S: M>(
+    ctx: &mut Context,
+    q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    hop: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+) -> (
+    DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    DmTensor<bf16, Chip, C, S, m![Ds]>,
+) {
+    let cos_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = cos.dma_gather_scaled(rope_offset);
+    let sin_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = sin.dma_gather_scaled(rope_offset);
+    let rows: HbmTensorViewMut<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view_mut().reshape() };
+    cos_row.view().to_hbm_view(&mut ctx.tdma, rows.tile::<m![Gf], 1, m![Gf = 1 #{!} 16, Ds]>(0));
+    let rows: HbmTensorViewMut<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view_mut().reshape() };
+    sin_row.view().to_hbm_view(&mut ctx.tdma, rows.tile::<m![Gf], 1, m![Gf = 1 #{!} 16, Ds]>(1));
+    let rows: HbmTensorView<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view().reshape() };
+    let cos: DmTensor<bf16, Chip, C, S, m![Gf = 1, Ds]> =
+        rows.tile::<m![Gf], 1, m![Gf = 1 # 16, Ds]>(0).to_dm(&mut ctx.tdma);
+    let rows: HbmTensorView<'_, bf16, Chip, m![Gf, Ds]> = unsafe { hop.view().reshape() };
+    let sin: DmTensor<bf16, Chip, C, S, m![Gf = 1, Ds]> =
+        rows.tile::<m![Gf], 1, m![Gf = 1 # 16, Ds]>(1).to_dm(&mut ctx.tdma);
+    let cos: DmTensor<bf16, Chip, C, S, m![Ds]> = unsafe { cos.reshape() };
+    let sin: DmTensor<bf16, Chip, C, S, m![Ds]> = unsafe { sin.reshape() };
+    rope_heads_from_tables(ctx, q, k, &cos, &sin)
+}
+
+/// RoPE on q and k (one head per slice) from cos/sin rows already in that layout.
+fn rope_heads_from_tables<C: M, S: M>(
+    ctx: &mut Context,
+    q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    cos: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    sin: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+) -> (
+    DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    DmTensor<bf16, Chip, C, S, m![Ds]>,
+) {
     let cos_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
         .begin(cos.view())

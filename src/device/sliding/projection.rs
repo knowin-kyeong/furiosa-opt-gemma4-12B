@@ -137,6 +137,19 @@ pub(crate) fn project_output(
     x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
 ) -> HbmTensor<bf16, Chip, m![H]> {
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    project_output_into(ctx, x, weight, &mut gathered_hbm);
+    gathered_hbm
+}
+
+/// `project_output` writing the [H] result into `out` (V152: an output buffer the host has already
+/// touched, instead of a fresh HBM scratch; see rope.rs `apply_rope_heads_hop`).
+pub(crate) fn project_output_into(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    out: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
     // Both clusters do real work: the hidden rows are split across the two clusters and
     // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
     // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
@@ -231,9 +244,7 @@ pub(crate) fn project_output(
     // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
     // store descriptors to 2, costs as much in the switch as it saves: the live slices sit
     // eight apart, so the ring spans all 256 slices, 2,055 cycles for 458 saved on the store.)
-    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
-    gathered_hbm
+    contraction.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
 
 type TwoClusters = m![H / 1920];

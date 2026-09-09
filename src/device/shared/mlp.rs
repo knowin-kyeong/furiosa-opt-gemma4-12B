@@ -384,6 +384,40 @@ pub(crate) fn feedforward(
     down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
     down_global_scale: &HbmTensor<f32, Chip, m![1]>,
 ) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    feedforward_hop(
+        ctx,
+        x2,
+        erf_scale,
+        out_scale,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        down_global_scale,
+        &mut down_hbm,
+    )
+}
+
+/// `feedforward` with the down-projection hop staged in `hop` (V153: an output buffer the host has
+/// already touched - the residual, overwritten by the final store - instead of a fresh HBM
+/// scratch; see rope.rs `apply_rope_heads_hop`).
+pub(crate) fn feedforward_hop(
+    ctx: &mut Context,
+    x2: &HbmTensor<f8e4m3, Chip, m![H / 1920, Dummy2, H % 1920]>,
+    erf_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
+    out_scale: &HbmTensor<f32, Chip, m![1 # 8]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    hop: &mut HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
     // All weight tiles are issued up front into distinct buffers so the loads stream back to
     // back while each tile is dequantized as it lands. up/gate: 4 tiles per matrix (16, 16,
     // 16 and 12 rows); down: 5 tiles (16, 16, 16, 8 and 4 rows), the last one small so that
@@ -475,9 +509,8 @@ pub(crate) fn feedforward(
     // rejected by the synchronization checker), then load it in the layout the post-FF
     // RMSNorm reduces in (8 slices x 480 elements) and apply the global scale there: 1/8 of
     // the pass and no relayout afterwards.
-    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    down.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut());
-    let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
+    down.view().to_hbm_view(&mut ctx.tdma, hop.view_mut());
+    let down = rmsnorm::load_reducing::<Cluster>(ctx, hop);
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
     let down_global_scale_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx

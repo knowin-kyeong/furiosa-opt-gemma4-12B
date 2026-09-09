@@ -364,40 +364,47 @@ async fn rope_table<D: AxisName>(
 
 struct Test {
     name: &'static str,
+    /// Which compiled variant of the kernel to launch ("" = the graded one). Measurement only:
+    /// tests/ is ignored by the grader. Every variant is listed twice in a row so that its first
+    /// launch (cold: program load, first touch) and its second (warm) are both read off one job.
+    variant: &'static str,
     atol: f32,
     rtol: f32,
 }
 
 const RTOL: f32 = 1e-2;
 
+const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
+    Test { name, variant, atol, rtol: RTOL }
+}
+
 const TESTS: &[Test] = &[
-    Test {
-        name: "sliding_project_qkv",
-        atol: 0.04,
-        rtol: RTOL,
-    },
-    Test {
-        name: "sliding_attention_output",
-        atol: 0.05,
-        rtol: RTOL,
-    },
-    Test {
-        name: "decoder_feedforward",
-        atol: 0.01,
-        rtol: RTOL,
-    },
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "v151", 0.04),
+    t("sliding_project_qkv", "v151", 0.04),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "v152", 0.05),
+    t("sliding_attention_output", "v152", 0.05),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "v153", 0.01),
+    t("decoder_feedforward", "v153", 0.01),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "v151", 0.04),
 ];
 
-async fn run_test(ctx: &mut Context, fixture: &Fixture, name: &'static str) -> Vec<(&'static str, Vec<f32>)> {
-    match name {
-        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture).await,
-        "sliding_attention_output" => sliding_attention_output(ctx, fixture).await,
-        "decoder_feedforward" => decoder_feedforward(ctx, fixture).await,
+async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
+    match test.name {
+        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture, test.variant).await,
+        "sliding_attention_output" => sliding_attention_output(ctx, fixture, test.variant).await,
+        "decoder_feedforward" => decoder_feedforward(ctx, fixture, test.variant).await,
         other => panic!("no shim for test `{other}` -- add one in run_test"),
     }
 }
 
-async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("sliding_project_qkv", fixture);
 
     let input_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "input_rms_weight", RMS_WEIGHT).await;
@@ -427,30 +434,49 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
     let mut v_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
     let mut q_out: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = zeros(ctx).await;
 
-    launch(
-        ops::sliding_project_qkv,
-        (
-            ctx,
-            &x,
-            &q_weight,
-            &k_weight,
-            &v_weight,
-            &q_weight_scale,
-            &k_weight_scale,
-            &v_weight_scale,
-            &input_rms_weight,
-            &q_rms_weight,
-            &k_rms_weight,
-            &kv_offset,
-            &rope_offset,
-            &cos,
-            &sin,
-            &mut k_cache,
-            &mut v_cache,
-            &mut q_out,
-        ),
-    )
-    .await;
+    match variant {
+        "" => launch(ops::sliding_project_qkv, (
+                ctx,
+                &x,
+                &q_weight,
+                &k_weight,
+                &v_weight,
+                &q_weight_scale,
+                &k_weight_scale,
+                &v_weight_scale,
+                &input_rms_weight,
+                &q_rms_weight,
+                &k_rms_weight,
+                &kv_offset,
+                &rope_offset,
+                &cos,
+                &sin,
+                &mut k_cache,
+                &mut v_cache,
+                &mut q_out,
+            ),).await,
+        "v151" => launch(ops::sliding_project_qkv_v151, (
+                ctx,
+                &x,
+                &q_weight,
+                &k_weight,
+                &v_weight,
+                &q_weight_scale,
+                &k_weight_scale,
+                &v_weight_scale,
+                &input_rms_weight,
+                &q_rms_weight,
+                &k_rms_weight,
+                &kv_offset,
+                &rope_offset,
+                &cos,
+                &sin,
+                &mut k_cache,
+                &mut v_cache,
+                &mut q_out,
+            ),).await,
+        other => panic!("no qkv variant `{other}`"),
+    }
 
     let width = Ns::SIZE * Ds::SIZE;
     let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
@@ -462,7 +488,7 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
     ]
 }
 
-async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("sliding_attention_output", fixture);
     let x: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = s.signs(ctx, "x", 1.0).await;
     let post_attn_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "post_attn_rms_weight", UNIT).await;
@@ -470,22 +496,29 @@ async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture) -> Vec<(
     let o_weight_scale: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "o_weight_scale", ROW_SCALE).await;
     let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
 
-    launch(
-        ops::sliding_attention_output,
-        (
-            ctx,
-            &x,
-            &post_attn_rms_weight,
-            &o_weight,
-            &o_weight_scale,
-            &mut residual,
-        ),
-    )
-    .await;
+    match variant {
+        "" => launch(ops::sliding_attention_output, (
+                ctx,
+                &x,
+                &post_attn_rms_weight,
+                &o_weight,
+                &o_weight_scale,
+                &mut residual,
+            ),).await,
+        "v152" => launch(ops::sliding_attention_output_v152, (
+                ctx,
+                &x,
+                &post_attn_rms_weight,
+                &o_weight,
+                &o_weight_scale,
+                &mut residual,
+            ),).await,
+        other => panic!("no attn_out variant `{other}`"),
+    }
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
-async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("decoder_feedforward", fixture);
 
     let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
@@ -514,26 +547,41 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
 
     let layer_scalar: HbmTensor<bf16, Chip, m![1 # 8]> = s.constant_bf16(ctx, "layer_scalar", &[LAYER_SCALAR; 8]).await;
 
-    launch(
-        ops::decoder_feedforward,
-        (
-            ctx,
-            &mut residual,
-            &pre_ff_rms_weight,
-            &up_weight_packed,
-            &gate_weight_packed,
-            &down_weight_packed,
-            &up_weight_scale,
-            &gate_weight_scale,
-            &down_weight_scale,
-            &up_global_scale,
-            &gate_global_scale,
-            &down_global_scale,
-            &post_ff_rms_weight,
-            &layer_scalar,
-        ),
-    )
-    .await;
+    match variant {
+        "" => launch(ops::decoder_feedforward, (
+                ctx,
+                &mut residual,
+                &pre_ff_rms_weight,
+                &up_weight_packed,
+                &gate_weight_packed,
+                &down_weight_packed,
+                &up_weight_scale,
+                &gate_weight_scale,
+                &down_weight_scale,
+                &up_global_scale,
+                &gate_global_scale,
+                &down_global_scale,
+                &post_ff_rms_weight,
+                &layer_scalar,
+            ),).await,
+        "v153" => launch(ops::decoder_feedforward_v153, (
+                ctx,
+                &mut residual,
+                &pre_ff_rms_weight,
+                &up_weight_packed,
+                &gate_weight_packed,
+                &down_weight_packed,
+                &up_weight_scale,
+                &gate_weight_scale,
+                &down_weight_scale,
+                &up_global_scale,
+                &gate_global_scale,
+                &down_global_scale,
+                &post_ff_rms_weight,
+                &layer_scalar,
+            ),).await,
+        other => panic!("no ffn variant `{other}`"),
+    }
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
@@ -695,11 +743,11 @@ async fn main() {
     let mut failures = Vec::new();
     for test in TESTS {
         if profile {
-            println!("==> {}", test.name);
+            println!("==> {} {}", test.name, test.variant);
             collector.clear();
         }
 
-        let outputs = run_test(&mut ctx, &fixture, test.name).await;
+        let outputs = run_test(&mut ctx, &fixture, test).await;
 
         let cycles = if profile {
             // Spans are decoded off the launch hot path during deferred read-back, not
@@ -718,9 +766,9 @@ async fn main() {
         let mut ok = true;
         for (label, actual) in &outputs {
             let display = if outputs.len() == 1 {
-                test.name.to_string()
+                format!("{} {}", test.name, test.variant)
             } else {
-                format!("{} {}", test.name, label.trim_start_matches("expected."))
+                format!("{} {} {}", test.name, test.variant, label.trim_start_matches("expected."))
             };
             ok &= compare(&display, fixture.expect(test.name, label), actual, test.atol, test.rtol);
         }
