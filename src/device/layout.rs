@@ -63,3 +63,10 @@ pub(crate) fn broadcast_full_heads(
 
     unsafe { x.reshape() }
 }
+
+/// V217: one channel per slice. Slice `d` holds channel `d` of every query/key/value head its
+/// cluster owns, so a head's 256 channels lie across the 256 slices instead of on one of them.
+/// That makes the head RMSNorm an inter-slice reduce instead of a ring-64 gather, turns the RoPE
+/// tables and the per-channel scales into one value per slice instead of 256, and lets the weight
+/// arrive as eight 3,840-byte 256-byte-aligned runs (V215: 514 B/cycle against 465).
+pub(crate) type ChannelSlices = m![Ds];

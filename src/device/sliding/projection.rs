@@ -4,7 +4,7 @@ use furiosa_opt_std::prelude::*;
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
 use crate::hi_lo_trunc_fns;
-use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
+use crate::device::layout::{BothClusters, ChannelSlices, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
 // 256 slices per cluster, 8 rows each.
@@ -274,4 +274,54 @@ fn apply_output_channel_scale(
     }
 
     output
+}
+
+// ---------------------------------------------------------------------------------------------
+// V217: the query projection distributed by channel instead of by row.
+//
+// Production splits Qs across slices, so slice p owns rows 8p..8p+8 - one 30,720-byte run, which
+// V208 measured at 465 B/cycle, and a ring-64 switch afterwards to collect each head onto one
+// slice. Here the *channel* axis Ds owns the slices: slice d holds channel d of every head the
+// cluster owns, so its element axis is (kv head, query group) and each of its eight weight
+// segments is one whole row - 3,840 bytes, 256-byte aligned. V215 measured that shape at
+// 514 B/cycle. The ring-64 gather disappears because the result is already where it belongs.
+// ---------------------------------------------------------------------------------------------
+
+pub(crate) type QueryChannelWeight = DmTensor<f8e4m3, Chip, HeadClusters, ChannelSlices, m![Ns % 4, Gs, H]>;
+
+pub(crate) fn load_query_weight_channels(
+    ctx: &mut Context,
+    weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+) -> QueryChannelWeight {
+    // Qs is Ns x Gs x Ds in wire order, so this relabel moves no data.
+    let w: HbmTensorView<'_, f8e4m3, Chip, m![Ns, Gs, Ds, H]> = unsafe { weight.view().reshape() };
+    w.to_dm(&mut ctx.tdma)
+}
+
+pub(crate) fn project_query_channels(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    weight_f8: &QueryChannelWeight,
+) -> DmTensor<bf16, Chip, HeadClusters, ChannelSlices, m![Ns % 4, Gs]> {
+    let x: DmTensorView<'_, f8e4m3, Chip, HeadClusters, ChannelSlices, m![Dummy2, H]> =
+        unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, HeadClusters, ChannelSlices, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    ctx.main
+        .begin(weight_f8.view())
+        .fetch::<m![Ns % 4, Gs, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Ns % 4, Gs, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ns % 4, Gs, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ns % 4, Gs]>()
+        .contract_lane::<m![Ns % 4, Gs], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Gs], m![Ns % 4 # 16]>()
+        .commit_trim::<m![Ns % 4]>()
+        .commit()
 }
