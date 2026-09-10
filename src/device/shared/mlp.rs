@@ -1140,10 +1140,10 @@ pub(crate) fn feedforward_v181(
     // RMSNorm reduces in (8 slices x 480 elements) and apply the global scale there: 1/8 of
     // the pass and no relayout afterwards.
     let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    down_a.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(0));
-    down_b.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(4));
-    down_c.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(8));
-    down_d.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(11));
+    down_a.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 #{!} 15]>(0));
+    down_b.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 #{!} 15]>(4));
+    down_c.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 #{!} 15]>(8));
+    down_d.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 #{!} 15]>(11));
     let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
