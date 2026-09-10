@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Dummy2, Dummy256, Dummy8, H, L};
+use crate::axes::{C, Dummy2, Dummy256, Dummy8, H, L};
 use crate::device::layout::{Cluster, Slice};
 use crate::device::shared::rmsnorm::{self, ReducingSlices};
 use crate::{hi_lo_fns, max_square_fns, pow2_scale_fns, stage_packet_fns};
@@ -967,12 +967,19 @@ pub(crate) fn feedforward_v181(
     let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
     let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
 
-    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, 1 # 32], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
+    // V206: sixty-four copies per cluster and a ring of 4, not eight copies and a ring of 32.
+    // The switch is pure movement on MainContext, and ffn's MainContext (83.5k static cycles) is
+    // the resource that actually binds this kernel, so trading ring cycles for DMA descriptors
+    // pays: 3/3 Arena jobs, -16,351 cycles (-5.3%). The static makespan predicts the opposite
+    // (+144), which is the point - the schedule believes this work hides behind the weight
+    // stream and on hardware it does not. qkv is a different case (its Main is small next to its
+    // stream, and its x2 region is re-read by every copy), so qkv keeps ring 32.
+    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![C, 1 # 4], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![C, Dummy256 / 64], m![Dummy2, H]> = ctx
         .main
         .begin(x8.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .switch::<m![C, Dummy256 / 64], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 4 })
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .commit_trim::<m![H % 32]>()
         .commit();
