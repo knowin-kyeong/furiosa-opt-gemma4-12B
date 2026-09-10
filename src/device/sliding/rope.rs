@@ -483,11 +483,10 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
     // the lower half. sin already carries the sign of the rotation per output position.
     let sin_lo_vrf: VrfTensor<f32, Chip, C, S, m![Ds = 128]> = ctx
         .sub
-        .begin(
-            cs.view()
-                .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1)
-                .tile::<m![Ds], 128, m![Dummy2 = 1, Ds = 128 # 256]>(0),
-        )
+        // cs is [cos(256), sin(256)] in one element axis, so sin's halves are the 128-wide
+        // windows at 256 and 384 of the flattened 512. Chaining two tiles is rejected -- the
+        // second one's mapping has to describe the whole underlying extent, not the first tile's.
+        .begin(cs.view().tile::<m![Ds], 128, m![Ds = 128 # 512]>(256))
         .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
@@ -495,11 +494,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
 
     let sin_hi_vrf: VrfTensor<f32, Chip, C, S, m![Ds = 128]> = ctx
         .sub
-        .begin(
-            cs.view()
-                .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1)
-                .tile::<m![Ds], 128, m![Dummy2 = 1, Ds = 128 # 256]>(128),
-        )
+        .begin(cs.view().tile::<m![Ds], 128, m![Ds = 128 # 512]>(384))
         .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
