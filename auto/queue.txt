@@ -165,3 +165,6 @@ V191_production_rope_tiles#c2
 V191_production_rope_tiles#c3
 V192_rope_blend_fused
 V192_rope_blend_fused#r2
+V193_final_candidate
+V193_final_candidate#r2
+V193_final_candidate#r3
