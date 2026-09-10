@@ -2963,21 +2963,26 @@ fn geglu_to_down_slices(
     ctx: &mut Context,
     pair: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsGathered, m![Dummy2, L % 480]>,
 ) -> DmTensor<f8e4m3, Chip, DownClustersL, DownRowsByColumnsL, m![Dummy2, L % 1920]> {
-    let chunks: DmTensor<f8e4m3, Chip, UpGateClusters, m![1 # 64, L / 1920 % 4], m![Dummy2, L % 1920]> = ctx
+    // The ring delivers packet-major -- every slice's packet r before packet r + 1 (V167 read it
+    // slice-major and came out permuted) -- so the gathered buffer is [packet, source slice] and
+    // the second pass's fetch reads it back in L order, which costs nothing.
+    let chunks: DmTensor<f8e4m3, Chip, UpGateClusters, m![1 # 64, L / 1920 % 4], m![Dummy2, L / 32 % 15, L / 480 % 4, L % 32]> = ctx
         .main
         .begin(pair.view())
         .fetch::<m![Dummy2, L / 32 % 15], m![L % 32]>()
-        .switch::<m![1 # 64, L / 1920 % 4], m![Dummy2, L / 32 % 15]>(SwitchConfig::Broadcast1 { slice1: 4, slice0: 16 })
-        .collect::<m![Dummy2, L / 32 % 60], m![L % 32]>()
+        .switch::<m![1 # 64, L / 1920 % 4], m![Dummy2, L / 32 % 15, L / 480 % 4]>(SwitchConfig::Broadcast1 { slice1: 4, slice0: 16 })
+        .collect::<m![Dummy2, L / 32 % 15, L / 480 % 4], m![L % 32]>()
         .commit_trim::<m![L % 32]>()
         .commit();
 
-    let all: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy256 / 4, L / 1920 % 4], m![Dummy2, L % 1920]> = ctx
+    // L % 1920 = (L / 480 % 4) * 480 + (L / 32 % 15) * 32 + (L % 32), so this fetch order makes the
+    // broadcast's output element natural L order with no repacking pass.
+    let all: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy256 / 4, L / 1920 % 4], m![Dummy2, L / 480 % 4, L / 32 % 15, L % 32]> = ctx
         .main
         .begin(chunks.view())
-        .fetch::<m![Dummy2, L / 32 % 60], m![L % 32]>()
-        .switch::<m![Dummy256 / 4, L / 1920 % 4], m![Dummy2, L / 32 % 60]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
-        .collect::<m![Dummy2, L / 32 % 60], m![L % 32]>()
+        .fetch::<m![Dummy2, L / 480 % 4, L / 32 % 15], m![L % 32]>()
+        .switch::<m![Dummy256 / 4, L / 1920 % 4], m![Dummy2, L / 480 % 4, L / 32 % 15]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
+        .collect::<m![Dummy2, L / 480 % 4, L / 32 % 15], m![L % 32]>()
         .commit_trim::<m![L % 32]>()
         .commit();
 
