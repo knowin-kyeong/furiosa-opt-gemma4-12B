@@ -475,6 +475,11 @@ V200 = 6.229, **V209 = 6.30**. 공식 draw 기준(V204가 받은 나쁜 attn_out
 남은 측정된 미수확 항목은 **qkv 런 길이 −6.5%(V217이 열어야 함)** 하나뿐이고, 그 외 V178(head-norm 9→5 pass,
 ≈−2k)·V179(RoPE ternary, ≈−1k)가 미측정으로 남아 있다. **V217 없이는 6.4 근처가 상한이다.**
 
+**V217의 게이팅 질문은 이미 통과했다(`V217_probe_reduce_256`):** `vector_inter_slice_reduce::<m![1 # 256], …>`가
+lowering을 통과하고 정적 비용도 무시할 수준이다(저장소 최대는 지금까지 32슬라이스였다). 즉 채널 분산 head
+레이아웃에서 head RMSNorm을 switch 없이 VRU로 할 수 있다. 제약은 Way8 → Way4 `vector_narrow_split`을
+reduce 앞에 걸어야 한다는 것뿐이다. **다음 세션은 이 브랜치에서 시작해 `project_query`부터 바꾼다.**
+
 ### 10.0d 2026-09-10 저녁 — V209 채택, 그리고 정렬 벌점의 발견 (가장 최신, 여기서 시작할 것)
 
 **Arena 후보: `V209_ffn_ring4_production`** (V204_submit + ffn x broadcast ring 4). 잡 5개, 15/15 PASS,
