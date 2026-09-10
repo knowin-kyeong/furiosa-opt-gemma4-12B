@@ -397,6 +397,10 @@ const TESTS: &[Test] = &[
     t("sliding_attention_output", "b60", 0.05),
     t("sliding_attention_output", "b32", 0.05),
     t("sliding_attention_output", "b16", 0.05),
+    // The harness insists every fixture expectation is read, so one qkv and one ffn run
+    // stay in the list; they also anchor this job against the other jobs in the campaign.
+    t("sliding_project_qkv", "", 0.04),
+    t("decoder_feedforward", "", 0.01),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
