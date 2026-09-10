@@ -450,6 +450,36 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
+### 10.0d 2026-09-10 저녁 — V209 채택, 그리고 정렬 벌점의 발견 (가장 최신, 여기서 시작할 것)
+
+**Arena 후보: `V209_ffn_ring4_production`** (V204_submit + ffn x broadcast ring 4). 잡 5개, 15/15 PASS,
+**ffn 317,445 → 294,574**, qkv·attn_out 불변 → 공식 draw 가정 기하평균 **≈ 6.05**(현 공식 5.9032, +2.5%).
+`src/device/`만 바뀌므로 그대로 제출 가능. **제출은 사용자 지시 대기.**
+
+**리더보드(공개 API `curl -k https://micro2026-api.duckdns.org:7777/api/leaderboard`): 등록 팀은 둘뿐이다.**
+우리(Goat Chovy #1557)와 Participant #905(123,470 / 53,028 / 315,050 = 5.6669). 상대 ffn도 같은 벽 앞이다.
+
+**새 실측 사실 두 개.**
+1. **256 B 정렬 벌점은 실재하고 크다(V211, 3/3 잡).** 같은 29.5 MB를 down weight 레이아웃으로 추가 로드했을 때
+   현행 8청크(960 B 런, 6개가 미정렬) **399 B/cycle** vs 2청크(3,840 B 런, 전부 정렬) **509 B/cycle** —
+   **15,951 cycle 차이**. 비율 1.28은 "런이 granule 4개 대신 5개를 건드린다"의 5/4와 정확히 맞는다.
+   **ffn은 지금 이 벌점을 물고 있다.**
+2. **겹치는 타일은 합법이고 정확하다(V214).** 마지막 down 타일을 16@48+4@56 대신 **16@44**로 두면 행 44~47이
+   두 번 계산·기록되는데 결과가 비트 단위로 같다(PASS, max\|Δ\| 동일). 대가는 겹친 행 수만큼의 계산(+7.6k).
+   → **4의 배수가 아닌 행 수를 4행 transpose 규칙 아래서 덮는 법**이 생겼다.
+
+**그런데 (1)의 적용(V213)은 컴파일러가 막는다.** 2청크 레이아웃은 슬라이스당 15행이라 출력 버퍼가 30 B가 되고
+(`not a multiple of the SRAM access width 8`), 32 B나 40 B로 패딩하면 **컴파일러가 SIGABRT로 죽는다** —
+V202b와 같은 크래시다. 구현은 `V213_ffn_down_two_chunks`에 전부 있다. 다음 세션은 (a) `DownRows2`의
+live 슬라이스 2개짜리 inter-slice reduce를 의심해 stride를 바꿔보거나, (b) cargo-furiosa-opt 0.7.0으로
+재시도하거나, (c) 출력 패킹을 transpose 없이 재구성한다. **이것이 남은 최대 판돈(−16k 이상)이다.**
+
+**이번에 구조적으로 닫힌 것.**
+- **x의 hi/lo 분해는 하드웨어 요구사항이다.** Lane으로 옮기는 길(V210)은 Lane fold 규칙(Interleaved는 OutPacket이
+  정확히 `Lane # 8`, Sequential은 Lane이 OutTime 맨 끝)과 `StoVrf` 거부로 막히고, bf16 고정 피연산자(V212)는
+  `bf16: ContractionWeight<f8e4m3>` · `f8e4m3: FetchCast<bf16>` 부재로 막힌다.
+- V는 정말로 RMSNorm된다(`gemma4.py`의 `v_norm = RMSNorm(head_dim, eps, with_scale=False)`) — 지울 수 없다.
+
 ### 10.0c 2026-09-10 오후 — 실물 비용 모델을 바꾼 측정 (가장 최신, 여기서 시작할 것)
 
 **한 줄:** 벽은 대역폭이 아니었다. **커널 시간의 절반은 바이트와 무관한 고정비이고, 그 정체는 커널마다 다르다.**
