@@ -723,7 +723,7 @@ macro_rules! down_tile2_fns {
             scale_all: &DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns2, m![H % 15, L / 16 % 480]>,
             inv_s_vrf: &VrfTensor<f32, Chip, DownClusters, DownRowsByColumns2, m![1 # 8]>,
             offset: usize,
-            out: &mut DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 16]>,
+            out: &mut DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 20]>,
         ) {
             let scale_vrf: VrfTensor<f32, Chip, DownClusters, DownRowsByColumns2, m![H % 15 = $rows, L / 16 % 480]> = ctx
                 .sub
@@ -749,7 +749,7 @@ macro_rules! down_tile2_fns {
                 .cast::<bf16, m![1 # 16]>()
                 .transpose::<m![H % 15 = $rows / 4], m![H % 15 = $rows % 4 # 16]>()
                 .commit_trim::<m![H % 15 = $rows % 4]>()
-                .commit_view(out.view_mut().tile::<m![H % 15], $rows, m![H % 15 = $rows #{!} 16]>(offset));
+                .commit_view(out.view_mut().tile::<m![H % 15], $rows, m![H % 15 = $rows #{!} 20]>(offset));
         }
     };
 }
@@ -1120,7 +1120,7 @@ pub(crate) fn feedforward_v181(
         .collect::<m![Dummy2, L / 32 % 240], m![L % 32]>()
         .to_trf();
 
-    let mut down: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 16]> = DmTensor::new();
+    let mut down: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 20]> = DmTensor::new();
     let p = contract_down2_rows_4(ctx, &x_trf, &down0);
     reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
     let p = contract_down2_rows_4(ctx, &x_trf, &down1);
