@@ -184,14 +184,25 @@ pub(crate) fn stage_x_hi_lo_qkv_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    // m1: the two pieces are gathered into one buffer on the slices that already hold them, so
+    // the staging costs one DMA command instead of two.
+    let mut x2: DmTensor<f8e4m3, Chip, Cluster, ReducingSlices, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(1));
+    x2.view().to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut());
     x2_hbm
 }
-
 /// The geglu output (gathered, eight row groups per slice) as two f8 pieces of x * s_c, s_c chosen
 /// per cluster from the cluster-wide max x^2 (each slice's max is broadcast to every slice of the
 /// cluster over a ring-256 switch and reduced there). Written to an HBM scratch laid out so that a
@@ -850,11 +861,23 @@ pub(crate) fn stage_x_hi_lo_hbm_full(
     let inv_s_vrf = stage_packet_reducing(ctx, &inv_s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    // m1: the two pieces are gathered into one buffer on the slices that already hold them, so
+    // the staging costs one DMA command instead of two.
+    let mut x2: DmTensor<f8e4m3, Chip, Cluster, ReducingSlices, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(1));
+    x2.view().to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut());
 
     // The geglu scalars.
     let s_up: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = up_global_scale.to_dm(&mut ctx.tdma);
@@ -911,7 +934,6 @@ pub(crate) fn stage_x_hi_lo_hbm_full(
     out_one.view().to_hbm_view(&mut ctx.tdma, out_hbm.view_mut());
     (x2_hbm, erf_hbm, out_hbm)
 }
-
 pub(crate) fn feedforward_v181(
     ctx: &mut Context,
     x2: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
