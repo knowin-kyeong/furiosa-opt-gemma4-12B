@@ -1064,3 +1064,52 @@ pub(crate) fn feedforward_v181(
 
     down
 }
+
+// ---------------------------------------------------------------------------------------------
+// V211: is ffn's down weight paying a 256-byte alignment penalty?
+//
+// The down weight is m![H, L] f4, so one row is 7,680 bytes. `DownRowsByColumns` splits L into
+// eight column chunks, giving each slice a 1,920-nibble (960-byte) run per row. Chunk c starts at
+// c * 960 bytes and 960 mod 256 = 192, so six of the eight chunks begin mid-granule: every run
+// crosses one more 256-byte boundary than it needs to, which the book prices at 2x for reads.
+//
+// V200a and V202a computed this from the model and cancelled themselves; nobody measured it.
+// V208 has since shown the model was optimistic - misaligned 1,920-byte runs came in at
+// 385 B/cycle against 465 for aligned 30,720-byte ones - so measure it the same way.
+//
+// q0 = one extra 29.5 MB load in the production layout (960-byte misaligned runs).
+// q1 = the same bytes in two column chunks: 128 row groups x 2 chunks, 15 rows per slice, so the
+//      run is 7,680 nibbles = 3,840 bytes and every chunk starts 256-byte aligned.
+// The difference between the two increments is the alignment penalty, with nothing else moving.
+// ---------------------------------------------------------------------------------------------
+
+/// Extra down-weight load in the production layout: 960-byte runs, six of eight misaligned.
+pub(crate) fn probe_down_weight_960(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![H, L]>) {
+    let probe: DmTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![H % 60, L % 1920]> =
+        packed.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![1], m![H % 60 = 1, L % 1920]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 60], 1, m![H % 60 = 1 # 60, L % 1920]>(0))
+        .fetch::<m![H % 60 = 1, L / 64 % 30], m![L % 64]>()
+        .collect::<m![H % 60 = 1, L / 64 % 30], m![L % 64]>()
+        .to_trf();
+}
+
+/// The same bytes in 3,840-byte runs, every chunk 256-byte aligned.
+pub(crate) fn probe_down_weight_3840(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![H, L]>) {
+    let probe: DmTensor<f4e2m1, Chip, DownClusters, m![H / 15 % 128, L / 7680], m![H % 15, L % 7680]> =
+        packed.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<
+        f4e2m1,
+        Chip,
+        DownClusters,
+        m![H / 15 % 128, L / 7680],
+        m![1],
+        m![H % 15 = 1, L % 7680],
+    > = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 15], 1, m![H % 15 = 1 # 15, L % 7680]>(0))
+        .fetch::<m![H % 15 = 1, L / 64 % 120], m![L % 64]>()
+        .collect::<m![H % 15 = 1, L / 64 % 120], m![L % 64]>()
+        .to_trf();
+}
