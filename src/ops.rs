@@ -488,6 +488,29 @@ pub fn sliding_attention_output(
 /// V251: the f8 split of x done on all 512 slices, with no HBM round trip.
 /// V253: the contraction stored per tile so only the small last store is on the RAW path.
 /// V254: four row groups ringed together before the contraction store.
+/// V255: the post-attention RMSNorm in the contraction's own layout (the V45 slot).
+#[device(chip = 1)]
+pub fn sliding_attention_output_norm(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    sliding::projection::project_output_norm(ctx, x, o_weight, o_weight_scale, post_attn_rms_weight, residual_hbm);
+}
+
+/// V240 sweep: the attention-output contraction with sequential lanes.
+/// V240 sweep: the O-weight rows in three tiles (44/44/32) instead of two.
+/// V247: the attention-output epilogue loads hoisted ahead of the weight stream.
+/// V248: the attention-output contraction with a 32-element fetch packet.
+/// V251: the f8 split of x done on all 512 slices, with no HBM round trip.
+/// V253: the contraction stored per tile so only the small last store is on the RAW path.
+/// V254: four row groups ringed together before the contraction store.
 #[device(chip = 1)]
 pub fn sliding_attention_output_gathered(
     ctx: &mut Context,

@@ -1024,3 +1024,226 @@ pub(crate) fn project_output_gathered(
     gathered_hbm
 }
 
+
+const H_F32_OUT: f32 = H::SIZE as f32;
+pub(crate) fn project_output_norm(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    channel_scale: &HbmTensor<bf16, Chip, m![H]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // Both clusters do real work: the hidden rows are split across the two clusters and
+    // then across 32 row groups per cluster, and Qs across 8 column chunks, so each of the
+    // 512 slices owns 60 rows x 512 columns (30 KB f8) and needs only an eighth of x. The
+    // rows come in two tiles, 44 then 16, issued up front into distinct buffers, so the
+    // contraction of one tile overlaps the loads of the rest. The eight chunk
+    // partials are summed across slices within a cluster; the per-channel weight scale is
+    // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
+    // keeps its load out of the front of the DMA queue.
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 88, Qs % 256]> = weight
+        .view()
+        .tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 32, Qs % 256]> = weight
+        .view()
+        .tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 # 120, Qs]>(88)
+        .to_dm(&mut ctx.tdma);
+
+    // V251: the f8 split runs where the contraction needs it, on all 512 slices, instead of on
+    // sixteen slices with an HBM round trip in between. The old path was load 535 -> split ->
+    // store 399 -> store 399 -> load 933, and the 527 cycles the DMA engine sat idle waiting for
+    // the split were what delayed the whole O-weight stream to cycle 2,464. Loading x straight
+    // into the contraction's own layout costs the same 933 (each slice still reads 512 B: 256
+    // bf16 now instead of 2 x 256 f8) and drops the three other commands entirely.
+    // s = 16 is safe without measuring: the attention output is a convex combination of the
+    // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
+    let xs: DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns256, m![Qs % 256]> = x.to_dm(&mut ctx.tdma);
+    let x = hi_lo_pair_direct(ctx, &xs, 16f32);
+    let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![1], m![Dummy2, Qs % 256]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Dummy2, Qs / 32 % 8], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 120 = 88, Qs / 64 % 4, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 120 = 88, Qs / 64 % 4, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 120 = 88, Qs / 64 % 4, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 120 = 88]>()
+        .contract_lane::<m![H % 120 = 88], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 88]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 120 = 88 / 4], m![H % 120 = 88 % 4 # 16]>()
+        .commit_trim::<m![H % 120 = 88 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 120 = 32, Qs / 64 % 4, Dummy2], m![Qs % 64]>()
+        .collect::<m![H % 120 = 32, Qs / 64 % 4, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 120 = 32, Qs / 64 % 4, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 120 = 32]>()
+        .contract_lane::<m![H % 120 = 32], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 32]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 120 = 32 / 4], m![H % 120 = 32 % 4 # 16]>()
+        .commit_trim::<m![H % 120 = 32 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 120], 32, m![H % 120 = 32 #{!} 120]>(88));
+
+    // V255 (the V45 slot): the post-attention RMSNorm runs where the contraction leaves its
+    // result, so the [H] vector never round-trips through HBM. What crosses the clusters is one
+    // f32 scalar instead of 7,680 bytes: store 2,040 + reload 546 become a 4-byte store and a
+    // 4-byte load, and the read-after-write latency between them is covered by the three operand
+    // loads that have to happen anyway.
+    //
+    // The reduce order is what blocked this twice before. After the chunk reduce the live slices
+    // are the row groups -- the *outer* slice axis -- and the VRU only reduces the innermost one
+    // (V186). Ringing the sixteen per-slice partials onto one slice first turns the cross-slice
+    // sum into an intra-slice one, and it moves 16 x 32 B, not the whole vector.
+    let scale_dm: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> =
+        channel_scale.to_dm(&mut ctx.tdma);
+    let gamma_dm: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> =
+        rms_weight.to_dm(&mut ctx.tdma);
+    let resid_dm: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> =
+        residual_hbm.to_dm(&mut ctx.tdma);
+
+    let scale_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows256, m![H % 120]> = ctx
+        .sub
+        .begin(scale_dm.view())
+        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .to_vrf();
+
+    // Per-slice sum of squares of x * scale.
+    let ms: DmTensor<f32, Chip, TwoClusters, HiddenRows256, m![1 # 8]> = ctx
+        .main
+        .begin(contraction.view())
+        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 30], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    // The sixteen row-group partials onto one slice, then summed there.
+    let ringed: DmTensor<f32, Chip, TwoClusters, m![1 # 256], m![H / 120 % 16, 1 # 8]> = ctx
+        .main
+        .begin(ms.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .switch::<m![1 # 256], m![H / 120 % 16]>(SwitchConfig::Broadcast1 { slice1: 16, slice0: 16 })
+        .collect::<m![H / 120 % 16], m![1 # 8]>()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let half: DmTensor<f32, Chip, TwoClusters, m![1 # 256], m![1 # 8]> = ctx
+        .main
+        .begin(ringed.view())
+        .fetch::<m![H / 120 % 16], m![1 # 8]>()
+        .collect::<m![H / 120 % 16], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    // One f32 across the clusters, instead of the whole [H].
+    let mut halves_hbm: HbmTensor<f32, Chip, m![H / 1920, 1 # 8]> = HbmTensor::new();
+    half.view().to_hbm_view(&mut ctx.tdma, halves_hbm.view_mut());
+    let halves: DmTensor<f32, Chip, TwoClusters, HiddenRows256, m![H / 1920, 1 # 8]> =
+        halves_hbm.to_dm(&mut ctx.tdma);
+
+    let mean_square: DmTensor<f32, Chip, TwoClusters, HiddenRows256, m![1 # 8]> = ctx
+        .main
+        .begin(halves.view())
+        .fetch::<m![H / 1920], m![1 # 8]>()
+        .collect::<m![H / 1920], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(H_F32_OUT)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_clip(ClipBinaryOpF32::Add, crate::EPS)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let rms: DmTensor<f32, Chip, TwoClusters, HiddenRows256, m![1 # 8]> = ctx
+        .main
+        .begin(mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let gamma_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows256, m![H % 120]> = ctx
+        .sub
+        .begin(gamma_dm.view())
+        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .to_vrf();
+    let resid_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows256, m![H % 120]> = ctx
+        .sub
+        .begin(resid_dm.view())
+        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .to_vrf();
+    let rms_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRows256, m![1 # 8]> = ctx
+        .sub
+        .begin(rms.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+
+    let out: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> = ctx
+        .main
+        .begin(contraction.view())
+        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 15], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 30], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_fp_binary(FpBinaryOp::DivF, &rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &gamma_vrf)
+        .vector_fp_binary(FpBinaryOp::AddF, &resid_vrf)
+        .vector_widen_concat::<m![H / 8 % 15], m![H % 8]>()
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit();
+
+    out.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
