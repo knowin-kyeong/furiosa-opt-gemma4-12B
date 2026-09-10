@@ -392,12 +392,12 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[
-    "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &[""; 3];
+const QKV_SWEEP: &[&str] = &[
+    "", "bc", "bc", "", "", "bc", "bc", "", "", "bc", "bc", "",
+];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
 
@@ -537,6 +537,32 @@ async fn sliding_project_qkv(
             "ck" => {
                 launch(
                     ops::sliding_project_qkv_chunked,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "bc" => {
+                launch(
+                    ops::sliding_project_qkv_bc,
                     (
                         ctx,
                         &x,

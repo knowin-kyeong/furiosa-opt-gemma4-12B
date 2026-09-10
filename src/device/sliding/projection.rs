@@ -1774,3 +1774,114 @@ pub(crate) fn project_output_1p_split(
         );
     unsafe { gathered_hbm.reshape() }
 }
+
+/// E1/V262: the weight packet is fetched once and replayed across the two f8 pieces.
+///
+/// The weight has no `Dummy2` axis, so `fetch::<m![.., Dummy2], ..>` reads every 64 B packet from
+/// DM twice, once per piece. `contract_outer`'s stream adapter exists to avoid exactly that: from
+/// furiosa-opt-lower-0.6.0 `verify/engine/contraction/outer/stream_adapter.rs`,
+/// `OutTime = [outer Time, broadcast]` with the broadcast (tiling) axes innermost, and
+/// `tiling_size = OutTime.size() / time_outer.size()`. Dropping `Dummy2` from the fetch and the
+/// collect leaves `tiling_size = 2` with `Dummy2` already innermost in `OutTime`, so the adapter
+/// re-sends the same packet for the second piece. Contraction cycles are unchanged; DM read
+/// traffic halves. Unlike V257 this is exact for any x, so it survives into Stage 2.
+pub(crate) fn project_query_bc(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    weight_f8: &QueryWeight,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
+    // x (two f8 pieces whose sum is bf16 x times a power of two) is replicated onto every
+    // slice of both clusters. Each weight packet is streamed twice (the Dummy2 time axis) so
+    // the Time Reducer adds the dot products with the two pieces.
+    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Qs % 8, H / 64], m![H % 64]>()
+        .collect::<m![Qs % 8, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Qs % 8, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Qs % 8]>()
+        .contract_lane::<m![Qs % 8], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Qs / 4 % 2], m![Qs % 4 # 16]>()
+        .commit_trim::<m![Qs % 4]>()
+        .commit();
+
+    // The per-channel weight scale is applied by the query RMSNorm that follows (loaded there
+    // in the head layout with eight descriptors instead of 512 here).
+    // Each cluster holds four heads spread over 64 slices x 8 rows each; a ring-64 gather
+    // puts every head on one slice, the layout the query RMSNorm and RoPE work in, without
+    // leaving the cluster (the two clusters then post-process their four heads in parallel).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 8], m![Ds % 8]> =
+        unsafe { contraction.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 8 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Gs, Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Gs, Ds / 8], m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
+
+fn project_one_kv_matrix_bc(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]>,
+    weight_f8: &KvWeight,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+    let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Ps % 4, H / 64], m![H % 64]>()
+        .collect::<m![Ps % 4, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps % 4, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ps % 4]>()
+        .contract_lane::<m![Ps % 4], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![1], m![Ps % 4 # 16]>()
+        .commit_trim::<m![Ps % 4]>()
+        .commit();
+
+    // The per-channel weight scale is applied by the head RMSNorm that follows.
+    // Ring-64 gather to one head per slice within the cluster (see project_query).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 4], m![Ds % 4]> =
+        unsafe { contraction.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 4 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Ds / 4]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Ds / 4], m![Ds % 4 # 16]>()
+        .commit_trim::<m![Ds % 4]>()
+        .commit()
+}
+
+pub(crate) fn project_key_value_bc(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    k_weight: &KvWeight,
+    v_weight: &KvWeight,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let k = project_one_kv_matrix_bc(ctx, &x_trf, k_weight);
+    let v = project_one_kv_matrix_bc(ctx, &x_trf, v_weight);
+
+    (k, v)
+}
