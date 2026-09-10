@@ -544,6 +544,36 @@ broadcast로 바꾸면 8슬라이스가 같은 데이터를 받아 청크 선택
 다만 **회계를 다시 하면 순이득은 5 pass가 아니라 3 pass**다(kv를 공유 버퍼로 옮기는 사본 +1, k용 gamma·1 버퍼 준비 +2,
 scatter용 k·v 추출 +2). 실물 ≈ **−1.8k (qkv −1.8%)**. switch가 bf16 대신 f32를 나르는 비용은 미측정이다.
 
+#### ⑩ "3개 ctx를 모두 쓴다"와 "연산 순서 interleave"는 둘 다 닫혔다 (V247·V248)
+
+사용자가 지목한 세 축을 각각 실측했고 **셋 다 중립**이다.
+
+| 축 | 실험 | 결과 |
+|---|---|---:|
+| 세 컨텍스트를 모두 쓴다 | qkv head-norm sqrt pass 3개를 `ctx.sub`로 | **+312 (중립)** |
+| 커널 내 연산 순서 interleave | attn_out epilogue 로드 3개를 스트림 앞으로 | **+358 (중립)** |
+| contract 3중 합 스윕 | attn_out fetch 패킷 64 → 32원소 | **+130 (중립)** |
+
+의미가 큰 것은 첫 번째다. **`ctx.sub`는 vector 체인을 돌려 DM에 commit할 수 있다**(V223의 제약은
+`fetch_table_lookup`이 Main 전용이라는 것이었다). 그런데 Main에서 3 pass를 덜어냈는데 실물이 안 움직였다.
+⇒ **V218의 "pass당 ≈600"은 컨텍스트별 발행비가 아니라 PE core의 in-order 발행비이고, 컨텍스트를 나눠도
+겹치지 않는다.** RULES §8이 적어둔 "Main과 Sub는 Tensor Unit 파이프라인을 두고 경합한다"가 실물로 확인됐다.
+
+**이것은 V47(down global scale을 eps로)의 기대값도 뒤집는다:** 그 변경은 Main pass 1개를 지우고 Sub pass 2개를
+만드는데, Sub pass가 Main pass만큼 비싸다면 **순증**이다. 구현하지 않는다.
+
+두 번째는 V21·V42와 같은 결론이다 — **스케줄러는 소스 순서를 되돌려 놓고, 그 배치가 이미 최선이다.**
+
+세 번째로 **contract 3중 합 스윕 전체가 닫힌다**: Packet↔Time은 실측 중립(book 모델대로), Lane은 qkv·attn_out에서
+이미 8차선 만석이고 ffn의 4/8은 V235가 닫았다.
+
+#### ⑪ flash attention은 이 대회에 적용할 대상이 없다
+
+Stage 1의 채점 커널 셋은 **투영 2개(qkv, attention output)와 FFN**이다. softmax·attention matrix를 계산하는
+`ops::sliding_attention`은 **채점 대상이 아니다**(RULES §0의 표). flash attention이 최적화하는 것은 정확히 그
+softmax·KV 타일링이므로 여기에는 걸 데가 없다. 같은 이유로 KV cache 압축·paged attention류도 Stage 1에는 무효다.
+(Stage 2 E2E에서는 이야기가 달라진다.)
+
 #### 다음 세션이 먼저 할 일
 
 1. **draw를 수확한다.** 이번 세션도 코드 이득은 −686(ffn −0.23%)뿐이고, 같은 커밋의 draw 분포는 σ≈2.8%다.
