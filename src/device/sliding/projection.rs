@@ -563,3 +563,66 @@ pub(crate) fn project_output_t3(
     contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
     gathered_hbm
 }
+
+/// V244 gating probe: can a vector chain follow a `switch`, and does its VRF operand use the
+/// post-switch slice mapping? If yes, the per-channel weight scale can be folded into the
+/// ring-64 gather, the head norms stop needing a scale VRF, and V239's merged tail becomes
+/// reachable (RULES 10.0k (5)).
+pub(crate) fn project_query_gather_scaled(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    weight_f8: &QueryWeight,
+    channel_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
+    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Qs % 8, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Qs % 8, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Qs % 8, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Qs % 8]>()
+        .contract_lane::<m![Qs % 8], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Qs / 4 % 2], m![Qs % 4 # 16]>()
+        .commit_trim::<m![Qs % 4]>()
+        .commit();
+
+    // The scale in the head layout, i.e. the mapping the switch writes into.
+    let channel_scale: HbmTensorView<'_, bf16, Chip, m![Ns, Gs, Ds]> = unsafe { channel_scale.view().reshape() };
+    let scale_dm: DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> =
+        channel_scale.to_dm(&mut ctx.tdma);
+    let scale_vrf: VrfTensor<f32, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> = ctx
+        .sub
+        .begin(scale_dm.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 8], m![Ds % 8]> =
+        unsafe { contraction.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 8]>()
+        .fetch_cast::<f32>()
+        .switch::<HeadSlicesPerCluster, m![Gs, Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
