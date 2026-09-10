@@ -393,9 +393,15 @@ const BASE: &[&str] = &[""; REPS];
 /// eats the cold transition (V225's Latin square).
 const FFN_SWEEP: &[&str] = &[""; 3];
 
-const QKV_SWEEP: &[&str] = &[""; 3];
+const QKV_SWEEP: &[&str] = &[
+    "", "sb", "sb", "", "", "sb", "sb", "", "", "sb", "sb", "",
+    "", "sb", "sb", "", "", "sb", "sb", "", "", "sb", "sb", "",
+];
 
-const ATTN_SWEEP: &[&str] = &[""; 3];
+const ATTN_SWEEP: &[&str] = &[
+    "", "hl", "hl", "", "", "hl", "hl", "", "", "hl", "hl", "",
+    "", "hl", "hl", "", "", "hl", "hl", "", "", "hl", "hl", "",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
