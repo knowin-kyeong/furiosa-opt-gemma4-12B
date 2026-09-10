@@ -387,21 +387,24 @@ const REPS: usize = 13;
 #[allow(dead_code)]
 const BASE: &[&str] = &[""; REPS];
 
-/// V237/V238: production ffn against the four-tile down stage (`t4`) and the four-column-chunk
-/// down layout (`d4`), rotated so no variant always eats the cold transition (V225's Latin square).
-const FFN_SWEEP: &[&str] = &[
-    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
-    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
-    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
-    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
+/// V238's four-tile down stage against production, and V239's merged qkv tail against its own.
+/// Rotated in pairs so neither side always eats the cold transition (V225's Latin square).
+const FFN_AB: &[&str] = &[
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
 ];
 
-/// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
+const QKV_AB: &[&str] = &[
+    "", "m", "m", "", "", "m", "m", "", "", "m", "m", "",
+    "", "m", "m", "", "", "m", "m", "", "", "m", "m", "",
+];
+
+/// Just enough launches of attn_out to keep the accuracy guardrail honest.
 const GUARD: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
-    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: GUARD },
+    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_AB },
+    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_AB },
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: GUARD },
 ];
 
@@ -532,19 +535,43 @@ async fn sliding_project_qkv(
                 )
                 .await;
             }
+            "m" => {
+                launch(
+                    ops::sliding_project_qkv_v239,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if i == 0 {
+        if plan.order[..i].iter().all(|seen| seen != variant) {
             let width = Ns::SIZE * Ds::SIZE;
             let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
             let v = read_bf16(ctx, &v_cache).await[slot * width..(slot + 1) * width].to_vec();
-            outputs = vec![
-                ("expected.q", read_bf16(ctx, &q_out).await),
-                ("expected.k", k),
-                ("expected.v", v),
-            ];
+            outputs.push(("expected.q", read_bf16(ctx, &q_out).await));
+            outputs.push(("expected.k", k));
+            outputs.push(("expected.v", v));
         }
     }
     outputs
