@@ -377,22 +377,16 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
-    t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
-    t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
-    t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
     t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
+    t("decoder_feedforward", "g1", 0.01),
     t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
+    t("decoder_feedforward", "g1", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "g1", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "g1", 0.01),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_attention_output", "", 0.05),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
@@ -551,6 +545,22 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture, variant: &str
 
     match variant {
         // VARIANTS:decoder_feedforward
+        "g1" => launch(ops::decoder_feedforward_g1, (
+            ctx,
+            &mut residual,
+            &pre_ff_rms_weight,
+            &up_weight_packed,
+            &gate_weight_packed,
+            &down_weight_packed,
+            &up_weight_scale,
+            &gate_weight_scale,
+            &down_weight_scale,
+            &up_global_scale,
+            &gate_global_scale,
+            &down_global_scale,
+            &post_ff_rms_weight,
+            &layer_scalar,
+        )).await,
         "s2" => launch(ops::decoder_feedforward_s2, (
             ctx,
             &mut residual,
