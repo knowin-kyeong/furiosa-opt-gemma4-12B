@@ -689,7 +689,7 @@ fn contract_up_gate_full(
     ctx: &mut Context,
     x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
-) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, Dummy2, H / 16]> {
+) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]> {
     ctx.main
         .begin(packed.view())
         .fetch::<m![L % 30, H / 64], m![H % 64]>()
@@ -700,7 +700,7 @@ fn contract_up_gate_full(
         .contract_time::<m![L % 30, H / 64]>()
         // Sequential relocates Lane into OutTime; Interleaved would put it in OutPacket and run
         // the eight-wide output bus at a quarter rate with only two active lanes.
-        .contract_lane::<m![L % 30, Dummy2, H / 64], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
+        .contract_lane::<m![L % 30, H / 64, Dummy2], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
         .commit_trim::<m![H / 16 % 4]>()
         .commit()
 }
@@ -711,32 +711,29 @@ macro_rules! up_gate_reduce_full_fns {
     ($reduce:ident, $rows:literal) => {
         fn $reduce(
             ctx: &mut Context,
-            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, Dummy2, H / 16]>,
+            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]>,
             scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]>,
             offset: usize,
-            piece: usize,
             out: &mut DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
         ) {
-            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 16]> = ctx
+            // One block scale serves both f8 pieces, so the fetch replays it over the Dummy2 axis
+            // the pass-A output now carries. Tile heights are halved against V204 because the VRF
+            // operand is twice as long and the VRF holds 8 KB per slice.
+            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 64, Dummy2, H / 16 % 4]> = ctx
                 .sub
                 .begin(scale_all.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
-                .fetch::<m![L % 30 = $rows], m![H / 16]>()
+                .fetch::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
                 .fetch_cast::<f32>()
-                .collect::<m![L % 30 = $rows, H / 128], m![H / 16 % 8]>()
+                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
                 .to_vrf();
 
             ctx.main
-                .begin(
-                    partials
-                        .view()
-                        .tile::<m![Dummy2], 1, m![L % 30, Dummy2 = 1 #{!} 2, H / 16]>(piece)
-                        .tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, Dummy2 = 1, H / 16]>(offset),
-                )
-                .fetch::<m![L % 30 = $rows, H / 128], m![H / 16 % 8]>()
-                .collect::<m![L % 30 = $rows, H / 128], m![H / 16 % 8]>()
+                .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 64, Dummy2, H / 16 % 4]>(offset))
+                .fetch::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
+                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
                 .vector_init()
                 .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![L % 30 = $rows, H / 64], m![H / 16 % 4]>()
+                .vector_narrow_split::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
                 .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
                 .vector_intra_slice_reduce::<H, m![L % 30 = $rows], m![1 # 4]>(IntraSliceReduceOpF32::Add)
                 .vector_widen_pad::<m![1 # 8]>()
@@ -746,36 +743,8 @@ macro_rules! up_gate_reduce_full_fns {
         }
     };
 }
-up_gate_reduce_full_fns!(reduce_up_gate_full_8, 8);
-up_gate_reduce_full_fns!(reduce_up_gate_full_6, 6);
-
-/// V210: add the two f8-piece results. Each is one f32 scalar per row (30 per slice), so this
-/// costs nothing next to the halved LUT+contract work in pass A.
-fn add_x_pieces_full(
-    ctx: &mut Context,
-    a: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
-    b: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
-) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> {
-    let b_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = ctx
-        .sub
-        .begin(b.view())
-        .fetch::<m![L % 30], m![1 # 8]>()
-        .collect::<m![L % 30], m![1 # 8]>()
-        .to_vrf();
-
-    ctx.main
-        .begin(a.view())
-        .fetch::<m![L % 30], m![1 # 8]>()
-        .collect::<m![L % 30], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_fp_binary(FpBinaryOp::AddF, &b_vrf)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit()
-}
+up_gate_reduce_full_fns!(reduce_up_gate_full_4, 4);
+up_gate_reduce_full_fns!(reduce_up_gate_full_2, 2);
 
 /// geglu on the row-scalar packets of one slice (up and gate rows of the same slice).
 fn geglu_full(
@@ -1033,29 +1002,24 @@ pub(crate) fn feedforward_v181(
 
     let up_partials = contract_up_gate_full(ctx, &x_trf, &up_w);
     let gate_partials = contract_up_gate_full(ctx, &x_trf, &gate_w);
-    let mut up0: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
-    let mut up1: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
-    let mut gate0: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
-    let mut gate1: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 0, 0, &mut up0);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 0, 0, &mut gate0);
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 8, 0, &mut up0);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 8, 0, &mut gate0);
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 16, 0, &mut up0);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 16, 0, &mut gate0);
-    reduce_up_gate_full_6(ctx, &up_partials, &up_scale, 24, 0, &mut up0);
-    reduce_up_gate_full_6(ctx, &gate_partials, &gate_scale, 24, 0, &mut gate0);
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 0, 1, &mut up1);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 0, 1, &mut gate1);
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 8, 1, &mut up1);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 8, 1, &mut gate1);
-    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 16, 1, &mut up1);
-    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 16, 1, &mut gate1);
-    reduce_up_gate_full_6(ctx, &up_partials, &up_scale, 24, 1, &mut up1);
-    reduce_up_gate_full_6(ctx, &gate_partials, &gate_scale, 24, 1, &mut gate1);
-
-    let up = add_x_pieces_full(ctx, &up0, &up1);
-    let gate = add_x_pieces_full(ctx, &gate0, &gate1);
+    let mut up: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
+    let mut gate: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 4, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 4, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 8, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 8, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 12, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 12, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 16, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 16, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 20, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 20, &mut gate);
+    reduce_up_gate_full_4(ctx, &up_partials, &up_scale, 24, &mut up);
+    reduce_up_gate_full_4(ctx, &gate_partials, &gate_scale, 24, &mut gate);
+    reduce_up_gate_full_2(ctx, &up_partials, &up_scale, 28, &mut up);
+    reduce_up_gate_full_2(ctx, &gate_partials, &gate_scale, 28, &mut gate);
 
     let g = geglu_full(ctx, up, gate, erf_scale, out_scale);
     let x = gather_pack_full(ctx, &g);
