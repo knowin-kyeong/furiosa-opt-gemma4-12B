@@ -364,42 +364,45 @@ async fn rope_table<D: AxisName>(
 
 struct Test {
     name: &'static str,
+    /// "" is the graded kernel; anything else selects an experiment variant in the shim below.
+    variant: &'static str,
     atol: f32,
     rtol: f32,
+}
+
+const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
+    Test { name, variant, atol, rtol: RTOL }
 }
 
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    // Measurement only (tests/ is ignored by the grader): every kernel five times in one job,
-    // so a job shows the cold (first) launch and a median/stdev over four warm repeats.
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
+    // V215: one extra 15.73 MB query-weight load. p1 keeps the production block mapping
+    // (one 30,720-byte run per slice); p8 uses a cyclic row mapping so the same bytes arrive
+    // as eight 3,840-byte runs, still one DMA command and still 256-byte aligned.
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
+    t("sliding_project_qkv", "p8", 0.04),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
+    t("sliding_project_qkv", "p8", 0.04),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
+    t("sliding_project_qkv", "p8", 0.04),
+    t("sliding_attention_output", "", 0.05),
+    t("decoder_feedforward", "", 0.01),
 ];
 
-async fn run_test(ctx: &mut Context, fixture: &Fixture, name: &'static str) -> Vec<(&'static str, Vec<f32>)> {
-    match name {
-        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture).await,
+async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
+    match test.name {
+        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture, test.variant).await,
         "sliding_attention_output" => sliding_attention_output(ctx, fixture).await,
         "decoder_feedforward" => decoder_feedforward(ctx, fixture).await,
         other => panic!("no shim for test `{other}` -- add one in run_test"),
     }
 }
 
-async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("sliding_project_qkv", fixture);
 
     let input_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "input_rms_weight", RMS_WEIGHT).await;
@@ -429,9 +432,8 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
     let mut v_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
     let mut q_out: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = zeros(ctx).await;
 
-    launch(
-        ops::sliding_project_qkv,
-        (
+    match variant {
+        "p1" => launch(ops::sliding_project_qkv_p1, (
             ctx,
             &x,
             &q_weight,
@@ -450,9 +452,49 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
             &mut k_cache,
             &mut v_cache,
             &mut q_out,
-        ),
-    )
-    .await;
+        )).await,
+        "p8" => launch(ops::sliding_project_qkv_p8, (
+            ctx,
+            &x,
+            &q_weight,
+            &k_weight,
+            &v_weight,
+            &q_weight_scale,
+            &k_weight_scale,
+            &v_weight_scale,
+            &input_rms_weight,
+            &q_rms_weight,
+            &k_rms_weight,
+            &kv_offset,
+            &rope_offset,
+            &cos,
+            &sin,
+            &mut k_cache,
+            &mut v_cache,
+            &mut q_out,
+        )).await,
+        "" => launch(ops::sliding_project_qkv, (
+            ctx,
+            &x,
+            &q_weight,
+            &k_weight,
+            &v_weight,
+            &q_weight_scale,
+            &k_weight_scale,
+            &v_weight_scale,
+            &input_rms_weight,
+            &q_rms_weight,
+            &k_rms_weight,
+            &kv_offset,
+            &rope_offset,
+            &cos,
+            &sin,
+            &mut k_cache,
+            &mut v_cache,
+            &mut q_out,
+        )).await,
+        other => panic!("no variant `{other}` for sliding_project_qkv"),
+    };
 
     let width = Ns::SIZE * Ds::SIZE;
     let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
@@ -701,7 +743,7 @@ async fn main() {
             collector.clear();
         }
 
-        let outputs = run_test(&mut ctx, &fixture, test.name).await;
+        let outputs = run_test(&mut ctx, &fixture, test).await;
 
         let cycles = if profile {
             // Spans are decoded off the launch hot path during deferred read-back, not
