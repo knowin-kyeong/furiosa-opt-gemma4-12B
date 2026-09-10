@@ -618,3 +618,58 @@ pub(crate) fn head_rms_vrf_row<C: M, S: M>(
         .collect::<m![1], m![1 # 8]>()
         .to_vrf()
 }
+
+/// V239 bisect probe: the merged head norms writing q and k into their own tensors, so the
+/// original RoPE can consume them. Tells the merged sqrt apart from the merged RoPE.
+pub(crate) fn head_normalize_query_out<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]>,
+    weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
+    rms_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, 1 # 8]>,
+) -> DmTensor<bf16, Chip, C, S, m![Gs, Ds]> {
+    let x: DmTensorView<'_, bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = unsafe { x.view().reshape() };
+    let out: DmTensor<bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = ctx
+        .main
+        .begin(x)
+        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ns / 2 = 2, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
+        .vector_fp_binary(FpBinaryOp::DivF, rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), weight_vrf)
+        .vector_widen_concat::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit();
+    unsafe { out.reshape() }
+}
+
+pub(crate) fn head_normalize_row_out<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
+    weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
+    rms_vrf: &VrfTensor<f32, Chip, C, S, m![1 # 8]>,
+) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
+        .vector_fp_binary(FpBinaryOp::DivF, rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), weight_vrf)
+        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
