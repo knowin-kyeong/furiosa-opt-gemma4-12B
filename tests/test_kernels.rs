@@ -392,15 +392,15 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[
-    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
-    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &[""; 3];
+const ATTN_SWEEP: &[&str] = &[
+    "", "dx", "dx", "", "", "dx", "dx", "", "", "dx", "dx", "",
+    "", "dx", "dx", "", "", "dx", "dx", "", "", "dx", "dx", "",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -654,6 +654,174 @@ async fn sliding_attention_output(
             "" => {
                 launch(
                     ops::sliding_attention_output,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_attention_output_seq,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t3" => {
+                launch(
+                    ops::sliding_attention_output_t3,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "hl" => {
+                launch(
+                    ops::sliding_attention_output_hoist,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_attention_output_seq,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t3" => {
+                launch(
+                    ops::sliding_attention_output_t3,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "p32" => {
+                launch(
+                    ops::sliding_attention_output_p32,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_attention_output_seq,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t3" => {
+                launch(
+                    ops::sliding_attention_output_t3,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "hl" => {
+                launch(
+                    ops::sliding_attention_output_hoist,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_attention_output_seq,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t3" => {
+                launch(
+                    ops::sliding_attention_output_t3,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "dx" => {
+                launch(
+                    ops::sliding_attention_output_direct,
                     (
                         ctx,
                         &x,
