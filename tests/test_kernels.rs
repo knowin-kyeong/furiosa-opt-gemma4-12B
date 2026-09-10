@@ -377,25 +377,22 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    // V206 job A: the qkv x-broadcast ring sweep, four rounds, adjacent variants only.
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "r16", 0.04),
-    t("sliding_project_qkv", "r8", 0.04),
-    t("sliding_project_qkv", "r4", 0.04),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "r16", 0.04),
-    t("sliding_project_qkv", "r8", 0.04),
-    t("sliding_project_qkv", "r4", 0.04),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "r16", 0.04),
-    t("sliding_project_qkv", "r8", 0.04),
-    t("sliding_project_qkv", "r4", 0.04),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "r16", 0.04),
-    t("sliding_project_qkv", "r8", 0.04),
-    t("sliding_project_qkv", "r4", 0.04),
-    t("sliding_attention_output", "", 0.05),
+    // V206 job B: the ffn x-broadcast ring sweep. ffn MainContext (83.5k static) is far
+    // larger relative to its DMA than qkv's, so the ring may pay here even though it did not there.
     t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "r16", 0.01),
+    t("decoder_feedforward", "r8", 0.01),
+    t("decoder_feedforward", "r4", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "r16", 0.01),
+    t("decoder_feedforward", "r8", 0.01),
+    t("decoder_feedforward", "r4", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "r16", 0.01),
+    t("decoder_feedforward", "r8", 0.01),
+    t("decoder_feedforward", "r4", 0.01),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_attention_output", "", 0.05),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
