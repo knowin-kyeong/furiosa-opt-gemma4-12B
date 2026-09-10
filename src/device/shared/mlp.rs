@@ -687,15 +687,15 @@ fn broadcast_scalar_full(
 /// Pass A over all 30 rows and all of H: per-16-column-block partial dot products.
 fn contract_up_gate_full(
     ctx: &mut Context,
-    x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]>,
+    x_trf: &TrfTensor<bf16, Chip, UpGateClusters, UpGateRowsFull, m![1], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
 ) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> {
     ctx.main
         .begin(packed.view())
-        .fetch::<m![L % 30, H / 64, Dummy2], m![H % 64]>()
+        .fetch::<m![L % 30, H / 64], m![H % 64]>()
         .fetch_table_lookup::<f8e4m3>()
-        .collect::<m![L % 30, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
-        .contract_outer::<m![L % 30, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .collect::<m![L % 30, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![L % 30, H / 64], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![H / 16 % 4]>()
         .contract_time::<m![L % 30, H / 64]>()
         .contract_lane::<m![L % 30, H / 64], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
@@ -984,10 +984,15 @@ pub(crate) fn feedforward_v181(
         .commit_trim::<m![H % 32]>()
         .commit();
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]> = unsafe { x.reshape() };
-    let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]> = ctx
+    // V212: can the stationary operand be bf16 while the weight stream stays f8? If so the
+    // hi/lo split of x is unnecessary here, the Dummy2 replay disappears from the pass-A fetch,
+    // and the result is more accurate rather than less (bf16 keeps eight mantissa bits where
+    // hi+lo reconstructs the same value from two f8 pieces).
+    let x_trf: TrfTensor<bf16, Chip, UpGateClusters, UpGateRowsFull, m![1], m![H]> = ctx
         .sub
         .begin(x.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .fetch_cast::<bf16>()
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .to_trf();
 
