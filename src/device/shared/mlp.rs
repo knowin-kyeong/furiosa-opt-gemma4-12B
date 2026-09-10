@@ -737,45 +737,29 @@ fn contract_up_gate_full_lane(
         .commit()
 }
 
-/// Pass B against partials that carry `Dummy2`. One block scale serves both pieces, so the fetch
-/// replays it over `Dummy2` **in Time** and the collect regroups the replayed value into the
-/// 32-byte packet. Tile heights halve against production because the VRF operand is twice as long
-/// and the register file holds 8 KB per slice ($rows x 60 x 2 x 4 x 4 B).
-macro_rules! up_gate_reduce_lane_fns {
-    ($reduce:ident, $rows:literal) => {
-        fn $reduce(
-            ctx: &mut Context,
-            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]>,
-            scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]>,
-            offset: usize,
-            out: &mut DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
-        ) {
-            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 64, Dummy2, H / 16 % 4]> = ctx
-                .sub
-                .begin(scale_all.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
-                .fetch::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
-                .fetch_cast::<f32>()
-                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
-                .to_vrf();
-
-            ctx.main
-                .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 64, Dummy2, H / 16 % 4]>(offset))
-                .fetch::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
-                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
-                .vector_init()
-                .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
-                .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
-                .vector_intra_slice_reduce::<H, m![L % 30 = $rows], m![1 # 4]>(IntraSliceReduceOpF32::Add)
-                .vector_widen_pad::<m![1 # 8]>()
-                .vector_final()
-                .commit_trim::<m![1 # 8]>()
-                .commit_view(out.view_mut().tile::<m![L % 30], $rows, m![L % 30 = $rows #{!} 30, 1 # 8]>(offset));
-        }
-    };
+/// Sum the two f8 pieces away, restoring the layout production pass B already reads.
+///
+/// Replaying the block scale over `Dummy2` inside pass B is what killed V210 (`StoVrf`: the packet
+/// part must not be broadcast) and, once the replay moves to Time, it merely halves pass B's tile
+/// height and doubles its flit count -- which costs more than pass A saves. Folding the pieces in
+/// one pass of its own leaves pass B completely untouched: the packet is [Dummy2, 4 blocks] = 32 B
+/// going in and 4 blocks = 16 B coming out.
+fn fold_x_pieces(
+    ctx: &mut Context,
+    partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]>,
+) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> {
+    ctx.main
+        .begin(partials.view())
+        .fetch::<m![L % 30, H / 64], m![Dummy2, H / 16 % 4]>()
+        .collect::<m![L % 30, H / 64], m![Dummy2, H / 16 % 4]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![L % 30, H / 64, Dummy2], m![H / 16 % 4]>()
+        .vector_intra_slice_reduce::<Dummy2, m![L % 30, H / 64], m![H / 16 % 4]>(IntraSliceReduceOpF32::Add)
+        .vector_final()
+        .commit_trim::<m![H / 16 % 4]>()
+        .commit()
 }
-up_gate_reduce_lane_fns!(reduce_up_gate_lane_4, 4);
-up_gate_reduce_lane_fns!(reduce_up_gate_lane_2, 2);
 
 /// Pass B for one tile of `$rows` rows: block scales and the column reduction, one f32 scalar
 /// packet per row (no transpose, so any tile height works).
@@ -1200,24 +1184,18 @@ pub(crate) fn feedforward_v235(
 
     let up_partials = contract_up_gate_full_lane(ctx, &x_trf, &up_w);
     let gate_partials = contract_up_gate_full_lane(ctx, &x_trf, &gate_w);
+    let up_partials = fold_x_pieces(ctx, &up_partials);
+    let gate_partials = fold_x_pieces(ctx, &gate_partials);
     let mut up: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
     let mut gate: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 0, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 0, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 4, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 4, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 8, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 8, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 12, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 12, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 16, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 16, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 20, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 20, &mut gate);
-    reduce_up_gate_lane_4(ctx, &up_partials, &up_scale, 24, &mut up);
-    reduce_up_gate_lane_4(ctx, &gate_partials, &gate_scale, 24, &mut gate);
-    reduce_up_gate_lane_2(ctx, &up_partials, &up_scale, 28, &mut up);
-    reduce_up_gate_lane_2(ctx, &gate_partials, &gate_scale, 28, &mut gate);
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 0, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 0, &mut gate);
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 8, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 8, &mut gate);
+    reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 16, &mut up);
+    reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 16, &mut gate);
+    reduce_up_gate_full_6(ctx, &up_partials, &up_scale, 24, &mut up);
+    reduce_up_gate_full_6(ctx, &gate_partials, &gate_scale, 24, &mut gate);
 
     let g = geglu_full(ctx, up, gate, erf_scale, out_scale);
     let x = gather_pack_full(ctx, &g);
