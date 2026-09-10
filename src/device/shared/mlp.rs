@@ -954,8 +954,11 @@ pub(crate) fn stage_x_hi_lo_hbm_full(
 // Pass B is capped by the scale VRF (8 KB): 240 f32 columns per row allows 8 rows per tile, not
 // 16, so pass A keeps the tile heights of the weight loads and pass B tiles the partials buffer
 // independently, the way V181's up/gate stage does.
-pub(crate) type DownRows4 = m![H / 60 % 32, 1 # 4];
-pub(crate) type DownRowsByColumns4 = m![H / 60 % 32, L / 3840];
+// A DM allocation has to span all 256 slices, so the half of them this layout does not use is
+// spent as a dead `1 # 2` axis (the same idiom `DownRows` uses to leave seven of eight idle).
+// The chunk axis stays innermost because the VRU reduces over it (V186).
+pub(crate) type DownRows4 = m![H / 60 % 32, 1 # 2, 1 # 4];
+pub(crate) type DownRowsByColumns4 = m![H / 60 % 32, 1 # 2, L / 3840];
 
 stage_packet_fns!(stage_packet_down4, DownClusters, DownRowsByColumns4);
 
@@ -1094,12 +1097,12 @@ fn broadcast_inv_s_down4(
     ctx: &mut Context,
     v: &HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>,
 ) -> VrfTensor<f32, Chip, DownClusters, DownRowsByColumns4, m![1 # 8]> {
-    let two: DmTensor<f32, Chip, DownClusters, m![1 # 64, L / 7680], m![1 # 8]> = v.to_dm(&mut ctx.tdma);
-    let all: DmTensor<f32, Chip, DownClusters, m![Dummy256 / 8, L / 7680, Dummy2], m![1 # 8]> = ctx
+    let two: DmTensor<f32, Chip, DownClusters, m![1 # 128, L / 7680], m![1 # 8]> = v.to_dm(&mut ctx.tdma);
+    let all: DmTensor<f32, Chip, DownClusters, m![Dummy256 / 8, Dummy2, L / 7680, Dummy2], m![1 # 8]> = ctx
         .main
         .begin(two.view())
         .fetch::<m![1], m![1 # 8]>()
-        .switch::<m![Dummy256 / 8, L / 7680, Dummy2], m![1]>(SwitchConfig::CustomBroadcast { ring_size: 128 })
+        .switch::<m![Dummy256 / 8, Dummy2, L / 7680, Dummy2], m![1]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
         .collect::<m![1], m![1 # 8]>()
         .commit_trim::<m![1 # 8]>()
         .commit();
