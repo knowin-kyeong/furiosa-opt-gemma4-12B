@@ -1064,3 +1064,45 @@ pub(crate) fn feedforward_v181(
 
     down
 }
+
+// ---------------------------------------------------------------------------------------------
+// V216: ffn up/gate has the longest weight runs anywhere in this kernel set.
+//
+// `UpGateRowsFull` gives each slice thirty whole rows, so its f4 weight arrives as one contiguous
+// 57,600-byte run. V181 moved to that shape and won 31k, but V197 later showed the run-length
+// curve is still falling at 2,048 bytes and V208 measured qkv's 30,720-byte runs at 465 B/cycle
+// against 509 for the 3,840-byte aligned runs V211 measured. So the V181 win was the inter-slice
+// reduce it removed, and the run length it introduced may be costing some of it back.
+//
+// A row is 1,920 bytes, which is only 128-byte aligned, but a *pair* of rows is 3,840 = 15 x 256.
+// So a cyclic mapping over row pairs - slice p owns rows 2p, 2p+1 and every 512th after - turns
+// the one 57,600-byte run into fifteen 3,840-byte aligned ones, with the same single DMA command
+// and the same bytes. q0 is production, q1 is the cyclic form.
+// ---------------------------------------------------------------------------------------------
+
+/// Production shape: thirty consecutive rows per slice, one 57,600-byte run.
+pub(crate) fn probe_upgate_block(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let probe: DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]> = packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = 1, H]> = ctx
+        .main
+        .begin(probe.view().tile::<m![L % 30], 1, m![L % 30 = 1 # 30, H]>(0))
+        .fetch::<m![L % 30 = 1, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 30 = 1, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+}
+
+/// Cyclic row pairs: fifteen 3,840-byte runs per slice, every one 256-byte aligned.
+pub(crate) fn probe_upgate_cyclic(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let probe: DmTensor<f4e2m1, Chip, UpGateClusters, m![L / 2 % 256], m![L / 512 % 15, L % 2, H]> =
+        packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, UpGateClusters, m![L / 2 % 256], m![L % 2 = 1, H]> = ctx
+        .main
+        .begin(probe.view().tile::<m![L / 512 % 15], 1, m![L / 512 % 15 = 1 # 15, L % 2 = 1 # 2, H]>(0))
+        .fetch::<m![L % 2 = 1, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 2 = 1, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+}
