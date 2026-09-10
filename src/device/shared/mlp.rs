@@ -3337,12 +3337,12 @@ pub(crate) fn feedforward_v260(
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    let mut down_hbm: HbmTensor<bf16, Chip, m![H / 60, H % 60]> = HbmTensor::new();
     down.view()
         .tile::<m![H % 60], 48, m![H % 60 = 48 # 60]>(0)
         .to_hbm_view(
             &mut ctx.tdma,
-            down_hbm.view_mut().tile::<m![H % 60], 48, m![H % 60 = 48 #{!} 60]>(0),
+            down_hbm.view_mut().tile::<m![H % 60], 48, m![H / 60, H % 60 = 48 #{!} 60]>(0),
         );
     let p = contract_down_rows_12(ctx, &x_trf, &down3);
     reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
@@ -3362,8 +3362,9 @@ pub(crate) fn feedforward_v260(
         .tile::<m![H % 60], 12, m![H % 60 = 12 # 60]>(48)
         .to_hbm_view(
             &mut ctx.tdma,
-            down_hbm.view_mut().tile::<m![H % 60], 12, m![H % 60 = 12 #{!} 60]>(48),
+            down_hbm.view_mut().tile::<m![H % 60], 12, m![H / 60, H % 60 = 12 #{!} 60]>(48),
         );
+    let down_hbm: HbmTensor<bf16, Chip, m![H]> = unsafe { down_hbm.reshape() };
     let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);

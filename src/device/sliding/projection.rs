@@ -1750,20 +1750,22 @@ pub(crate) fn project_output_1p_split(
     // V260: the store split on the *tile* boundary, 88 + 32, so tile0's rows go out while tile1
     // is still loading. V253 split 60/60 -- which does not line up with the tiles -- so its first
     // store still had to wait for tile1 and it only measured the cost of an extra command.
-    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+    // The scratch carries its block structure explicitly so an offset tile is well formed; a
+    // flat m![H] view that starts 88 elements in is an `unpad`, not a tile, and is rejected.
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H / 120, H % 120]> = HbmTensor::new();
     contraction
         .view()
         .tile::<m![H % 120], 88, m![H % 120 = 88 # 120]>(0)
         .to_hbm_view(
             &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120]>(0),
+            gathered_hbm.view_mut().tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 #{!} 120]>(0),
         );
     contraction
         .view()
         .tile::<m![H % 120], 32, m![H % 120 = 32 # 120]>(88)
         .to_hbm_view(
             &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 32, m![H % 120 = 32 #{!} 120]>(88),
+            gathered_hbm.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 120]>(88),
         );
-    gathered_hbm
+    unsafe { gathered_hbm.reshape() }
 }
