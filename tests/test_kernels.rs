@@ -400,7 +400,9 @@ const QKV_SWEEP: &[&str] = &[
     "", "ck", "ck", "", "", "ck", "ck", "", "", "ck", "ck", "",
 ];
 
-const ATTN_SWEEP: &[&str] = &[""; 3];
+const ATTN_SWEEP: &[&str] = &[
+    "", "1p", "1p", "", "", "1p", "1p", "", "", "1p", "1p", "",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -616,6 +618,20 @@ async fn sliding_attention_output(
             "dx" => {
                 launch(
                     ops::sliding_attention_output_direct,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "1p" => {
+                launch(
+                    ops::sliding_attention_output_one_piece,
                     (
                         ctx,
                         &x,
