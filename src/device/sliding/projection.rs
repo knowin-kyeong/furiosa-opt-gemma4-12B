@@ -1711,6 +1711,13 @@ pub(crate) fn project_output_1p_split(
         .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
         .to_trf();
 
+    // V260: rows 0..60 are complete once tile0 (88 rows) has contracted, so that half is stored
+    // while tile1 is still loading; only the second half sits on the critical path. The split has
+    // to divide the 120-row block evenly -- an offset tile that reaches less far than the buffer
+    // is an `unpad`, which the HBM side has no API for -- so it is 60/60 rather than the 88/32
+    // tile boundary. V253 measured 60/60 with *both* stores left at the end, which is why it only
+    // saw the cost of the extra command.
+    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H / 120, H % 120]> = HbmTensor::new();
     let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> = DmTensor::new();
     ctx.main
         .begin(tile0.view())
@@ -1727,6 +1734,13 @@ pub(crate) fn project_output_1p_split(
         .transpose::<m![H % 120 = 88 / 4], m![H % 120 = 88 % 4 # 16]>()
         .commit_trim::<m![H % 120 = 88 % 4]>()
         .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120]>(0));
+    contraction
+        .view()
+        .tile::<m![H % 120], 60, m![H % 120 = 60 # 120]>(0)
+        .to_hbm_view(
+            &mut ctx.tdma,
+            gathered_hbm.view_mut().tile::<m![H % 120], 60, m![H / 120, H % 120 = 60 #{!} 120]>(0),
+        );
     ctx.main
         .begin(tile1.view())
         .fetch::<m![H % 120 = 32, Qs / 64 % 4], m![Qs % 64]>()
@@ -1750,22 +1764,13 @@ pub(crate) fn project_output_1p_split(
     // V260: the store split on the *tile* boundary, 88 + 32, so tile0's rows go out while tile1
     // is still loading. V253 split 60/60 -- which does not line up with the tiles -- so its first
     // store still had to wait for tile1 and it only measured the cost of an extra command.
-    // The scratch carries its block structure explicitly so an offset tile is well formed; a
-    // flat m![H] view that starts 88 elements in is an `unpad`, not a tile, and is rejected.
-    let mut gathered_hbm: HbmTensor<bf16, Chip, m![H / 120, H % 120]> = HbmTensor::new();
+    // rows 60..120, the half that tile1 completes
     contraction
         .view()
-        .tile::<m![H % 120], 88, m![H % 120 = 88 # 120]>(0)
+        .tile::<m![H % 120], 60, m![H % 120 = 60 # 120]>(60)
         .to_hbm_view(
             &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 #{!} 120]>(0),
-        );
-    contraction
-        .view()
-        .tile::<m![H % 120], 32, m![H % 120 = 32 # 120]>(88)
-        .to_hbm_view(
-            &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 120]>(88),
+            gathered_hbm.view_mut().tile::<m![H % 120], 60, m![H / 120, H % 120 = 60 #{!} 120]>(60),
         );
     unsafe { gathered_hbm.reshape() }
 }
