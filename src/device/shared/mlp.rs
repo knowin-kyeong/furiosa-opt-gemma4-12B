@@ -687,18 +687,18 @@ fn broadcast_scalar_full(
 /// Pass A over all 30 rows and all of H: per-16-column-block partial dot products.
 fn contract_up_gate_full(
     ctx: &mut Context,
-    x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]>,
+    x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
-) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> {
+) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, Dummy2, H / 16]> {
     ctx.main
         .begin(packed.view())
-        .fetch::<m![L % 30, H / 64, Dummy2], m![H % 64]>()
+        .fetch::<m![L % 30, H / 64], m![H % 64]>()
         .fetch_table_lookup::<f8e4m3>()
-        .collect::<m![L % 30, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
-        .contract_outer::<m![L % 30, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .collect::<m![L % 30, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![L % 30, H / 64], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![H / 16 % 4]>()
         .contract_time::<m![L % 30, H / 64]>()
-        .contract_lane::<m![L % 30, H / 64], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
+        .contract_lane::<m![L % 30, H / 64], m![Dummy2, H / 16 % 4 # 8]>(LaneMode::Sequential)
         .commit_trim::<m![H / 16 % 4]>()
         .commit()
 }
@@ -984,7 +984,11 @@ pub(crate) fn feedforward_v181(
         .commit_trim::<m![H % 32]>()
         .commit();
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]> = unsafe { x.reshape() };
-    let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]> = ctx
+    // V210: the two f8 pieces of x go in *Lane*, not Time. With Lane = m![1] the Contraction
+    // Engine runs one of its eight lanes, and the Dummy2 replay makes MainContext fetch every
+    // weight packet twice - 36,526 static cycles for up and gate together, the largest single
+    // item in the project. Two active lanes let one weight fetch feed both pieces.
+    let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2], m![H]> = ctx
         .sub
         .begin(x.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
