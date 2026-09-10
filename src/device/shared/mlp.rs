@@ -184,6 +184,58 @@ pub(crate) fn stage_x_hi_lo_qkv_hbm(
     let s_vrf = stage_packet_reducing(ctx, &s);
 
     let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    // m1: the two pieces are gathered into one buffer on the slices that already hold them, so
+    // the staging costs one DMA command instead of two.
+    let mut x2: DmTensor<f8e4m3, Chip, Cluster, ReducingSlices, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
+    x2.view().to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut());
+    x2_hbm
+}
+
+pub(crate) fn stage_x_hi_lo_qkv_hbm_s2(
+    ctx: &mut Context,
+    normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
+) -> HbmTensor<f8e4m3, Chip, m![Dummy2, H]> {
+    let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
+        .main
+        .begin(normalized.view())
+        .fetch::<m![H / 8 % 60], m![H % 8]>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit();
+
+    let m_local = max_square_reducing(ctx, &x);
+    let m_all: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![1 # 32, Dummy8], m![1]>(InterSliceReduceOpF32::Max)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = unsafe { m_all.reshape() };
+    let (s, _inv_s) = pow2_scale_reducing(ctx, &m_all);
+    let s_vrf = stage_packet_reducing(ctx, &s);
+
+    let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
     let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
     x_hi.view()
         .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H]>(0));
@@ -812,6 +864,119 @@ fn gather_pack_full(
 }
 
 pub(crate) fn stage_x_hi_lo_hbm_full(
+    ctx: &mut Context,
+    normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+) -> (
+    HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+    HbmTensor<f32, Chip, m![1 # 8]>,
+    HbmTensor<f32, Chip, m![1 # 8]>,
+) {
+    let x: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
+        .main
+        .begin(normalized.view())
+        .fetch::<m![H / 8 % 60], m![H % 8]>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit();
+
+    let m_local = max_square_reducing(ctx, &x);
+    let m_all: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![1 # 32, Dummy8], m![1]>(InterSliceReduceOpF32::Max)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = unsafe { m_all.reshape() };
+    let (s, inv_s) = pow2_scale_reducing(ctx, &m_all);
+    let s_vrf = stage_packet_reducing(ctx, &s);
+    let inv_s_vrf = stage_packet_reducing(ctx, &inv_s);
+
+    let (x_hi, x_lo) = hi_lo_reducing(ctx, &x, &s_vrf);
+    // m1: the two pieces are gathered into one buffer on the slices that already hold them, so
+    // the staging costs one DMA command instead of two.
+    let mut x2: DmTensor<f8e4m3, Chip, Cluster, ReducingSlices, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
+    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Dummy2, H]> = HbmTensor::new();
+    x2.view().to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut());
+
+    // The geglu scalars.
+    let s_up: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = up_global_scale.to_dm(&mut ctx.tdma);
+    let s_gate: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = gate_global_scale.to_dm(&mut ctx.tdma);
+    let s_gate_vrf = stage_packet_reducing(ctx, &s_gate);
+    let erf_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(s_gate.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &inv_s_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), INVSQRT2)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let half_inv_s2: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(inv_s.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &inv_s_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), 0.5f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let half_inv_s2_vrf = stage_packet_reducing(ctx, &half_inv_s2);
+    let out_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(s_up.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &s_gate_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &half_inv_s2_vrf)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let erf_one: DmTensor<f32, Chip, Cluster, Slice, m![1 # 8]> = unsafe { erf_scale.reshape() };
+    let out_one: DmTensor<f32, Chip, Cluster, Slice, m![1 # 8]> = unsafe { out_scale.reshape() };
+    let mut erf_hbm: HbmTensor<f32, Chip, m![1 # 8]> = HbmTensor::new();
+    erf_one.view().to_hbm_view(&mut ctx.tdma, erf_hbm.view_mut());
+    let mut out_hbm: HbmTensor<f32, Chip, m![1 # 8]> = HbmTensor::new();
+    out_one.view().to_hbm_view(&mut ctx.tdma, out_hbm.view_mut());
+    (x2_hbm, erf_hbm, out_hbm)
+}
+
+pub(crate) fn stage_x_hi_lo_hbm_full_s2(
     ctx: &mut Context,
     normalized: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]>,
     up_global_scale: &HbmTensor<f32, Chip, m![1]>,
