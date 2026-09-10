@@ -392,9 +392,9 @@ const BASE: &[&str] = &[""; REPS];
 /// lanes (`ls`) and a three-tile O-weight split (`t3`). Orders are rotated so no variant always
 /// eats the cold transition (V225's Latin square).
 const FFN_SWEEP: &[&str] = &[
-    "", "t4", "li", "t4", "li", "", "li", "", "t4",
-    "", "t4", "li", "t4", "li", "", "li", "", "t4",
-    "", "t4", "li", "t4", "li", "", "li", "", "t4",
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
 ];
 
 const QKV_SWEEP: &[&str] = &[
@@ -541,61 +541,9 @@ async fn sliding_project_qkv(
                 )
                 .await;
             }
-            "m" => {
-                launch(
-                    ops::sliding_project_qkv_v239,
-                    (
-                        ctx,
-                        &x,
-                        &q_weight,
-                        &k_weight,
-                        &v_weight,
-                        &q_weight_scale,
-                        &k_weight_scale,
-                        &v_weight_scale,
-                        &input_rms_weight,
-                        &q_rms_weight,
-                        &k_rms_weight,
-                        &kv_offset,
-                        &rope_offset,
-                        &cos,
-                        &sin,
-                        &mut k_cache,
-                        &mut v_cache,
-                        &mut q_out,
-                    ),
-                )
-                .await;
-            }
             "ls" => {
                 launch(
                     ops::sliding_project_qkv_seq,
-                    (
-                        ctx,
-                        &x,
-                        &q_weight,
-                        &k_weight,
-                        &v_weight,
-                        &q_weight_scale,
-                        &k_weight_scale,
-                        &v_weight_scale,
-                        &input_rms_weight,
-                        &q_rms_weight,
-                        &k_rms_weight,
-                        &kv_offset,
-                        &rope_offset,
-                        &cos,
-                        &sin,
-                        &mut k_cache,
-                        &mut v_cache,
-                        &mut q_out,
-                    ),
-                )
-                .await;
-            }
-            "m" => {
-                launch(
-                    ops::sliding_project_qkv_v239,
                     (
                         ctx,
                         &x,
@@ -800,28 +748,6 @@ async fn decoder_feedforward(
             "t4" => {
                 launch(
                     ops::decoder_feedforward_v238,
-                    (
-                        ctx,
-                        &mut residual,
-                        &pre_ff_rms_weight,
-                        &up_weight_packed,
-                        &gate_weight_packed,
-                        &down_weight_packed,
-                        &up_weight_scale,
-                        &gate_weight_scale,
-                        &down_weight_scale,
-                        &up_global_scale,
-                        &gate_global_scale,
-                        &down_global_scale,
-                        &post_ff_rms_weight,
-                        &layer_scalar,
-                    ),
-                )
-                .await;
-            }
-            "li" => {
-                launch(
-                    ops::decoder_feedforward_v240,
                     (
                         ctx,
                         &mut residual,
