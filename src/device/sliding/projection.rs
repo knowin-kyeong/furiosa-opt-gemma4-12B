@@ -298,25 +298,169 @@ fn apply_output_channel_scale(
 // run-length curve and neither controlled for alignment.
 // ---------------------------------------------------------------------------------------------
 
-macro_rules! qkv_probe_fns {
-    ($name:ident, $rows:literal, $tiles:literal) => {
-        pub(crate) fn $name(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
-            for tile in 0..$tiles {
-                let probe: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = $rows, H]> = weight
-                    .view()
-                    .tile::<m![Qs % 8], $rows, m![Qs / 8, Qs % 8 = $rows # 8, H]>(tile * $rows)
-                    .to_dm(&mut ctx.tdma);
-                let _keep: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
-                    .sub
-                    .begin(probe.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # $rows, H]>(0))
-                    .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
-                    .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
-                    .to_trf();
-            }
-        }
-    };
+/// 1 command(s) x 8 rows: 30720-byte runs.
+pub(crate) fn probe_q_rows_8x1(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let t0: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 8, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 8, m![Qs / 8, Qs % 8 = 8 # 8, H]>(0)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
 }
-qkv_probe_fns!(probe_q_rows_8x1, 8, 1);
-qkv_probe_fns!(probe_q_rows_4x2, 4, 2);
-qkv_probe_fns!(probe_q_rows_2x4, 2, 4);
-qkv_probe_fns!(probe_q_rows_1x8, 1, 8);
+
+/// 2 command(s) x 4 rows: 15360-byte runs.
+pub(crate) fn probe_q_rows_4x2(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let t0: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 4, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 4, m![Qs / 8, Qs % 8 = 4 # 8, H]>(0)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 4, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t1: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 4, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 4, m![Qs / 8, Qs % 8 = 4 # 8, H]>(4)
+        .to_dm(&mut ctx.tdma);
+    let _k1: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 4, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// 4 command(s) x 2 rows: 7680-byte runs.
+pub(crate) fn probe_q_rows_2x4(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let t0: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 2, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 2, m![Qs / 8, Qs % 8 = 2 # 8, H]>(0)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 2, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t1: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 2, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 2, m![Qs / 8, Qs % 8 = 2 # 8, H]>(2)
+        .to_dm(&mut ctx.tdma);
+    let _k1: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 2, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t2: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 2, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 2, m![Qs / 8, Qs % 8 = 2 # 8, H]>(4)
+        .to_dm(&mut ctx.tdma);
+    let _k2: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t2.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 2, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t3: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 2, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 2, m![Qs / 8, Qs % 8 = 2 # 8, H]>(6)
+        .to_dm(&mut ctx.tdma);
+    let _k3: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t3.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 2, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// 8 command(s) x 1 rows: 3840-byte runs.
+pub(crate) fn probe_q_rows_1x8(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let t0: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(0)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t1: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(1)
+        .to_dm(&mut ctx.tdma);
+    let _k1: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t2: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(2)
+        .to_dm(&mut ctx.tdma);
+    let _k2: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t2.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t3: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(3)
+        .to_dm(&mut ctx.tdma);
+    let _k3: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t3.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t4: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(4)
+        .to_dm(&mut ctx.tdma);
+    let _k4: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t4.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t5: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(5)
+        .to_dm(&mut ctx.tdma);
+    let _k5: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t5.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t6: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(6)
+        .to_dm(&mut ctx.tdma);
+    let _k6: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t6.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let t7: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = 1, H]> = weight
+        .view()
+        .tile::<m![Qs % 8], 1, m![Qs / 8, Qs % 8 = 1 # 8, H]>(7)
+        .to_dm(&mut ctx.tdma);
+    let _k7: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(t7.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 1, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
