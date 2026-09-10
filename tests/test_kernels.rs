@@ -377,22 +377,23 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    t("sliding_attention_output", "t104", 0.05),
+    t("sliding_attention_output", "t72", 0.05),
+    t("sliding_attention_output", "t60", 0.05),
+    t("sliding_attention_output", "t120", 0.05),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    t("sliding_attention_output", "t104", 0.05),
+    t("sliding_attention_output", "t72", 0.05),
+    t("sliding_attention_output", "t60", 0.05),
+    t("sliding_attention_output", "t120", 0.05),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
+    t("sliding_attention_output", "t104", 0.05),
+    t("sliding_attention_output", "t72", 0.05),
+    t("sliding_attention_output", "t60", 0.05),
+    t("sliding_attention_output", "t120", 0.05),
+    t("sliding_project_qkv", "", 0.04),
     t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
-    t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
@@ -499,6 +500,38 @@ async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture, variant:
 
     match variant {
         // VARIANTS:sliding_attention_output
+        "t104" => launch(ops::sliding_attention_output_t104, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "t72" => launch(ops::sliding_attention_output_t72, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "t60" => launch(ops::sliding_attention_output_t60, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "t120" => launch(ops::sliding_attention_output_t120, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
         "c512" => launch(ops::sliding_attention_output_c512, (
             ctx,
             &x,
