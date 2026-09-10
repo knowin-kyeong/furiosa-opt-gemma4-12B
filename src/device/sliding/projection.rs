@@ -275,3 +275,587 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V219: what does one vector pass actually cost?
+//
+// V218 found that deleting the three head RMSNorms saves 6,833 real cycles while the static
+// schedule only charges 1,263 - a 5.4x overrun. But dividing each ablation's excess by its
+// instruction delta gives 172, 56 and 13 cycles, so there is no single per-pass constant in that
+// data, and the removals are not even additive. Measure the slope directly instead: N minimal
+// vector passes (one f32 scalar per slice, one AddF) chained head to tail, N = 0/4/8/16. Their
+// result is dropped, so the kernel stays numerically correct and the jobs report PASS.
+//
+// `i8` runs the same eight passes with no dependency between them. If serial and independent cost
+// the same, the price is in-order issue; if independent is much cheaper, it is dependency latency
+// and only fusion that shortens the chain will pay.
+// ---------------------------------------------------------------------------------------------
+
+pub(crate) fn pass_chain_0(ctx: &mut Context) {
+    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
+    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(scratch.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+}
+
+pub(crate) fn pass_chain_4(ctx: &mut Context) {
+    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
+    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(scratch.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p1: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p0.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p2: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p1.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p3: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p2.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _tail = p3;
+}
+
+pub(crate) fn pass_chain_8(ctx: &mut Context) {
+    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
+    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(scratch.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p1: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p0.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p2: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p1.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p3: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p2.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p4: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p3.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p5: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p4.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p6: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p5.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p7: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p6.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _tail = p7;
+}
+
+pub(crate) fn pass_chain_16(ctx: &mut Context) {
+    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
+    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(scratch.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p1: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p0.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p2: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p1.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p3: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p2.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p4: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p3.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p5: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p4.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p6: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p5.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p7: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p6.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p8: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p7.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p9: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p8.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p10: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p9.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p11: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p10.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p12: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p11.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p13: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p12.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p14: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p13.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let p15: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(p14.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _tail = p15;
+}
+
+pub(crate) fn pass_indep_8(ctx: &mut Context) {
+    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
+    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(scratch.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let q0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 1f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q0 = q0;
+    let q1: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 2f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q1 = q1;
+    let q2: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 3f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q2 = q2;
+    let q3: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 4f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q3 = q3;
+    let q4: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 5f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q4 = q4;
+    let q5: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 6f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q5 = q5;
+    let q6: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 7f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q6 = q6;
+    let q7: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
+        .main
+        .begin(seed.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, 8f32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let _q7 = q7;
+}
