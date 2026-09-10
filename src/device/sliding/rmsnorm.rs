@@ -392,58 +392,60 @@ pub(crate) fn normalize_value_heads<C: M, S: M>(
 }
 
 // -------------------------------------------------------------------------------------------
-// V239: the qkv tail as few passes as the shapes allow.
+// V239: the qkv tail in as few passes as the shapes allow.
 //
 // V218 measured the tail (three head RMSNorms plus RoPE) at 16,012 real cycles for 7,435 static
-// and priced one pass at ~600 real: the PE core issues passes in order and that issue cost, not
-// the vector work, is what the tail is made of. The three head norms and the RoPE run 17 passes
-// over one to two rows each while a pass over four rows costs the same. So q's two group rows,
-// k and v share one four-row buffer per slice: the three sqrt passes become one, and the RoPE's
-// four rotate-half passes become two and its two sin passes one. Twelve passes instead of
-// seventeen.
+// and priced one pass at ~600 real: the PE core issues passes in order, and that issue cost, not
+// the vector work, is what the tail is made of. The three head norms and the RoPE run seventeen
+// passes over one or two rows each, and a pass over four rows costs the same as a pass over one.
+// So q's two group rows, k and v share one four-row buffer per slice, `m![Dummy2, Gs, ..]`:
+// the three sqrt passes become one, the RoPE's four rotate-half passes become two and its two
+// sin passes one. Twelve passes instead of seventeen.
 //
-// Row 3 of the RoPE buffer is dead. v is normalized into its own tensor because `dma_scatter`
-// takes a whole `DmTensor`, not a tile of one, so v cannot be carried in the shared buffer and
-// still reach the cache.
+// Every tile into that buffer is an extent-1 axis that the mapping elides, which is the one form
+// the fetch unit accepts -- a partial axis (`m![Ns / 2 = 2]`) on a freshly allocated tensor is
+// rejected as `lower_fetch_unit: There should be not-exactly-matched from_in_slice slots`.
+//
+// Row (1, 1) is dead. v is normalized into its own tensor because `dma_scatter` takes a whole
+// `DmTensor`, not a tile of one, so v cannot ride in the shared buffer and still reach the cache.
 
-/// The shared four-row layout: q's two group rows, then k, then v (or nothing).
-pub(crate) type HeadRows = m![Ns / 2];
-
-/// q's mean square into rows 0 and 1 of the shared buffer.
+/// q's mean square into rows (0, 0) and (0, 1) of the shared buffer.
 pub(crate) fn head_mean_square_query<C: M, S: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
-    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]>,
-    ms: &mut DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]>,
+    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Gs, Ds]>,
+    ms: &mut DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]>,
 ) {
-    let x: DmTensorView<'_, bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = unsafe { x.view().reshape() };
     ctx.main
-        .begin(x)
-        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
+        .begin(x.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ns / 2 = 2, Ds / 4], m![Ds % 4]>()
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
         .vector_stash()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
-        .vector_intra_slice_reduce::<Ds, m![Ns / 2 = 2], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_intra_slice_reduce::<Ds, m![Gs], m![1 # 4]>(IntraSliceReduceOpF32::Add)
         .vector_fp_div(DS_F32)
         .vector_widen_pad::<m![1 # 8]>()
         .vector_clip(ClipBinaryOpF32::Add, EPS)
         .vector_final()
         .commit_trim::<m![1 # 8]>()
-        .commit_view(ms.view_mut().tile::<m![Ns / 2], 2, m![Ns / 2 = 2 #{!} 4, 1 # 8]>(0));
+        .commit_view(
+            ms.view_mut()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Gs, 1 # 8]>(0),
+        );
 }
 
-/// One head row's mean square into row `offset` of the shared buffer.
+/// One head row's mean square into row (1, `offset`) of the shared buffer.
 pub(crate) fn head_mean_square_row<C: M, S: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
     scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
     offset: usize,
-    ms: &mut DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]>,
+    ms: &mut DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]>,
 ) {
     ctx.main
         .begin(x.view())
@@ -462,18 +464,22 @@ pub(crate) fn head_mean_square_row<C: M, S: M>(
         .vector_clip(ClipBinaryOpF32::Add, EPS)
         .vector_final()
         .commit_trim::<m![1 # 8]>()
-        .commit_view(ms.view_mut().tile::<m![Ns / 2], 1, m![Ns / 2 = 1 #{!} 4, 1 # 8]>(offset));
+        .commit_view(
+            ms.view_mut()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Gs, 1 # 8]>(1)
+                .tile::<m![Gs], 1, m![Dummy2 = 1 #{!} 2, Gs = 1 #{!} 2, 1 # 8]>(offset),
+        );
 }
 
 /// The one sqrt pass that replaces q's, k's and v's.
 pub(crate) fn head_rms_all<C: M, S: M>(
     ctx: &mut Context,
-    ms: &DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]>,
-) -> DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]> {
+    ms: &DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]>,
+) -> DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]> {
     ctx.main
         .begin(ms.view())
-        .fetch::<m![Ns / 2], m![1 # 8]>()
-        .collect::<m![Ns / 2], m![1 # 8]>()
+        .fetch::<m![Dummy2, Gs], m![1 # 8]>()
+        .collect::<m![Dummy2, Gs], m![1 # 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_narrow_trim::<m![1 # 4]>()
@@ -484,35 +490,66 @@ pub(crate) fn head_rms_all<C: M, S: M>(
         .commit()
 }
 
-/// q normalized into rows 0 and 1 of the shared RoPE buffer.
+/// q's two rows of the shared rms buffer, staged to the VRF.
+pub(crate) fn head_rms_vrf_query<C: M, S: M>(
+    ctx: &mut Context,
+    rms: &DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]>,
+) -> VrfTensor<f32, Chip, C, S, m![Gs, 1 # 8]> {
+    ctx.sub
+        .begin(rms.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, 1 # 8]>(0))
+        .fetch::<m![Gs], m![1 # 8]>()
+        .collect::<m![Gs], m![1 # 8]>()
+        .to_vrf()
+}
+
+/// One row of the shared rms buffer, staged to the VRF.
+pub(crate) fn head_rms_vrf_row<C: M, S: M>(
+    ctx: &mut Context,
+    rms: &DmTensor<f32, Chip, C, S, m![Dummy2, Gs, 1 # 8]>,
+    offset: usize,
+) -> VrfTensor<f32, Chip, C, S, m![1 # 8]> {
+    ctx.sub
+        .begin(
+            rms.view()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, 1 # 8]>(1)
+                .tile::<m![Gs], 1, m![Dummy2 = 1 # 2, Gs = 1 # 2, 1 # 8]>(offset),
+        )
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf()
+}
+
+/// q normalized into rows (0, 0) and (0, 1) of the shared RoPE buffer.
 pub(crate) fn head_normalize_query<C: M, S: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
-    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]>,
+    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Gs, Ds]>,
     weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
-    rms_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, 1 # 8]>,
-    out: &mut DmTensor<bf16, Chip, C, S, m![Ns / 2, Ds]>,
+    rms_vrf: &VrfTensor<f32, Chip, C, S, m![Gs, 1 # 8]>,
+    out: &mut DmTensor<bf16, Chip, C, S, m![Dummy2, Gs, Ds]>,
 ) {
-    let x: DmTensorView<'_, bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = unsafe { x.view().reshape() };
     ctx.main
-        .begin(x)
-        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
+        .begin(x.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ns / 2 = 2, Ds / 4], m![Ds % 4]>()
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
         .vector_fp_binary(FpBinaryOp::DivF, rms_vrf)
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), weight_vrf)
-        .vector_widen_concat::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
         .vector_final()
         .cast::<bf16, m![Ds % 8 # 16]>()
         .commit_trim::<m![Ds % 8]>()
-        .commit_view(out.view_mut().tile::<m![Ns / 2], 2, m![Ns / 2 = 2 #{!} 4, Ds]>(0));
+        .commit_view(
+            out.view_mut()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Gs, Ds]>(0),
+        );
 }
 
-/// k normalized into row `offset` of the shared RoPE buffer.
+/// k normalized into row (1, `offset`) of the shared RoPE buffer.
 pub(crate) fn head_normalize_row<C: M, S: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
@@ -520,7 +557,7 @@ pub(crate) fn head_normalize_row<C: M, S: M>(
     weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
     rms_vrf: &VrfTensor<f32, Chip, C, S, m![1 # 8]>,
     offset: usize,
-    out: &mut DmTensor<bf16, Chip, C, S, m![Ns / 2, Ds]>,
+    out: &mut DmTensor<bf16, Chip, C, S, m![Dummy2, Gs, Ds]>,
 ) {
     ctx.main
         .begin(x.view())
@@ -537,7 +574,11 @@ pub(crate) fn head_normalize_row<C: M, S: M>(
         .vector_final()
         .cast::<bf16, m![Ds % 8 # 16]>()
         .commit_trim::<m![Ds % 8]>()
-        .commit_view(out.view_mut().tile::<m![Ns / 2], 1, m![Ns / 2 = 1 #{!} 4, Ds]>(offset));
+        .commit_view(
+            out.view_mut()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Gs, Ds]>(1)
+                .tile::<m![Gs], 1, m![Dummy2 = 1 #{!} 2, Gs = 1 #{!} 2, Ds]>(offset),
+        );
 }
 
 /// v normalized (no gamma) into its own tensor, ready for the scatter.
@@ -564,19 +605,18 @@ pub(crate) fn head_normalize_value_row<C: M, S: M>(
         .commit()
 }
 
-/// The per-channel weight scale in the head layout, for a two-row (q) consumer.
+/// The per-channel weight scale in the head layout, for q's two rows.
 pub(crate) fn load_channel_scale_query<C: M, S: M>(
     ctx: &mut Context,
     channel_scale: &HbmTensor<bf16, Chip, m![Qs]>,
-) -> VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]> {
+) -> VrfTensor<f32, Chip, C, S, m![Gs, Ds]> {
     let channel_scale: HbmTensorView<'_, bf16, Chip, m![Ns, Gs, Ds]> = unsafe { channel_scale.view().reshape() };
     let scale_dm: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = channel_scale.to_dm(&mut ctx.tdma);
-    let scale_dm: DmTensorView<'_, bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = unsafe { scale_dm.view().reshape() };
     ctx.sub
-        .begin(scale_dm)
-        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
+        .begin(scale_dm.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
         .to_vrf()
 }
 
@@ -592,84 +632,4 @@ pub(crate) fn load_head_norm_weight<C: M, S: M>(
     rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
 ) -> VrfTensor<f32, Chip, C, S, m![Ds]> {
     load_norm_weight::<C, S>(ctx, rms_weight)
-}
-
-/// The two-row (q) slice of the shared rms buffer, staged to the VRF.
-pub(crate) fn head_rms_vrf_query<C: M, S: M>(
-    ctx: &mut Context,
-    rms: &DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]>,
-) -> VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, 1 # 8]> {
-    ctx.sub
-        .begin(rms.view().tile::<m![Ns / 2], 2, m![Ns / 2 = 2 # 4, 1 # 8]>(0))
-        .fetch::<m![Ns / 2 = 2], m![1 # 8]>()
-        .collect::<m![Ns / 2 = 2], m![1 # 8]>()
-        .to_vrf()
-}
-
-/// One row of the shared rms buffer, staged to the VRF.
-pub(crate) fn head_rms_vrf_row<C: M, S: M>(
-    ctx: &mut Context,
-    rms: &DmTensor<f32, Chip, C, S, m![Ns / 2, 1 # 8]>,
-    offset: usize,
-) -> VrfTensor<f32, Chip, C, S, m![1 # 8]> {
-    ctx.sub
-        .begin(rms.view().tile::<m![Ns / 2], 1, m![Ns / 2 = 1 # 4, 1 # 8]>(offset))
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .to_vrf()
-}
-
-/// V239 bisect probe: the merged head norms writing q and k into their own tensors, so the
-/// original RoPE can consume them. Tells the merged sqrt apart from the merged RoPE.
-pub(crate) fn head_normalize_query_out<C: M, S: M>(
-    ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
-    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]>,
-    weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
-    rms_vrf: &VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, 1 # 8]>,
-) -> DmTensor<bf16, Chip, C, S, m![Gs, Ds]> {
-    let x: DmTensorView<'_, bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = unsafe { x.view().reshape() };
-    let out: DmTensor<bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = ctx
-        .main
-        .begin(x)
-        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
-        .fetch_cast::<f32>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ns / 2 = 2, Ds / 4], m![Ds % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
-        .vector_fp_binary(FpBinaryOp::DivF, rms_vrf)
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), weight_vrf)
-        .vector_widen_concat::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
-        .vector_final()
-        .cast::<bf16, m![Ds % 8 # 16]>()
-        .commit_trim::<m![Ds % 8]>()
-        .commit();
-    unsafe { out.reshape() }
-}
-
-pub(crate) fn head_normalize_row_out<C: M, S: M>(
-    ctx: &mut Context,
-    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
-    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
-    weight_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
-    rms_vrf: &VrfTensor<f32, Chip, C, S, m![1 # 8]>,
-) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
-    ctx.main
-        .begin(x.view())
-        .fetch::<m![Ds / 16], m![Ds % 16]>()
-        .fetch_cast::<f32>()
-        .collect::<m![Ds / 8], m![Ds % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
-        .vector_fp_binary(FpBinaryOp::DivF, rms_vrf)
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), weight_vrf)
-        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
-        .vector_final()
-        .cast::<bf16, m![Ds % 8 # 16]>()
-        .commit_trim::<m![Ds % 8]>()
-        .commit()
 }

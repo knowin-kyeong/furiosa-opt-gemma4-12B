@@ -430,11 +430,11 @@ pub(crate) fn apply_rope_heads<C: M, S: M>(
 /// V239: RoPE over the shared four-row buffer (q's two group rows, k, and a dead row).
 ///
 /// A pass costs the same over four rows as over one (V218), so the two rotate-half passes and
-/// the one sin pass here replace six. Only the final blend has to split, because q leaves as
+/// the one sin pass here replace six. Only the final blend splits, because q leaves as
 /// `[Gs, Ds]` for the HBM store and k as `[Ds]` for the cache scatter.
 pub(crate) fn apply_rope_rows<C: M, S: M>(
     ctx: &mut Context,
-    qk: &DmTensor<bf16, Chip, C, S, m![Ns / 2, Ds]>,
+    qk: &DmTensor<bf16, Chip, C, S, m![Dummy2, Gs, Ds]>,
     rope_offset: &HbmTensor<i32, Chip, m![1]>,
     cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
     sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
@@ -470,62 +470,75 @@ pub(crate) fn apply_rope_rows<C: M, S: M>(
         .to_vrf();
 
     // rotate_half for every row at once: the halves swap, the first one negated by the table.
-    let mut rotated: DmTensor<bf16, Chip, C, S, m![Ns / 2, Ds]> = DmTensor::new();
+    let mut rotated: DmTensor<bf16, Chip, C, S, m![Dummy2, Gs, Ds]> = DmTensor::new();
 
     ctx.main
-        .begin(qk.view().tile::<m![Ds], 128, m![Ns / 2, Ds = 128 # 256]>(0))
-        .fetch::<m![Ns / 2], m![Ds = 128]>()
-        .collect::<m![Ns / 2, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .begin(qk.view().tile::<m![Ds], 128, m![Dummy2, Gs, Ds = 128 # 256]>(0))
+        .fetch::<m![Dummy2, Gs], m![Ds = 128]>()
+        .collect::<m![Dummy2, Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
         .commit_trim::<m![Ds = 128 % 16]>()
-        .commit_view(rotated.view_mut().tile::<m![Ds], 128, m![Ns / 2, Ds = 128 #{!} 256]>(128));
+        .commit_view(
+            rotated
+                .view_mut()
+                .tile::<m![Ds], 128, m![Dummy2, Gs, Ds = 128 #{!} 256]>(128),
+        );
 
     ctx.main
-        .begin(qk.view().tile::<m![Ds], 128, m![Ns / 2, Ds = 128 # 256]>(128))
-        .fetch::<m![Ns / 2], m![Ds = 128]>()
-        .collect::<m![Ns / 2, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .begin(qk.view().tile::<m![Ds], 128, m![Dummy2, Gs, Ds = 128 # 256]>(128))
+        .fetch::<m![Dummy2, Gs], m![Ds = 128]>()
+        .collect::<m![Dummy2, Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
         .commit_trim::<m![Ds = 128 % 16]>()
-        .commit_view(rotated.view_mut().tile::<m![Ds], 128, m![Ns / 2, Ds = 128 #{!} 256]>(0));
+        .commit_view(
+            rotated
+                .view_mut()
+                .tile::<m![Ds], 128, m![Dummy2, Gs, Ds = 128 #{!} 256]>(0),
+        );
 
-    let sin_term: DmTensor<f32, Chip, C, S, m![Ns / 2, Ds]> = ctx
+    let sin_term: DmTensor<f32, Chip, C, S, m![Dummy2, Gs, Ds]> = ctx
         .main
         .begin(rotated.view())
-        .fetch::<m![Ns / 2, Ds / 16], m![Ds % 16]>()
+        .fetch::<m![Dummy2, Gs, Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![Ns / 2, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Dummy2, Gs, Ds / 8], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ns / 2, Ds / 4], m![Ds % 4]>()
+        .vector_narrow_split::<m![Dummy2, Gs, Ds / 4], m![Ds % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &sin_vrf)
-        .vector_widen_concat::<m![Ns / 2, Ds / 8], m![Ds % 8]>()
+        .vector_widen_concat::<m![Dummy2, Gs, Ds / 8], m![Ds % 8]>()
         .vector_final()
         .commit_trim::<m![Ds % 8]>()
         .commit();
 
-    let q_sin_vrf: VrfTensor<f32, Chip, C, S, m![Ns / 2 = 2, Ds]> = ctx
+    let q_sin_vrf: VrfTensor<f32, Chip, C, S, m![Gs, Ds]> = ctx
         .sub
-        .begin(sin_term.view().tile::<m![Ns / 2], 2, m![Ns / 2 = 2 # 4, Ds]>(0))
-        .fetch::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .begin(sin_term.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, Ds]>(0))
+        .fetch::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
         .to_vrf();
 
     let k_sin_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
         .sub
-        .begin(sin_term.view().tile::<m![Ns / 2], 1, m![Ns / 2 = 1 # 4, Ds]>(2))
+        .begin(
+            sin_term
+                .view()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, Ds]>(1)
+                .tile::<m![Gs], 1, m![Dummy2 = 1 # 2, Gs = 1 # 2, Ds]>(0),
+        )
         .fetch::<m![Ds / 8], m![Ds % 8]>()
         .collect::<m![Ds / 8], m![Ds % 8]>()
         .to_vrf();
 
-    let result_q: DmTensor<bf16, Chip, C, S, m![Ns / 2 = 2, Ds]> = ctx
+    let result_q: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = ctx
         .main
-        .begin(qk.view().tile::<m![Ns / 2], 2, m![Ns / 2 = 2 # 4, Ds]>(0))
-        .fetch::<m![Ns / 2 = 2, Ds / 16], m![Ds % 16]>()
+        .begin(qk.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, Ds]>(0))
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
-        .collect::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_split::<m![Ns / 2 = 2, Ds / 4], m![Ds % 4]>()
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_vrf)
-        .vector_widen_concat::<m![Ns / 2 = 2, Ds / 8], m![Ds % 8]>()
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
         .vector_clip(ClipBinaryOpF32::Add, &q_sin_vrf)
         .vector_final()
         .cast::<bf16, m![Ds % 8 # 16]>()
@@ -534,7 +547,11 @@ pub(crate) fn apply_rope_rows<C: M, S: M>(
 
     let result_k: DmTensor<bf16, Chip, C, S, m![Ds]> = ctx
         .main
-        .begin(qk.view().tile::<m![Ns / 2], 1, m![Ns / 2 = 1 # 4, Ds]>(2))
+        .begin(
+            qk.view()
+                .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Gs, Ds]>(1)
+                .tile::<m![Gs], 1, m![Dummy2 = 1 # 2, Gs = 1 # 2, Ds]>(0),
+        )
         .fetch::<m![Ds / 16], m![Ds % 16]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds / 8], m![Ds % 8]>()
@@ -549,5 +566,5 @@ pub(crate) fn apply_rope_rows<C: M, S: M>(
         .commit_trim::<m![Ds % 8]>()
         .commit();
 
-    (unsafe { result_q.reshape() }, result_k)
+    (result_q, result_k)
 }

@@ -537,7 +537,7 @@ async fn sliding_project_qkv(
             }
             "m" => {
                 launch(
-                    ops::sliding_project_qkv_v239a,
+                    ops::sliding_project_qkv_v239,
                     (
                         ctx,
                         &x,

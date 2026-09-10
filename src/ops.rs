@@ -126,9 +126,9 @@ pub fn sliding_project_qkv(
     v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
 }
 
-/// V239 bisect probe a: merged head norms, original RoPE.
+/// Measurement variant: the qkv tail with the head norms and RoPE sharing one buffer (V239).
 #[device(chip = 1)]
-pub fn sliding_project_qkv_v239a(
+pub fn sliding_project_qkv_v239(
     ctx: &mut Context,
     x: &HbmTensor<bf16, Chip, m![H]>,
     q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
@@ -200,30 +200,31 @@ pub fn sliding_project_qkv_v239a(
         v_weight_scale,
     );
 
-    let mut mean_square: DmTensor<f32, Chip, layout::HeadClusters, layout::HeadSlicesPerCluster, m![Ns / 2, 1 # 8]> =
+    let mut mean_square: DmTensor<f32, Chip, layout::HeadClusters, layout::HeadSlicesPerCluster, m![Dummy2, Gs, 1 # 8]> =
         DmTensor::new();
     sliding::rmsnorm::head_mean_square_query(ctx, &q, &q_scale_vrf, &mut mean_square);
-    sliding::rmsnorm::head_mean_square_row(ctx, &k, &k_scale_vrf, 2, &mut mean_square);
-    sliding::rmsnorm::head_mean_square_row(ctx, &v, &v_scale_vrf, 3, &mut mean_square);
+    sliding::rmsnorm::head_mean_square_row(ctx, &k, &k_scale_vrf, 0, &mut mean_square);
+    sliding::rmsnorm::head_mean_square_row(ctx, &v, &v_scale_vrf, 1, &mut mean_square);
     let rms = sliding::rmsnorm::head_rms_all(ctx, &mean_square);
 
     let q_rms_vrf = sliding::rmsnorm::head_rms_vrf_query(ctx, &rms);
-    let k_rms_vrf = sliding::rmsnorm::head_rms_vrf_row(ctx, &rms, 2);
-    let v_rms_vrf = sliding::rmsnorm::head_rms_vrf_row(ctx, &rms, 3);
+    let k_rms_vrf = sliding::rmsnorm::head_rms_vrf_row(ctx, &rms, 0);
+    let v_rms_vrf = sliding::rmsnorm::head_rms_vrf_row(ctx, &rms, 1);
 
     let q_weight_vrf =
         sliding::rmsnorm::load_head_norm_weight::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, q_rms_weight);
     let k_weight_vrf =
         sliding::rmsnorm::load_head_norm_weight::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, k_rms_weight);
 
-    let q = sliding::rmsnorm::head_normalize_query_out(ctx, &q, &q_scale_vrf, &q_weight_vrf, &q_rms_vrf);
-    let k = sliding::rmsnorm::head_normalize_row_out(ctx, &k, &k_scale_vrf, &k_weight_vrf, &k_rms_vrf);
+    let mut qk: DmTensor<bf16, Chip, layout::HeadClusters, layout::HeadSlicesPerCluster, m![Dummy2, Gs, Ds]> =
+        DmTensor::new();
+    sliding::rmsnorm::head_normalize_query(ctx, &q, &q_scale_vrf, &q_weight_vrf, &q_rms_vrf, &mut qk);
+    sliding::rmsnorm::head_normalize_row(ctx, &k, &k_scale_vrf, &k_weight_vrf, &k_rms_vrf, 0, &mut qk);
     let v = sliding::rmsnorm::head_normalize_value_row(ctx, &v, &v_scale_vrf, &v_rms_vrf);
 
-    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let (q, k) = sliding::rope::apply_rope_rows::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
-        &q,
-        &k,
+        &qk,
         rope_offset,
         cos,
         sin,
