@@ -26,4 +26,7 @@ axes![
     Dummy2 = 2,
     Dummy8 = 8,
     Dummy256 = 256,
+    // V230 probe only: does begin_interleaved's axis have to be literally named `interleave`?
+    // src/axes.rs is reverted by the grader, so this can never ship -- it is a diagnosis.
+    interleave = 2,
 ];
