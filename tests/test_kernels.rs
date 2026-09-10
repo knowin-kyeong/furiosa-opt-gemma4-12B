@@ -386,17 +386,10 @@ const REPS: usize = 13;
 
 const BASE: &[&str] = &[""; REPS];
 
-/// V235: production against x's f8 pieces in Lane, alternating in pairs so neither side always
-/// eats the cold transition. ffn is first in PLAN so its program is not evicted by the others.
-const FFN_V235: &[&str] = &[
-    "", "l", "l", "", "", "l", "l", "", "", "l", "l", "",
-    "", "l", "l", "", "", "l", "l", "", "", "l", "l", "",
-];
-
 const PLAN: &[Plan] = &[
-    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_V235 },
     Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: BASE },
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: BASE },
+    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: BASE },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
@@ -584,9 +577,8 @@ async fn sliding_attention_output(
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        // Compare the first launch of each distinct variant, not just the first launch overall.
-        if plan.order[..i].iter().all(|seen| seen != variant) {
-            outputs.push(("expected", read_bf16(ctx, &residual).await));
+        if i == 0 {
+            outputs = vec![("expected", read_bf16(ctx, &residual).await)];
         }
     }
     outputs
@@ -657,35 +649,12 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
-            "l" => {
-                launch(
-                    ops::decoder_feedforward_v235,
-                    (
-                        ctx,
-                        &mut residual,
-                        &pre_ff_rms_weight,
-                        &up_weight_packed,
-                        &gate_weight_packed,
-                        &down_weight_packed,
-                        &up_weight_scale,
-                        &gate_weight_scale,
-                        &down_weight_scale,
-                        &up_global_scale,
-                        &gate_global_scale,
-                        &down_global_scale,
-                        &post_ff_rms_weight,
-                        &layer_scalar,
-                    ),
-                )
-                .await;
-            }
             other => panic!("no variant `{other}` for decoder_feedforward"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        // Compare the first launch of each distinct variant, not just the first launch overall.
-        if plan.order[..i].iter().all(|seen| seen != variant) {
-            outputs.push(("expected", read_bf16(ctx, &residual).await));
+        if i == 0 {
+            outputs = vec![("expected", read_bf16(ctx, &residual).await)];
         }
     }
     outputs
