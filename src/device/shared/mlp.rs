@@ -1098,11 +1098,11 @@ fn broadcast_inv_s_down4(
     v: &HbmTensor<f32, Chip, m![L / 7680, 1 # 8]>,
 ) -> VrfTensor<f32, Chip, DownClusters, DownRowsByColumns4, m![1 # 8]> {
     let two: DmTensor<f32, Chip, DownClusters, m![1 # 128, L / 7680], m![1 # 8]> = v.to_dm(&mut ctx.tdma);
-    let all: DmTensor<f32, Chip, DownClusters, m![Dummy256 / 8, Dummy2, L / 7680, Dummy2], m![1 # 8]> = ctx
+    let all: DmTensor<f32, Chip, DownClusters, m![Dummy256 / 8, Dummy8 / 4, L / 7680, Dummy2], m![1 # 8]> = ctx
         .main
         .begin(two.view())
         .fetch::<m![1], m![1 # 8]>()
-        .switch::<m![Dummy256 / 8, Dummy2, L / 7680, Dummy2], m![1]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
+        .switch::<m![Dummy256 / 8, Dummy8 / 4, L / 7680, Dummy2], m![1]>(SwitchConfig::CustomBroadcast { ring_size: 256 })
         .collect::<m![1], m![1 # 8]>()
         .commit_trim::<m![1 # 8]>()
         .commit();
