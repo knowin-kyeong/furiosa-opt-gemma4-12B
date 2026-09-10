@@ -298,6 +298,7 @@ pub(crate) fn probe_reduce_256(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chi
         .collect::<m![Qs % 8 = 1, H / 8], m![H % 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Qs % 8 = 1, H / 4], m![H % 4]>()
         .vector_intra_slice_reduce::<H, m![Qs % 8 = 1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
         .vector_widen_pad::<m![1 # 8]>()
         .vector_inter_slice_reduce::<m![1 # 256], m![Qs % 8 = 1]>(InterSliceReduceOpF32::Add)
