@@ -391,10 +391,7 @@ const BASE: &[&str] = &[""; REPS];
 /// interleaved up/gate lanes (`li`); qkv vs sequential lanes (`ls`); attn_out vs sequential
 /// lanes (`ls`) and a three-tile O-weight split (`t3`). Orders are rotated so no variant always
 /// eats the cold transition (V225's Latin square).
-const FFN_SWEEP: &[&str] = &[
-    "", "t4", "bc", "t4", "bc", "", "bc", "", "t4",
-    "", "t4", "bc", "t4", "bc", "", "bc", "", "t4",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 const QKV_SWEEP: &[&str] = &[""; 3];
 
@@ -2131,28 +2128,6 @@ async fn decoder_feedforward(
             "t4" => {
                 launch(
                     ops::decoder_feedforward_v238,
-                    (
-                        ctx,
-                        &mut residual,
-                        &pre_ff_rms_weight,
-                        &up_weight_packed,
-                        &gate_weight_packed,
-                        &down_weight_packed,
-                        &up_weight_scale,
-                        &gate_weight_scale,
-                        &down_weight_scale,
-                        &up_global_scale,
-                        &gate_global_scale,
-                        &down_global_scale,
-                        &post_ff_rms_weight,
-                        &layer_scalar,
-                    ),
-                )
-                .await;
-            }
-            "bc" => {
-                launch(
-                    ops::decoder_feedforward_v248,
                     (
                         ctx,
                         &mut residual,
