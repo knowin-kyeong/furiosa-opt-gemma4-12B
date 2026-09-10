@@ -360,3 +360,25 @@ fn apply_output_channel_scale(
 
     output
 }
+
+/// V207 byte-scaling probe: project the key only and hand back an untouched buffer for the
+/// value, so the kernel keeps every downstream shape while reading 7.86 MB fewer weight bytes.
+/// Timing only - the value output is whatever was left in DM.
+pub(crate) fn project_key_only(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    k_weight: &KvWeight,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+    let k = project_one_kv_matrix(ctx, &x_trf, k_weight);
+    (k, DmTensor::new())
+}
