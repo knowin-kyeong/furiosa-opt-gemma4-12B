@@ -392,9 +392,9 @@ const BASE: &[&str] = &[""; REPS];
 /// lanes (`ls`) and a three-tile O-weight split (`t3`). Orders are rotated so no variant always
 /// eats the cold transition (V225's Latin square).
 const FFN_SWEEP: &[&str] = &[
-    "", "t4", "s1", "t4", "s1", "", "s1", "", "t4",
-    "", "t4", "s1", "t4", "s1", "", "s1", "", "t4",
-    "", "t4", "s1", "t4", "s1", "", "s1", "", "t4",
+    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
+    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
+    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
 ];
 
 const QKV_SWEEP: &[&str] = &[""; 3];
@@ -697,6 +697,644 @@ async fn decoder_feedforward(
             "" => {
                 launch(
                     ops::decoder_feedforward,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d2" => {
+                launch(
+                    ops::decoder_feedforward_v241,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "s1" => {
+                launch(
+                    ops::decoder_feedforward_s1,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d2" => {
+                launch(
+                    ops::decoder_feedforward_v241,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d2" => {
+                launch(
+                    ops::decoder_feedforward_v241,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "c4" => {
+                launch(
+                    ops::decoder_feedforward_v246,
                     (
                         ctx,
                         &mut residual,
