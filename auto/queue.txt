@@ -187,3 +187,7 @@ V196_dmn_interleave#r4
 V197_segment_curve
 V197_segment_curve#r2
 V197_segment_curve#r3
+V198_attnout_256b_runs
+V198_attnout_256b_runs#r2
+V198_attnout_256b_runs#r3
+V198_attnout_256b_runs#r4
