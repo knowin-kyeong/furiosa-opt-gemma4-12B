@@ -192,7 +192,9 @@ pub(crate) fn project_output(
         .transpose::<m![H % 120 = 88 / 4], m![H % 120 = 88 % 4 # 16]>()
         .commit_trim::<m![H % 120 = 88 % 4]>()
         .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120]>(0));
-    ctx.main
+    // V224: tile1 is independent of tile0 and both sat on MainContext. attn_out has no lookup
+    // pass (V32 made it f8 x f8), so unlike ffn its contraction is not pinned to main.
+    ctx.sub
         .begin(tile1.view())
         .fetch::<m![H % 120 = 32, Qs / 64 % 4, Dummy2], m![Qs % 64]>()
         .collect::<m![H % 120 = 32, Qs / 64 % 4, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
