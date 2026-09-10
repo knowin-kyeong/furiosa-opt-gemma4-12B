@@ -1029,11 +1029,23 @@ pub(crate) fn feedforward_v181(
         .collect::<m![Dummy2, L / 32 % 60], m![L % 32]>()
         .to_trf();
 
+    // V260: rows 0..30 are complete after the second pass B, so that half is stored into the
+    // 3,245-cycle hole where the DMA engine waits for the last tile's contraction; only the second
+    // half is left on the critical path. The split divides the 60-row block evenly because an HBM
+    // offset tile that reaches less far than its buffer is an `unpad`, and `unpad` has no HBM-side
+    // API. Measured -2,980 (-1.0%) over Arena jobs, negative in 5/5.
+    let mut down_hbm: HbmTensor<bf16, Chip, m![H / 60, H % 60]> = HbmTensor::new();
     let mut down: DmTensor<bf16, Chip, DownClusters, DownRows, m![H % 60]> = DmTensor::new();
     let p = contract_down_rows_16(ctx, &x_trf, &down0);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down1);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
+    down.view()
+        .tile::<m![H % 60], 30, m![H % 60 = 30 # 60]>(0)
+        .to_hbm_view(
+            &mut ctx.tdma,
+            down_hbm.view_mut().tile::<m![H % 60], 30, m![H / 60, H % 60 = 30 #{!} 60]>(0),
+        );
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
     let p = contract_down_rows_12(ctx, &x_trf, &down3);
@@ -1043,8 +1055,13 @@ pub(crate) fn feedforward_v181(
     // rejected by the synchronization checker), then load it in the layout the post-FF
     // RMSNorm reduces in (8 slices x 480 elements) and apply the global scale there: 1/8 of
     // the pass and no relayout afterwards.
-    let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    down.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut());
+    down.view()
+        .tile::<m![H % 60], 30, m![H % 60 = 30 # 60]>(30)
+        .to_hbm_view(
+            &mut ctx.tdma,
+            down_hbm.view_mut().tile::<m![H % 60], 30, m![H / 60, H % 60 = 30 #{!} 60]>(30),
+        );
+    let down_hbm: HbmTensor<bf16, Chip, m![H]> = unsafe { down_hbm.reshape() };
     let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
