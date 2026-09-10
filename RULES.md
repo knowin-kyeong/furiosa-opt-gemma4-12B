@@ -450,6 +450,49 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
+### 10.0j 2026-09-10 — 세션 정리: 커널은 하드웨어 바닥 근처다 (가장 최신, 여기서 시작할 것)
+
+**공식 SOTA = `826c0058` 6.6075.** 코드는 여전히 `V209_ffn_ring4_production` `21d3e20`이다 —
+이번 세션의 코드 실험은 둘 다 기각됐고, 점수는 전부 draw에서 왔다(같은 커밋의 draw 분포: 6.2045 / 6.2833 / 6.3776 / 6.5010 / 6.6075 (n=5, 평균 6.395, σ 2.5%)).
+
+**문서 최신본은 `V232_qkv_rope_no_rotate_half`에 있다.** 코드는 `V209_ffn_ring4_production`,
+하네스는 `V226_harness_v2`. 새 실험은 **코드를 V209에서, 하네스를 V226에서** 가져와 분기한다.
+
+#### 이번에 처음 확보한 것: furiosa-opt book 원문
+
+<https://developer.furiosa.ai/furiosa-opt/book/print.html> 한 페이지에 전문이 있다. RULES가
+"book"이라며 인용하던 두 문장은 전해 들은 것이었고, 그중 DMN 인터리빙 문장은 우리 형상에 적용되지
+않아 V8/V196을 낭비시켰다. 점수에 걸리는 사실은 [[furiosa-opt-book-hardware-facts]] 메모리와
+RESULTS의 V227 절에 있다. 요약: **Outer는 `Lane ≤ 8`, `Packet ≤ 64 B`이고 Lane<8이면 처리율이
+비례해 떨어진다 · Lane은 TRF(고정) 피연산자에서 온다 · TRF 64 KB/slice(crate 상수) ·
+fetch 비용 = `Time × (Packet / read_size)`, main의 read_size ≤ 32 B이고 **sub는 8 B 고정** ·
+DMA 엔진 8개, 명령당 startup ≈500 · HBM stack bit = 주소 bit 8 · `begin_interleaved`는 0.6.0에 있다.**
+
+#### 왜 코드로는 더 못 짜는가 (이번 세션의 산수)
+
+세 커널 실물 합 ≈450k, 정적 합 209k → 비 2.15. **프로파일러 counter가 2 GHz이므로 클럭만으로 2.0이
+설명되고, 모델 밖 오버헤드는 450k 중 31k(7%)뿐이다.** V197이 잰 한계 전송률 618 B/cycle은 2 GHz 기준
+1,236 B/1 GHz-cycle = **HBM 피크의 82%**다. 즉 **바이트도 전송률도 거의 다 썼다.**
+
+- **V227(가중치를 TRF에, Lane 1 → 8)**: contraction은 정말로 **36,526 → 5,984 static(6.1×)** 빨라졌다.
+  그런데 `to_trf`가 table lookup 출력을 거부해 dequant를 별도 pass로 빼야 하고, 그 f8 버퍼
+  (슬라이스당 115,200 B × 2행렬)의 DM 왕복이 이득을 삼킨다 → **+37,744 / +15,525. 기각.**
+  ⇒ **ffn pass A는 contraction-bound가 아니라 LUT-bound다.**
+- **V232(RoPE의 rotate_half 제거)**: Main 명령 31 → 29, −542 cycle로 설계대로 됐는데
+  **Core 명령이 54 → 60**(commit 1개가 tile commit 2개로 갈라져 디스크립터 일이 늘었다) → **+1,472. 기각.**
+  ⇒ **pass를 줄여도 commit이 늘면 손해다.** V218의 "pass당 ≈600"은 commit 수 고정에서만 성립한다.
+
+#### 다음 세션이 먼저 할 일
+
+1. **draw를 수확한다.** 하루 10회 예산에서 검증된 개선이 없으면 전부 V209 재제출에 쓴다
+   (`/root/draw2.sh N`). σ≈2%, 10회면 평균 대비 +3.5% 근처다. 이번 세션이 그것으로 +5.2%를 벌었다.
+2. 코드를 파려면 **남은 것은 작다**: `begin_interleaved`로 ffn up+gate pass A를 한 sequencer 연산으로
+   합치기(pass 1개 + LUT 테이블 재로드 838 절약, ffn −1% 정도, 인터리브 축 이름은 `Gs`를 쓸 것 —
+   `src/axes.rs`는 채점에서 무시되므로 새 축을 만들 수 없고 크기 2인 축은 `Gs`/`Dummy2`뿐이다),
+   V45(attn_out post-norm), V213 재진입(0.6.0이 설치돼 있으니 0.7.0 재시도는 아직 열려 있다).
+3. **A/B는 반드시 한 잡 안에서 인접 실행끼리.** 잡이 다르면 머신 속도가 다르다(같은 코드가
+   잡마다 qkv 94.7k~99.1k). V226 하네스가 변형당 12~25회를 9~17초에 돌린다.
+
 ### 10.0i 2026-09-10 — 공식 점수는 추첨이다: 같은 코드가 6.2833과 6.5010을 뽑았다 (가장 최신, 여기서 시작할 것)
 
 **공식 SOTA = `b772875a` 6.5010** (2026-09-10 11:07 UTC). **코드는 `b78a63a0`(6.2833)과 완전히 같다** —
