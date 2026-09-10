@@ -1014,8 +1014,8 @@ pub(crate) fn project_output_gathered(
     let packed: DmTensor<bf16, Chip, TwoClusters, m![H / 480 % 4, 1 # 64], m![H % 480]> = ctx
         .main
         .begin(ringed.view())
-        .fetch::<m![H / 120 % 4, H / 8 % 15], m![H % 8]>()
-        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .fetch::<m![H / 120 % 4, H / 8 % 15], m![H % 8 # 16]>()
+        .collect::<m![H / 8 % 60], m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit();
 
