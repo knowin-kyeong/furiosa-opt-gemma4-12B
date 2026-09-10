@@ -964,8 +964,11 @@ pub(crate) fn feedforward_v181(
         down_weight_scale.to_dm(&mut ctx.tdma);
     let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
     let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
-    let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
-    let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
+    // V214 probe: can two tiles overlap? The last tile starts at 44, so rows 44..47 are loaded,
+    // contracted and committed twice with identical values. If the compiler accepts that, a row
+    // count that is not a multiple of four can still be covered by multiples of four, which is
+    // what unblocks the 256-byte-aligned two-chunk down layout (V213, rows per slice = 15).
+    let down3 = load_down_rows_16(ctx, down_weight_packed, 44);
 
     // V206: sixty-four copies per cluster and a ring of 4, not eight copies and a ring of 32.
     // The switch is pure movement on MainContext, and ffn's MainContext (83.5k static cycles) is
@@ -1025,10 +1028,8 @@ pub(crate) fn feedforward_v181(
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let p = contract_down_rows_8(ctx, &x_trf, &down3);
-    reduce_down_rows_8(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
-    let p = contract_down_rows_4(ctx, &x_trf, &down4);
-    reduce_down_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 56, &mut down);
+    let p = contract_down_rows_16(ctx, &x_trf, &down3);
+    reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 44, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
     // rejected by the synchronization checker), then load it in the layout the post-FF
