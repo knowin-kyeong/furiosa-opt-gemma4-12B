@@ -428,7 +428,7 @@ pub(crate) fn feedforward(
     let gate_scale: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![L % 60, H / 16 % 120]> =
         gate_weight_scale.to_dm(&mut ctx.tdma);
     let down0 = load_down_rows_16(ctx, down_weight_packed, 0);
-    let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns2, m![H % 15, L / 16 % 480]> =
+    let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> =
         down_weight_scale.to_dm(&mut ctx.tdma);
     let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
     let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
