@@ -154,21 +154,31 @@ pub(crate) fn project_output(
         .tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 # 120, Qs]>(88)
         .to_dm(&mut ctx.tdma);
 
-    // x as two f8 pieces of x * s (see shared/f8split.rs), made once on eight slices and staged
-    // through HBM so that each slice loads its column chunk of both pieces with one descriptor;
-    // the tiles then contract f8 x f8 with no lookup pass, and the post-attention RMSNorm
-    // absorbs s.
-    let xs: DmTensor<bf16, Chip, Cluster, XSlices256, m![Qs % 256]> = x.to_dm(&mut ctx.tdma);
+    // V251: the f8 split runs where the contraction needs it -- on all 512 slices -- instead of on
+    // sixteen slices with an HBM round trip in between. The old path was load 535 -> split ->
+    // store 399 -> store 399 -> load 933, and the 527 cycles the DMA engine spent waiting for the
+    // split were what held the O-weight stream back to cycle 2,464. Loading x straight into the
+    // contraction's own layout costs the same 933 (each slice still reads 512 B: 256 bf16 now
+    // instead of 2 x 256 f8) and drops the other three commands. Measured -4,198 (-7.9%) over
+    // seven Arena jobs, negative in 7/7.
     // s = 16 is safe without measuring: the attention output is a convex combination of the
     // value rows, which the value RMSNorm bounds by sqrt(Ds) = 16, so |x s| <= 256 < 448.
-    let (x_hi, x_lo) = hi_lo_x256(ctx, &xs, 16f32);
-    let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 256, Dummy2, Qs % 256]> = HbmTensor::new();
-    x_hi.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 256, Dummy2 = 1 #{!} 2, Qs % 256]>(0));
-    x_lo.view()
-        .to_hbm_view(&mut ctx.tdma, x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 256, Dummy2 = 1 #{!} 2, Qs % 256]>(1));
-
-    let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![Dummy2, Qs % 256]> = x2_hbm.to_dm(&mut ctx.tdma);
+    let xs: DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns256, m![Qs % 256]> = x.to_dm(&mut ctx.tdma);
+    let (x_hi, x_lo) = hi_lo_x_direct(ctx, &xs, 16f32);
+    let mut x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![Dummy2, Qs % 256]> =
+        DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .commit_trim::<m![Qs % 32]>()
+        .commit_view(x.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Qs % 256]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .commit_trim::<m![Qs % 32]>()
+        .commit_view(x.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Qs % 256]>(1));
     let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![1], m![Dummy2, Qs % 256]> = ctx
         .sub
         .begin(x.view())
@@ -223,8 +233,7 @@ pub(crate) fn project_output(
 /// 256 slices live; the reduce still runs over the innermost slice axis (V186's rule).
 type HiddenRows256 = m![H / 120 % 16, 1 # 16];
 type HiddenRowsByColumns256 = m![H / 120 % 16, Qs / 256];
-type XSlices256 = m![1 # 16, Qs / 256];
-hi_lo_trunc_fns!(hi_lo_x256, Cluster, XSlices256, Qs, 256, 16, 32, 64);
+hi_lo_trunc_fns!(hi_lo_x_direct, TwoClusters, HiddenRowsByColumns256, Qs, 256, 16, 32, 64);
 
 type TwoClusters = m![H / 1920];
 type HiddenRows = m![H / 60 % 32, 1 # 8];
