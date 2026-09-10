@@ -189,13 +189,13 @@ impl Fixture {
             .map(String::as_str)
             .filter(|key| {
                 let test = key.split('.').next().unwrap_or(key);
-                !TESTS.iter().any(|candidate| candidate.name == test)
+                !PLAN.iter().any(|candidate| candidate.name == test)
             })
             .collect();
         assert!(
             orphans.is_empty(),
             "the fixture has expectations no test reads, so they are silently unchecked: {orphans:?}\n\
-             add the matching `Test` row, `run_test` arm and shim, or drop the generator"
+             add the matching `Plan` row, `run_plan` arm and shim, or drop the generator"
         );
     }
 
