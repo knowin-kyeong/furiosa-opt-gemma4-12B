@@ -393,13 +393,17 @@ const BASE: &[&str] = &[""; REPS];
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
 const FFN_SWEEP: &[&str] = &[
-    "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4",
+    "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds",
 ];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &[""; 3];
+const QKV_SWEEP: &[&str] = &[
+    "", "nf", "nf", "", "", "nf", "nf", "", "", "nf", "nf", "", "", "nf", "nf", "",
+];
 
-const ATTN_SWEEP: &[&str] = &[""; 3];
+const ATTN_SWEEP: &[&str] = &[
+    "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -560,6 +564,32 @@ async fn sliding_project_qkv(
                 )
                 .await;
             }
+            "nf" => {
+                launch(
+                    ops::sliding_project_qkv_nf,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }
         bench.record(&key_of(plan.name, variant)).await;
@@ -643,6 +673,20 @@ async fn sliding_attention_output(
             "as" => {
                 launch(
                     ops::sliding_attention_output_1p_split,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "n1" => {
+                launch(
+                    ops::sliding_attention_output_one_piece_nf,
                     (
                         ctx,
                         &x,
@@ -757,6 +801,28 @@ async fn decoder_feedforward(
             "ds" => {
                 launch(
                     ops::decoder_feedforward_v260,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "dn" => {
+                launch(
+                    ops::decoder_feedforward_v260_nf,
                     (
                         ctx,
                         &mut residual,
