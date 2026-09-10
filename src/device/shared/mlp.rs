@@ -723,7 +723,7 @@ macro_rules! down_tile2_fns {
             scale_all: &DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns2, m![H % 15, L / 16 % 480]>,
             inv_s_vrf: &VrfTensor<f32, Chip, DownClusters, DownRowsByColumns2, m![1 # 8]>,
             offset: usize,
-            out: &mut DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 20]>,
+            out: &mut DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 = $rows]>,
         ) {
             let scale_vrf: VrfTensor<f32, Chip, DownClusters, DownRowsByColumns2, m![H % 15 = $rows, L / 16 % 480]> = ctx
                 .sub
@@ -749,7 +749,7 @@ macro_rules! down_tile2_fns {
                 .cast::<bf16, m![1 # 16]>()
                 .transpose::<m![H % 15 = $rows / 4], m![H % 15 = $rows % 4 # 16]>()
                 .commit_trim::<m![H % 15 = $rows % 4]>()
-                .commit_view(out.view_mut().tile::<m![H % 15], $rows, m![H % 15 = $rows #{!} 20]>(offset));
+                .commit_view(out.view_mut().view_mut_all());
         }
     };
 }
@@ -1120,22 +1120,30 @@ pub(crate) fn feedforward_v181(
         .collect::<m![Dummy2, L / 32 % 240], m![L % 32]>()
         .to_trf();
 
-    let mut down: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 # 20]> = DmTensor::new();
+    // Four four-row output buffers, not one fifteen-row buffer: 4 bf16 = 8 B is exactly the DM
+    // write unit, where 15 bf16 = 30 B is not (and padding it to 32 or 40 B aborts the compiler).
+    let mut down_a: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 = 4]> = DmTensor::new();
+    let mut down_b: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 = 4]> = DmTensor::new();
+    let mut down_c: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 = 4]> = DmTensor::new();
+    let mut down_d: DmTensor<bf16, Chip, DownClusters, DownRows2, m![H % 15 = 4]> = DmTensor::new();
     let p = contract_down2_rows_4(ctx, &x_trf, &down0);
-    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down);
+    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 0, &mut down_a);
     let p = contract_down2_rows_4(ctx, &x_trf, &down1);
-    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 4, &mut down);
+    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 4, &mut down_b);
     let p = contract_down2_rows_4(ctx, &x_trf, &down2);
-    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 8, &mut down);
+    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 8, &mut down_c);
     let p = contract_down2_rows_4(ctx, &x_trf, &down3);
-    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 11, &mut down);
+    reduce_down2_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 11, &mut down_d);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
     // rejected by the synchronization checker), then load it in the layout the post-FF
     // RMSNorm reduces in (8 slices x 480 elements) and apply the global scale there: 1/8 of
     // the pass and no relayout afterwards.
     let mut down_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
-    down.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut());
+    down_a.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(0));
+    down_b.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(4));
+    down_c.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(8));
+    down_d.view().to_hbm_view(&mut ctx.tdma, down_hbm.view_mut().tile::<m![H % 15], 4, m![H / 15, H % 15 = 4 # 15]>(11));
     let down = rmsnorm::load_reducing::<Cluster>(ctx, &down_hbm);
     let down_global_scale: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> =
         down_global_scale.to_dm(&mut ctx.tdma);
