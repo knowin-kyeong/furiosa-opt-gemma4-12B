@@ -703,6 +703,29 @@ fn contract_up_gate_full(
         .commit()
 }
 
+/// V223: the same pass A on the *sub* context. up and gate are independent and both sat on
+/// MainContext, which V206 showed is what actually binds ffn; MainContext and SubContext share
+/// the Tensor Unit pipeline, so the overlap is bounded, but the book's bound is "the larger of
+/// the two" rather than their sum. If a contraction lowers on sub at all, gate can run alongside
+/// up instead of after it.
+fn contract_up_gate_full_sub(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]>,
+    packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
+) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> {
+    ctx.sub
+        .begin(packed.view())
+        .fetch::<m![L % 30, H / 64, Dummy2], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 30, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![L % 30, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![H / 16 % 4]>()
+        .contract_time::<m![L % 30, H / 64]>()
+        .contract_lane::<m![L % 30, H / 64], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
+        .commit_trim::<m![H / 16 % 4]>()
+        .commit()
+}
+
 /// Pass B for one tile of `$rows` rows: block scales and the column reduction, one f32 scalar
 /// packet per row (no transpose, so any tile height works).
 macro_rules! up_gate_reduce_full_fns {
@@ -992,7 +1015,7 @@ pub(crate) fn feedforward_v181(
         .to_trf();
 
     let up_partials = contract_up_gate_full(ctx, &x_trf, &up_w);
-    let gate_partials = contract_up_gate_full(ctx, &x_trf, &gate_w);
+    let gate_partials = contract_up_gate_full_sub(ctx, &x_trf, &gate_w);
     let mut up: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
     let mut gate: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
     reduce_up_gate_full_8(ctx, &up_partials, &up_scale, 0, &mut up);
