@@ -275,3 +275,33 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V217 gating probe: does an inter-slice reduce span 256 slices?
+//
+// V215 showed qkv's stream runs 10% faster with a cyclic row mapping, but in that mapping a head's
+// 256 rows land one per slice, so the ring-64 head gather would become a ring-256 (~61k) and the
+// win evaporates. The way out is to stop gathering heads onto single slices at all: with one
+// channel per slice, the head RMSNorm's sum of squares becomes an *inter-slice reduce* over 256
+// slices - the cheap VRU primitive, not a switch.
+//
+// The largest inter-slice reduce anywhere in this repo today spans 32 slices (attention.rs:176).
+// If 256 does not lower, V217 is dead and nobody should start it.
+// ---------------------------------------------------------------------------------------------
+pub(crate) fn probe_reduce_256(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8, H]> = weight.to_dm(&mut ctx.tdma);
+    let _r: DmTensor<f32, Chip, QueryClusters, m![1 # 256], m![1 # 8]> = ctx
+        .main
+        .begin(w.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Qs % 8 = 1, H / 8], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_intra_slice_reduce::<H, m![Qs % 8 = 1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_inter_slice_reduce::<m![1 # 256], m![Qs % 8 = 1]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+}
