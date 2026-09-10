@@ -735,7 +735,7 @@ async fn main() {
             collector.clear();
         }
 
-        let outputs = run_test(&mut ctx, &fixture, test.name).await;
+        let outputs = run_test(&mut ctx, &fixture, test).await;
 
         let cycles = if profile {
             // Spans are decoded off the launch hot path during deferred read-back, not
