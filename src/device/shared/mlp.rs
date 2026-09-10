@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{Dummy2, Dummy256, Dummy8, H, L};
+use crate::axes::{C, Dummy2, Dummy256, Dummy8, Gf, H, L};
 use crate::device::layout::{Cluster, Slice};
 use crate::device::shared::rmsnorm::{self, ReducingSlices};
 use crate::{hi_lo_fns, max_square_fns, pow2_scale_fns, stage_packet_fns};
@@ -1194,41 +1194,82 @@ pub(crate) fn feedforward_v181(
 }
 
 // ---------------------------------------------------------------------------------------------
-// V206: the x ring-broadcast, parameterised by ring size.
+// V206: the x ring-broadcast, swept over ring size.
 //
-// V158 replaced a 512-descriptor replicated load (~45k real) with `256/ring` copies from HBM
-// plus a ring switch that fills each copy's `ring` slices. The ring size was never swept: 32 was
-// the first value that worked. It is now the single largest pure-movement item on MainContext -
-// 7,943 static cycles in *each* of qkv and ffn - and V205 showed MainContext work is not hidden
-// behind the weight stream on real hardware, so it costs roughly twice that in real cycles.
+// V158 replaced a 512-descriptor replicated load (~45k real) with `256/ring` copies read from
+// HBM plus a ring switch that fills each copy's `ring` slices. The ring size was never swept: 32
+// was simply the first value that worked. It is now the largest pure-movement item on
+// MainContext - 7,943 static cycles in *each* of qkv and ffn - and V205 showed MainContext work
+// is not hidden behind the weight stream on real hardware, so it costs about twice that in real
+// cycles.
 //
-// The switch cost is ring_size x Time::SIZE x flits_per_packet, i.e. linear in the ring, while
+// Switch cost is ring_size x Time::SIZE x flits_per_packet, i.e. linear in the ring, while
 // halving the ring doubles the descriptor count of the HBM load (16 -> 32 -> 64 -> 128 per chip),
-// which is still far below the ~256-per-region threshold where repeated reads of one HBM region
-// turn pathological (V159/V161). So smaller rings should trade cheap DMA for expensive Main.
+// still far below the ~256-per-region threshold where repeated reads of one HBM region turn
+// pathological (V159/V161). So a smaller ring trades cheap DMA for expensive Main.
+//
+// The copies axis and the ring axis must be two *different* axes: factoring one axis as
+// `m![Dummy256 / k, Dummy256 % k]` is rejected with "Switch snoop bitmap disagrees with the
+// (OutSlice x OutTime) enumeration". Gf = 16 and C = 64 are unused on the sliding and ffn paths,
+// so they serve as copy-count axes the way Dummy8 already does.
 // ---------------------------------------------------------------------------------------------
-macro_rules! broadcast_x_ring {
-    ($name:ident, $ring:literal) => {
-        pub(crate) fn $name<C: M>(
-            ctx: &mut Context,
-            x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
-        ) -> DmTensor<f8e4m3, Chip, C, m![Dummy256 / $ring, Dummy256 % $ring], m![Dummy2, H]> {
-            let copies: DmTensor<f8e4m3, Chip, C, m![Dummy256 / $ring, 1 # $ring], m![Dummy2, H]> =
-                x2_hbm.to_dm(&mut ctx.tdma);
-            ctx.main
-                .begin(copies.view())
-                .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-                .switch::<m![Dummy256 / $ring, Dummy256 % $ring], m![Dummy2, H / 32]>(
-                    SwitchConfig::CustomBroadcast { ring_size: $ring },
-                )
-                .collect::<m![Dummy2, H / 32], m![H % 32]>()
-                .commit_trim::<m![H % 32]>()
-                .commit()
-        }
-    };
+
+/// Eight copies per cluster, ring 32 - the V158/V204 shape, kept as the control.
+pub(crate) fn broadcast_x_r32<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![Dummy8, Dummy256 / 8], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![Dummy8, 1 # 32], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
 }
 
-broadcast_x_ring!(broadcast_x_r32, 32);
-broadcast_x_ring!(broadcast_x_r16, 16);
-broadcast_x_ring!(broadcast_x_r8, 8);
-broadcast_x_ring!(broadcast_x_r4, 4);
+/// Sixteen copies per cluster, ring 16.
+pub(crate) fn broadcast_x_r16<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![Gf, Dummy256 / 16], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![Gf, 1 # 16], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Gf, Dummy256 / 16], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 16 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
+}
+
+/// Thirty-two copies per cluster, ring 8.
+pub(crate) fn broadcast_x_r8<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![C / 2, Dummy256 / 32], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![C / 2, 1 # 8], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![C / 2, Dummy256 / 32], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 8 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
+}
+
+/// Sixty-four copies per cluster, ring 4.
+pub(crate) fn broadcast_x_r4<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![C, Dummy256 / 64], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![C, 1 # 4], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![C, Dummy256 / 64], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 4 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
+}
