@@ -292,39 +292,15 @@ fn apply_output_channel_scale(
 // ---------------------------------------------------------------------------------------------
 
 pub(crate) fn pass_chain_0(ctx: &mut Context) {
-    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
-    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
-    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
-        .main
-        .begin(scratch.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
+    // The scratch buffer is uninitialised and the results are discarded, so only the timing
+    // matters; the kernel's own outputs are untouched and still verify.
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
 }
 
 pub(crate) fn pass_chain_4(ctx: &mut Context) {
-    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
-    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
-    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
-        .main
-        .begin(scratch.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
+    // The scratch buffer is uninitialised and the results are discarded, so only the timing
+    // matters; the kernel's own outputs are untouched and still verify.
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
     let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
         .main
         .begin(seed.view())
@@ -381,21 +357,9 @@ pub(crate) fn pass_chain_4(ctx: &mut Context) {
 }
 
 pub(crate) fn pass_chain_8(ctx: &mut Context) {
-    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
-    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
-    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
-        .main
-        .begin(scratch.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
+    // The scratch buffer is uninitialised and the results are discarded, so only the timing
+    // matters; the kernel's own outputs are untouched and still verify.
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
     let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
         .main
         .begin(seed.view())
@@ -504,21 +468,9 @@ pub(crate) fn pass_chain_8(ctx: &mut Context) {
 }
 
 pub(crate) fn pass_chain_16(ctx: &mut Context) {
-    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
-    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
-    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
-        .main
-        .begin(scratch.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
+    // The scratch buffer is uninitialised and the results are discarded, so only the timing
+    // matters; the kernel's own outputs are untouched and still verify.
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
     let p0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
         .main
         .begin(seed.view())
@@ -731,21 +683,9 @@ pub(crate) fn pass_chain_16(ctx: &mut Context) {
 }
 
 pub(crate) fn pass_indep_8(ctx: &mut Context) {
-    // Garbage DM masked to +0.0, so the chain below is finite whatever was in the buffer.
-    let scratch: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
-    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
-        .main
-        .begin(scratch.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![1 # 4]>()
-        .vector_logic(LogicBinaryOpF32::BitAnd, 0f32)
-        .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
+    // The scratch buffer is uninitialised and the results are discarded, so only the timing
+    // matters; the kernel's own outputs are untouched and still verify.
+    let seed: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = DmTensor::new();
     let q0: DmTensor<f32, Chip, QueryClusters, QueryRows, m![1 # 8]> = ctx
         .main
         .begin(seed.view())
