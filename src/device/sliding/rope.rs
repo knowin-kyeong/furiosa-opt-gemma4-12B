@@ -490,7 +490,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
                 .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1)
                 .tile::<m![Ds], 128, m![Ds = 128 # 512]>(0),
         )
-        .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![1], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .to_vrf();
@@ -502,7 +502,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
                 .tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1)
                 .tile::<m![Ds], 128, m![Ds = 128 # 512]>(128),
         )
-        .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![1], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .to_vrf();
@@ -514,7 +514,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
 
     ctx.main
         .begin(first_half_q)
-        .fetch::<m![Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![Gs], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Gs, Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_init()
@@ -528,7 +528,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
 
     ctx.main
         .begin(second_half_q)
-        .fetch::<m![Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![Gs], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Gs, Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_init()
@@ -547,7 +547,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
 
     ctx.main
         .begin(first_half_k)
-        .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![1], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_init()
@@ -561,7 +561,7 @@ pub(crate) fn apply_rope_heads_swap<C: M, S: M>(
 
     ctx.main
         .begin(second_half_k)
-        .fetch::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .fetch::<m![1], m![Ds = 128]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_init()
