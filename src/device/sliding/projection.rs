@@ -906,17 +906,17 @@ pub(crate) fn project_output_split_store(
     let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
     contraction
         .view()
-        .tile::<m![H % 120], 88, m![H % 120 = 88 # 120]>(0)
+        .tile::<m![H % 120], 60, m![H % 120 = 60 # 120]>(0)
         .to_hbm_view(
             &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 #{!} 120]>(0),
+            gathered_hbm.view_mut().tile::<m![H % 120], 60, m![H / 120, H % 120 = 60 #{!} 120]>(0),
         );
     contraction
         .view()
-        .tile::<m![H % 120], 32, m![H % 120 = 32 # 120]>(88)
+        .tile::<m![H % 120], 60, m![H % 120 = 60 # 120]>(60)
         .to_hbm_view(
             &mut ctx.tdma,
-            gathered_hbm.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 120]>(88),
+            gathered_hbm.view_mut().tile::<m![H % 120], 60, m![H / 120, H % 120 = 60 #{!} 120]>(60),
         );
     gathered_hbm
 }
