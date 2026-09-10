@@ -364,37 +364,39 @@ async fn rope_table<D: AxisName>(
 
 struct Test {
     name: &'static str,
+    /// "" is the graded kernel; anything else selects an experiment variant in the shim below.
+    variant: &'static str,
     atol: f32,
     rtol: f32,
+}
+
+const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
+    Test { name, variant, atol, rtol: RTOL }
 }
 
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    // Measurement only (tests/ is ignored by the grader): every kernel five times in one job,
-    // so a job shows the cold (first) launch and a median/stdev over four warm repeats.
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
+    // V211: one extra 29.5 MB down-weight load, misaligned 960-byte runs (q0) against
+    // 256-byte-aligned 3,840-byte runs (q1). The gap between the increments is the penalty.
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "q0", 0.01),
+    t("decoder_feedforward", "q1", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "q0", 0.01),
+    t("decoder_feedforward", "q1", 0.01),
+    t("decoder_feedforward", "", 0.01),
+    t("decoder_feedforward", "q0", 0.01),
+    t("decoder_feedforward", "q1", 0.01),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_attention_output", "", 0.05),
 ];
 
-async fn run_test(ctx: &mut Context, fixture: &Fixture, name: &'static str) -> Vec<(&'static str, Vec<f32>)> {
-    match name {
+async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
+    match test.name {
         "sliding_project_qkv" => sliding_project_qkv(ctx, fixture).await,
         "sliding_attention_output" => sliding_attention_output(ctx, fixture).await,
-        "decoder_feedforward" => decoder_feedforward(ctx, fixture).await,
+        "decoder_feedforward" => decoder_feedforward(ctx, fixture, test.variant).await,
         other => panic!("no shim for test `{other}` -- add one in run_test"),
     }
 }
@@ -487,7 +489,7 @@ async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture) -> Vec<(
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
-async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("decoder_feedforward", fixture);
 
     let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
@@ -516,9 +518,9 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
 
     let layer_scalar: HbmTensor<bf16, Chip, m![1 # 8]> = s.constant_bf16(ctx, "layer_scalar", &[LAYER_SCALAR; 8]).await;
 
-    launch(
-        ops::decoder_feedforward,
-        (
+    match variant {
+        // VARIANTS:decoder_feedforward
+        "q0" => launch(ops::decoder_feedforward_q0, (
             ctx,
             &mut residual,
             &pre_ff_rms_weight,
@@ -533,9 +535,41 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
             &down_global_scale,
             &post_ff_rms_weight,
             &layer_scalar,
-        ),
-    )
-    .await;
+        )).await,
+        "q1" => launch(ops::decoder_feedforward_q1, (
+            ctx,
+            &mut residual,
+            &pre_ff_rms_weight,
+            &up_weight_packed,
+            &gate_weight_packed,
+            &down_weight_packed,
+            &up_weight_scale,
+            &gate_weight_scale,
+            &down_weight_scale,
+            &up_global_scale,
+            &gate_global_scale,
+            &down_global_scale,
+            &post_ff_rms_weight,
+            &layer_scalar,
+        )).await,
+        "" => launch(ops::decoder_feedforward, (
+            ctx,
+            &mut residual,
+            &pre_ff_rms_weight,
+            &up_weight_packed,
+            &gate_weight_packed,
+            &down_weight_packed,
+            &up_weight_scale,
+            &gate_weight_scale,
+            &down_weight_scale,
+            &up_global_scale,
+            &gate_global_scale,
+            &down_global_scale,
+            &post_ff_rms_weight,
+            &layer_scalar,
+        )).await,
+        other => panic!("no variant `{other}` for decoder_feedforward"),
+    };
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
