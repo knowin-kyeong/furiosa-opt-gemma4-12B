@@ -378,11 +378,12 @@ struct Plan {
 
 const RTOL: f32 = 1e-2;
 
-/// Launches per kernel: one cold (the first) plus REPS-1 warm. V226 raised this from 5 to 13 --
+/// Launches per kernel: one cold (the first) plus REPS-1 warm. V226's first job measured the
+/// real cost: 39 launches took 9.0 s of the 70 s budget, so this is 25 --
 /// the 70 s job cap is host time (per-entry weight re-upload), not device time, and the shims now
 /// upload once and launch many times, so repeats are nearly free. Warm run-to-run is +-0.7% on
 /// qkv, so 12 warm samples resolve a 1k difference that 4 samples could not.
-const REPS: usize = 13;
+const REPS: usize = 25;
 
 const BASE: &[&str] = &[""; REPS];
 
