@@ -729,10 +729,13 @@ macro_rules! up_gate_reduce_full_fns {
 
             ctx.main
                 .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 64, Dummy2, H / 16 % 4]>(offset))
-                .fetch::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
-                .collect::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
+                .fetch::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
+                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
                 .vector_init()
                 .vector_intra_slice_tag(TagMode::Zero)
+                // The FP multiply is a Way4 operation, so the eight-element flit is split into
+                // two four-element packets first; the Dummy2 piece axis moves into Time here.
+                .vector_narrow_split::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
                 .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
                 .vector_intra_slice_reduce::<H, m![L % 30 = $rows], m![1 # 4]>(IntraSliceReduceOpF32::Add)
                 .vector_widen_pad::<m![1 # 8]>()
