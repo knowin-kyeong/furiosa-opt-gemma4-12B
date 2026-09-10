@@ -384,12 +384,25 @@ const RTOL: f32 = 1e-2;
 /// qkv, so 12 warm samples resolve a 1k difference that 4 samples could not.
 const REPS: usize = 13;
 
+#[allow(dead_code)]
 const BASE: &[&str] = &[""; REPS];
 
+/// V237/V238: production ffn against the four-tile down stage (`t4`) and the four-column-chunk
+/// down layout (`d4`), rotated so no variant always eats the cold transition (V225's Latin square).
+const FFN_SWEEP: &[&str] = &[
+    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
+    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
+    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
+    "", "t4", "d4", "t4", "d4", "", "d4", "", "t4",
+];
+
+/// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
+const GUARD: &[&str] = &[""; 3];
+
 const PLAN: &[Plan] = &[
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: BASE },
-    Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: BASE },
-    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: BASE },
+    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
+    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: GUARD },
+    Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: GUARD },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
@@ -649,12 +662,58 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
+            "d4" => {
+                launch(
+                    ops::decoder_feedforward_v237,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "t4" => {
+                launch(
+                    ops::decoder_feedforward_v238,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for decoder_feedforward"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if i == 0 {
-            outputs = vec![("expected", read_bf16(ctx, &residual).await)];
+        // Compare the first launch of each distinct variant, not just the first launch overall:
+        // a variant that is fast but wrong must not pass unnoticed.
+        if plan.order[..i].iter().all(|seen| seen != variant) {
+            outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
     outputs
