@@ -1097,12 +1097,12 @@ pub(crate) fn probe_upgate_block(ctx: &mut Context, packed: &HbmTensor<f4e2m1, C
 pub(crate) fn probe_upgate_cyclic(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
     let probe: DmTensor<f4e2m1, Chip, UpGateClusters, m![L / 2 % 256], m![L / 512 % 15, L % 2, H]> =
         packed.to_dm(&mut ctx.tdma);
-    let _keep: DmTensor<f8e4m3, Chip, UpGateClusters, m![L / 2 % 256], m![L % 2 = 1, H]> = ctx
+    let _keep: DmTensor<f8e4m3, Chip, UpGateClusters, m![L / 2 % 256], m![L % 2, H]> = ctx
         .main
-        .begin(probe.view().tile::<m![L / 512 % 15], 1, m![L / 512 % 15 = 1 # 15, L % 2 = 1 # 2, H]>(0))
-        .fetch::<m![L % 2 = 1, H / 64], m![H % 64]>()
+        .begin(probe.view().tile::<m![L / 512 % 15], 1, m![L / 512 % 15 = 1 # 15, L % 2, H]>(0))
+        .fetch::<m![L % 2, H / 64], m![H % 64]>()
         .fetch_table_lookup::<f8e4m3>()
-        .collect::<m![L % 2 = 1, H / 64, H / 32 % 2], m![H % 32]>()
+        .collect::<m![L % 2, H / 64, H / 32 % 2], m![H % 32]>()
         .commit_trim::<m![H % 32]>()
         .commit();
 }
