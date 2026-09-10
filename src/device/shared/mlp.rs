@@ -412,8 +412,14 @@ pub(crate) fn feedforward(
         down_weight_scale.to_dm(&mut ctx.tdma);
     let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
     let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
-    let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
-    let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
+    // V238: four tiles, not five. Every pass A reloads the 4 KB f4 lookup table (838 cycles of
+    // DMA) and every tile load carries ~550 cycles of fixed cost, so merging the trailing 8 and 4
+    // into one 12 is ~1.4k of static DMA and one pass fewer on each of Main and Sub. Measured at
+    // -686 cycles over four Arena jobs, negative in all four. The tile plan is at a sharp optimum
+    // here: a bigger first tile (two 30s) costs +17.5k and a smaller one (8/16/16/16/4) +25.6k,
+    // both because the 16-row scale VRF is 7,680 B of an 8 KB file and the trailing small tiles
+    // are what let its pressure decay.
+    let down3 = load_down_rows_12(ctx, down_weight_packed, 48);
 
     // Each slice needs only its 1920-wide half of x (both f8 pieces, one DMA).
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsByColumns, m![Dummy2, H % 1920]> = x2.to_dm(&mut ctx.tdma);
@@ -477,10 +483,8 @@ pub(crate) fn feedforward(
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let p = contract_down_rows_8(ctx, &x_trf, &down3);
-    reduce_down_rows_8(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
-    let p = contract_down_rows_4(ctx, &x_trf, &down4);
-    reduce_down_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 56, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down3);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
     // rejected by the synchronization checker), then load it in the layout the post-FF
@@ -656,6 +660,7 @@ macro_rules! down_tile_fns {
 down_tile_fns!(load_down_rows_16, contract_down_rows_16, reduce_down_rows_16, 16);
 down_tile_fns!(load_down_rows_8, contract_down_rows_8, reduce_down_rows_8, 8);
 down_tile_fns!(load_down_rows_4, contract_down_rows_4, reduce_down_rows_4, 4);
+down_tile_fns!(load_down_rows_12, contract_down_rows_12, reduce_down_rows_12, 12);
 
 // ---------------------------------------------------------------------------------------------
 // V181: up/gate with each slice holding 30 whole rows and all of H. A slice's weight (57.6 KB)
@@ -964,8 +969,14 @@ pub(crate) fn feedforward_v181(
         down_weight_scale.to_dm(&mut ctx.tdma);
     let down1 = load_down_rows_16(ctx, down_weight_packed, 16);
     let down2 = load_down_rows_16(ctx, down_weight_packed, 32);
-    let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
-    let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
+    // V238: four tiles, not five. Every pass A reloads the 4 KB f4 lookup table (838 cycles of
+    // DMA) and every tile load carries ~550 cycles of fixed cost, so merging the trailing 8 and 4
+    // into one 12 is ~1.4k of static DMA and one pass fewer on each of Main and Sub. Measured at
+    // -686 cycles over four Arena jobs, negative in all four. The tile plan is at a sharp optimum
+    // here: a bigger first tile (two 30s) costs +17.5k and a smaller one (8/16/16/16/4) +25.6k,
+    // both because the 16-row scale VRF is 7,680 B of an 8 KB file and the trailing small tiles
+    // are what let its pressure decay.
+    let down3 = load_down_rows_12(ctx, down_weight_packed, 48);
 
     // V206: sixty-four copies per cluster and a ring of 4, not eight copies and a ring of 32.
     // The switch is pure movement on MainContext, and ffn's MainContext (83.5k static cycles) is
@@ -1025,10 +1036,8 @@ pub(crate) fn feedforward_v181(
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 16, &mut down);
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
-    let p = contract_down_rows_8(ctx, &x_trf, &down3);
-    reduce_down_rows_8(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
-    let p = contract_down_rows_4(ctx, &x_trf, &down4);
-    reduce_down_rows_4(ctx, &p, &down_scale, &inv_s_vrf, 56, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down3);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
 
     // Gather the [H] vector from both clusters through HBM (a cross-cluster DM-to-DM DMA is
     // rejected by the synchronization checker), then load it in the layout the post-FF
