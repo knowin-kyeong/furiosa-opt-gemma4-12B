@@ -395,12 +395,12 @@ const BASE: &[&str] = &[""; REPS];
 const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &[""; 3];
-
-const ATTN_SWEEP: &[&str] = &[
-    "", "dx", "dx", "", "", "dx", "dx", "", "", "dx", "dx", "",
-    "", "dx", "dx", "", "", "dx", "dx", "", "", "dx", "dx", "",
+const QKV_SWEEP: &[&str] = &[
+    "", "ck", "ck", "", "", "ck", "ck", "", "", "ck", "ck", "",
+    "", "ck", "ck", "", "", "ck", "ck", "", "", "ck", "ck", "",
 ];
+
+const ATTN_SWEEP: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -512,6 +512,32 @@ async fn sliding_project_qkv(
             "" => {
                 launch(
                     ops::sliding_project_qkv,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "ck" => {
+                launch(
+                    ops::sliding_project_qkv_chunked,
                     (
                         ctx,
                         &x,

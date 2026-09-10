@@ -1247,3 +1247,93 @@ pub(crate) fn project_output_norm(
     out.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// V256: the K/V projections as a chunked reduction, to price the structure before qkv's whole
+// projection moves to it.
+//
+// Today every slice holds whole rows and therefore needs *all* of H, which is why x has to be
+// replicated onto 512 slices -- `ops.rs:78`, a ring-32 broadcast costing 7,943 static Main, the
+// largest single Main item in qkv. Giving each slice a *chunk* of H instead lets it load its own
+// piece of x straight from the staging scratch, which is what made V251 worth 7.9% on attn_out.
+//
+// This variant converts K and V only. q keeps the broadcast, so the broadcast saving is *not* in
+// the measurement -- what is measured is the cost of the structure itself: the weight run drops
+// from 15,360 B to 1,920 B, a `vector_inter_slice_reduce` appears, and the head gather changes
+// from ring-64-stride-1 to ring-32-stride-2. V215 and V208 disagree on the sign of the run-length
+// term for qkv, so this is the cheapest honest way to settle it: if K/V come out neutral or
+// better, the full conversion (which does delete the broadcast) is clearly worth building.
+//
+// A 1,920 B run is the alignment-clean choice: aligned it touches 8 granules (1,920 / 256 = 7.5
+// -> 8) and starting at byte 128 it ends at 2,048 exactly, so it touches 8 either way.
+type KvRowsChunked = m![Ps / 8 % 128, H / 1920 % 2];
+type KvRowsReduced = m![Ps / 8 % 128, 1 # 2];
+
+pub(crate) type KvWeightChunked = DmTensor<f8e4m3, Chip, KvClusters, KvRowsChunked, m![Ps % 8, H % 1920]>;
+
+pub(crate) fn load_kv_weight_chunked(
+    ctx: &mut Context,
+    weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) -> KvWeightChunked {
+    weight.to_dm(&mut ctx.tdma)
+}
+
+fn project_one_kv_chunked(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRowsChunked, m![1], m![Dummy2, H % 1920]>,
+    weight_f8: &KvWeightChunked,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+    let contraction: DmTensor<bf16, Chip, KvClusters, KvRowsReduced, m![Ps % 8]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Ps % 8, H / 64 % 30, Dummy2], m![H % 64]>()
+        .collect::<m![Ps % 8, H / 64 % 30, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps % 8, H / 64 % 30, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ps % 8]>()
+        .contract_lane::<m![Ps % 8], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<KvRowsReduced, m![Ps % 8]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Ps / 4 % 2], m![Ps % 4 # 16]>()
+        .commit_trim::<m![Ps % 4]>()
+        .commit();
+
+    // Eight rows per slice over 128 live slices two apart, so a head is 32 of them.
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 8, 1 # 2], m![Ds % 8]> =
+        unsafe { contraction.view().reshape() };
+    ctx.main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 8 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 2 })
+        .collect::<m![Ds / 8], m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
+
+pub(crate) fn project_key_value_chunked(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+    k_weight: &KvWeightChunked,
+    v_weight: &KvWeightChunked,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    // Each slice loads only its own 1,920-column chunk of both f8 pieces: two runs of 1,920 B,
+    // no broadcast.
+    let x: DmTensor<f8e4m3, Chip, KvClusters, KvRowsChunked, m![Dummy2, H % 1920]> =
+        x2_hbm.to_dm(&mut ctx.tdma);
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRowsChunked, m![1], m![Dummy2, H % 1920]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Dummy2, H / 32 % 60], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32 % 60], m![H % 32]>()
+        .to_trf();
+
+    let k = project_one_kv_chunked(ctx, &x_trf, k_weight);
+    let v = project_one_kv_chunked(ctx, &x_trf, v_weight);
+
+    (k, v)
+}
