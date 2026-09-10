@@ -1110,15 +1110,7 @@ pub(crate) fn feedforward_v181(
     let down3 = load_down_rows_8(ctx, down_weight_packed, 48);
     let down4 = load_down_rows_4(ctx, down_weight_packed, 56);
 
-    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, 1 # 32], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
-        .main
-        .begin(x8.view())
-        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
-        .collect::<m![Dummy2, H / 32], m![H % 32]>()
-        .commit_trim::<m![H % 32]>()
-        .commit();
+    let x = broadcast_x_r32::<UpGateClusters>(ctx, &x2);
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]> = unsafe { x.reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![1], m![Dummy2, H]> = ctx
         .sub
@@ -1200,3 +1192,43 @@ pub(crate) fn feedforward_v181(
 
     down
 }
+
+// ---------------------------------------------------------------------------------------------
+// V206: the x ring-broadcast, parameterised by ring size.
+//
+// V158 replaced a 512-descriptor replicated load (~45k real) with `256/ring` copies from HBM
+// plus a ring switch that fills each copy's `ring` slices. The ring size was never swept: 32 was
+// the first value that worked. It is now the single largest pure-movement item on MainContext -
+// 7,943 static cycles in *each* of qkv and ffn - and V205 showed MainContext work is not hidden
+// behind the weight stream on real hardware, so it costs roughly twice that in real cycles.
+//
+// The switch cost is ring_size x Time::SIZE x flits_per_packet, i.e. linear in the ring, while
+// halving the ring doubles the descriptor count of the HBM load (16 -> 32 -> 64 -> 128 per chip),
+// which is still far below the ~256-per-region threshold where repeated reads of one HBM region
+// turn pathological (V159/V161). So smaller rings should trade cheap DMA for expensive Main.
+// ---------------------------------------------------------------------------------------------
+macro_rules! broadcast_x_ring {
+    ($name:ident, $ring:literal) => {
+        pub(crate) fn $name<C: M>(
+            ctx: &mut Context,
+            x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+        ) -> DmTensor<f8e4m3, Chip, C, m![Dummy256 / $ring, Dummy256 % $ring], m![Dummy2, H]> {
+            let copies: DmTensor<f8e4m3, Chip, C, m![Dummy256 / $ring, 1 # $ring], m![Dummy2, H]> =
+                x2_hbm.to_dm(&mut ctx.tdma);
+            ctx.main
+                .begin(copies.view())
+                .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+                .switch::<m![Dummy256 / $ring, Dummy256 % $ring], m![Dummy2, H / 32]>(
+                    SwitchConfig::CustomBroadcast { ring_size: $ring },
+                )
+                .collect::<m![Dummy2, H / 32], m![H % 32]>()
+                .commit_trim::<m![H % 32]>()
+                .commit()
+        }
+    };
+}
+
+broadcast_x_ring!(broadcast_x_r32, 32);
+broadcast_x_ring!(broadcast_x_r16, 16);
+broadcast_x_ring!(broadcast_x_r8, 8);
+broadcast_x_ring!(broadcast_x_r4, 4);
