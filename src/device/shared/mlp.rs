@@ -760,17 +760,38 @@ up_gate_reduce_full_fns!(reduce_up_gate_full_6, 6);
 // row it always did, just under a different name, so its vector chain is untouched.
 type UpGatePartialsTrf = m![H / 64, L % 30, H / 16 % 4];
 
-/// One eight-row tile of the f4 weight, dequantized on the way in and parked in the TRF.
-fn load_up_gate_rows_trf(
+/// The whole 30-row f4 matrix widened to f8 once.
+///
+/// `to_trf` refuses the table lookup's output directly (`mir: unsupported type conversion`), so
+/// the dequantization is its own pass. That is not pure overhead: today's pass A looks every
+/// weight element up **twice**, once per f8 piece of x, because `Dummy2` sits on its fetch time
+/// axis. Here the lookup runs once over 115,200 elements per slice instead of twice, and what
+/// the TRF fills read afterwards is plain f8.
+fn dequant_up_gate(
     ctx: &mut Context,
     packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
+) -> DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]> {
+    ctx.main
+        .begin(packed.view())
+        .fetch::<m![L % 30, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 30, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
+}
+
+/// One eight-row tile parked in the TRF as eight lanes. Runs on the sub context, which exists for
+/// exactly this (`to_trf` / `to_vrf` staging) and is idle here, so the fill overlaps the previous
+/// tile's contraction on main.
+fn load_up_gate_rows_trf(
+    ctx: &mut Context,
+    dequantized: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
     offset: usize,
 ) -> TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = 8], m![H]> {
-    ctx.main
-        .begin(packed.view().tile::<m![L % 30], 8, m![L % 30 = 8 # 30, H]>(offset))
-        .fetch::<m![L % 30 = 8, H / 64], m![H % 64]>()
-        .fetch_table_lookup::<f8e4m3>()
-        .collect::<m![L % 30 = 8, H / 64, H / 32 % 2], m![H % 32]>()
+    ctx.sub
+        .begin(dequantized.view().tile::<m![L % 30], 8, m![L % 30 = 8 # 30, H]>(offset))
+        .fetch::<m![L % 30 = 8, H / 32], m![H % 32]>()
+        .collect::<m![L % 30 = 8, H / 32], m![H % 32]>()
         .to_trf::<m![L % 30 = 8], m![H]>()
 }
 
@@ -849,6 +870,7 @@ fn up_gate_matrix_trf(
     x: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]>,
 ) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, UpGatePartialsTrf> {
     let mut partials: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, UpGatePartialsTrf> = DmTensor::new();
+    let packed = &dequant_up_gate(ctx, packed);
     let w = load_up_gate_rows_trf(ctx, packed, 0);
     contract_up_gate_trf(ctx, &w, x, 0, &mut partials);
     let w = load_up_gate_rows_trf(ctx, packed, 8);
