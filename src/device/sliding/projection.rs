@@ -275,3 +275,48 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V215: qkv's weight runs are the longest in the codebase and the slowest per byte.
+//
+// V208 measured the query weight streaming at 465 B/cycle in its own layout - eight rows per
+// slice, one contiguous 30,720-byte run. V197's curve had 2,048-byte runs at 547 and 256-byte
+// runs at 618, so 465 is the far right tail of a curve that never stopped falling.
+//
+// H = 3840 = 15 x 256, so a *row* boundary is always 256-byte aligned and so is any whole number
+// of rows. Shortening the run therefore does not need a column split (which V208 p1 showed costs
+// more than it saves, because 1,920 bytes is only 128-byte aligned): splitting the load into row
+// tiles does it, at the price of one DMA command per tile.
+//
+// p1 = 1 command  x 8 rows -> 30,720-byte runs (the production shape, re-measured in-job)
+// p2 = 2 commands x 4 rows -> 15,360-byte runs
+// p4 = 4 commands x 2 rows ->  7,680-byte runs
+// p8 = 8 commands x 1 row  ->  3,840-byte runs
+//
+// Every variant moves the same 15.73 MB, so the increments compare run length against command
+// count directly. V10 and V185 both found tiling a weight load harmful, but both predate the
+// run-length curve and neither controlled for alignment.
+// ---------------------------------------------------------------------------------------------
+
+macro_rules! qkv_probe_fns {
+    ($name:ident, $rows:literal, $tiles:literal) => {
+        pub(crate) fn $name(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+            for tile in 0..$tiles {
+                let probe: DmTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![Qs % 8 = $rows, H]> = weight
+                    .view()
+                    .tile::<m![Qs % 8], $rows, m![Qs / 8, Qs % 8 = $rows # 8, H]>(tile * $rows)
+                    .to_dm(&mut ctx.tdma);
+                let _keep: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+                    .sub
+                    .begin(probe.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # $rows, H]>(0))
+                    .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+                    .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+                    .to_trf();
+            }
+        }
+    };
+}
+qkv_probe_fns!(probe_q_rows_8x1, 8, 1);
+qkv_probe_fns!(probe_q_rows_4x2, 4, 2);
+qkv_probe_fns!(probe_q_rows_2x4, 2, 4);
+qkv_probe_fns!(probe_q_rows_1x8, 1, 8);
