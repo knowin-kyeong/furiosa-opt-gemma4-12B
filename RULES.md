@@ -450,7 +450,48 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0a 2026-09-10 밤 3차 체인(12h+)이 남긴 상태 (최신)
+### 10.0b 2026-09-10 메모리 대역폭 캠페인이 남긴 상태 (최신)
+
+**공식 SOTA: `V204_submit` = 5.9032** (moa-submitter `46bc9eed`, 2026-09-10 05:12 UTC:
+qkv 101,132 / attn_out 56,845 / ffn 317,445). 커밋 `3c381d2`. 새 실험은 여기서 분기한다.
+측정본은 `V200_production`(같은 채점 코드 + 한 잡 안 A/B 대조군), Arena 14잡 기준 6.229.
+
+**제출본은 `src/device/`만 고친다.** RULES §4.1은 `src/ops.rs`에서 **함수 본문만** 허용한다.
+측정 브랜치는 A/B 대조군 함수를 ops.rs에 넣어도 되지만, 제출 브랜치는 넣지 않는다(V200 → V204가 그 차이).
+
+**이 캠페인이 확정한 것 (RESULTS "메모리 대역폭 캠페인" 절에 표로 있음).**
+- **DMA 비용 곡선(V197, 실측):** 128 B 런 319 B/cy · **256 B 618(최적)** · 512 B 595 · 1024 B 557 · 2048 B 547.
+  256 B 미만은 정확히 2× 벌점이고, **256 B보다 길어도 완만히 나빠진다**. "길수록 좋다"는 틀렸다.
+- **256 B 런은 분할 축이 2의 거듭제곱일 때만 쓸 수 있다**(청크 오프셋 정렬). attn_out(Qs=4096) 가능 → V198 −6.5%.
+  qkv·ffn up/gate(H=3840), ffn down(청크폭 960)은 불가.
+- **DMA 명령 병합은 커널 선두에서만 값어치가 있다.** 선두의 스테이징 store를 하나 없애면 ffn −11k(6/6 잡),
+  같은 병합을 중반 geglu store에 하면 0(V201).
+- **커널은 순수 DMA 바운드가 아니다.** 같은 15.73 MB를 추가로 읽으면 26,430 cycle(595 B/cy)이라
+  "커널 전체 ÷ 바이트 = 310 B/cy"는 비-DMA 시간이 섞인 과소평가다.
+
+**이번에 닫힌 길 (다시 열지 말 것).**
+- DMN 인터리빙(book "alternate across 2 DMNs, else 50% loss") — 슬라이스 축을 뒤집으면 4/4 잡에서 **+6%**(V196). V8 종결.
+- ffn down 벌크 로드 1개 — 파이프라이닝 손실로 정적 +4.6k, 2·3분할은 **컴파일러 SIGABRT**(V202).
+- attn_out 타일 재분할 — 88/32가 이미 최적, 1타일은 +2.9k(V203).
+- geglu store 병합(V201), attn_out store 병합(V199에서 +3.0k).
+
+**구조적으로 닫힌 것 (근거와 함께).**
+- **바이트 축소 불가:** 채점 fixture가 가중치를 PRNG로 합성한다(`prng::f4_nibbles`/`f8_banded`/`bf16_uniform`).
+  균등난수라 sparsity·pruning·low-rank·codebook·엔트로피 코딩이 전부 무효다.
+- **디바이스 팬아웃 불가:** `#[device(chip = 1)]`이 이미 `pe = 8`(pe0-3 + pe4-7) 전부를 잡고,
+  `CLUSTER_SIZES=[1,2]`/`SLICE_SIZES=[64,128,256]`이라 2×256이 상한. `total_memory 268435456 = 512 × 524288`이 확인.
+- **DMA 병렬화 불가:** 로드 경로 자원은 `DmaEngine` 하나이고 1,480개 명령 중 겹치는 쌍이 0.
+  `PcieDmaEngine`은 유휴지만 HBM→DM에 타입으로 막혀 있다.
+- 스펙 대비: 최고 실효 618 B/cycle = 1,500 B/cycle의 41%. 남은 격차는 커널 코드에서 닿지 않는다.
+
+**운영.** 드라이버 deadline은 `/root/auto/deadline`(epoch)에 있고 지나면 keeper·driver가 함께 종료한다.
+되살리려면 `echo $(( $(date +%s) + N )) > /root/auto/deadline; rm -f /root/auto/STOP` 후
+`cd /root/auto && setsid nohup bash keeper.sh > keeper.out 2>&1 < /dev/null &`.
+ssh 한 줄로 띄울 때는 stdout을 파일로 돌려야 세션이 안 붙잡힌다.
+제출은 pod `/root/lab`에서 브랜치 체크아웃 후 `/root/.cargo/bin/moa-submitter submit --source /root/lab`,
+확인은 `moa-submitter status` / `moa-submitter log <id>`.
+
+### 10.0a 2026-09-10 밤 3차 체인(12h+)이 남긴 상태
 
 - **공식 SOTA: `V165_qkv_broadcast_attnout_two_tiles` = 5.7576** (moa-submitter `d0239b5b`, 2026-09-09 17:15 UTC: qkv 105,544 / attn_out 53,374 / ffn 349,160). 새 실험은 여기서 분기한다.
 - (제출 전 기록) 실측 SOTA 후보: `V165_qkv_broadcast_attnout_two_tiles` (= V82 + qkv x 복제를 16 디스크립터 + ring-32 `CustomBroadcast`로(V158)
