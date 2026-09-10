@@ -1065,6 +1065,8 @@ pub(crate) fn feedforward_v181(
     let down1 = load_down2_rows_4(ctx, down_weight_packed, 4);
     let down2 = load_down2_rows_4(ctx, down_weight_packed, 8);
     let down3 = load_down2_rows_4(ctx, down_weight_packed, 11);
+    let down_scale: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns2, m![H % 15, L / 16 % 480]> =
+        down_weight_scale.to_dm(&mut ctx.tdma);
 
     // V206: sixty-four copies per cluster and a ring of 4, not eight copies and a ring of 32.
     // The switch is pure movement on MainContext, and ffn's MainContext (83.5k static cycles) is
