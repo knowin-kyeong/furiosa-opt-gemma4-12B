@@ -225,6 +225,7 @@ type HiddenRows256 = m![H / 120 % 16, 1 # 16];
 type HiddenRowsByColumns256 = m![H / 120 % 16, Qs / 256];
 type XSlices256 = m![1 # 16, Qs / 256];
 hi_lo_trunc_fns!(hi_lo_x256, Cluster, XSlices256, Qs, 256, 16, 32, 64);
+hi_lo_trunc_fns!(hi_lo_x_direct, TwoClusters, HiddenRowsByColumns256, Qs, 256, 16, 32, 64);
 
 type TwoClusters = m![H / 1920];
 type HiddenRows = m![H / 60 % 32, 1 # 8];
@@ -725,51 +726,21 @@ fn hi_lo_pair_direct(
     x: &DmTensor<bf16, Chip, TwoClusters, HiddenRowsByColumns256, m![Qs % 256]>,
     s: f32,
 ) -> DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![Dummy2, Qs % 256]> {
-    let x_vrf: VrfTensor<f32, Chip, TwoClusters, HiddenRowsByColumns256, m![Qs % 256]> = ctx
-        .sub
-        .begin(x.view())
-        .fetch::<m![Qs / 16 % 16], m![Qs % 16]>()
-        .fetch_cast::<f32>()
-        .collect::<m![Qs / 8 % 32], m![Qs % 8]>()
-        .to_vrf();
-
+    let (x_hi, x_lo) = hi_lo_x_direct(ctx, x, s);
     let mut pair: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![Dummy2, Qs % 256]> =
         DmTensor::new();
-
     ctx.main
-        .begin(x.view())
-        .fetch::<m![Qs / 16 % 16], m![Qs % 16]>()
-        .fetch_cast::<f32>()
-        .collect::<m![Qs / 8 % 32], m![Qs % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_logic(LogicBinaryOpF32::BitAnd, crate::device::shared::f8split::TRUNC_MASK_F32)
-        .vector_narrow_split::<m![Qs / 4 % 64], m![Qs % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), s)
-        .vector_widen_concat::<m![Qs / 8 % 32], m![Qs % 8]>()
-        .vector_final()
-        .cast::<f8e4m3, m![Qs % 8 # 32]>()
-        .commit_trim::<m![Qs % 8]>()
+        .begin(x_hi.view())
+        .fetch::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .commit_trim::<m![Qs % 32]>()
         .commit_view(pair.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Qs % 256]>(0));
-
-    ctx.sub
-        .begin(x.view())
-        .fetch::<m![Qs / 16 % 16], m![Qs % 16]>()
-        .fetch_cast::<f32>()
-        .collect::<m![Qs / 8 % 32], m![Qs % 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_logic(LogicBinaryOpF32::BitAnd, crate::device::shared::f8split::TRUNC_MASK_F32)
-        .vector_narrow_split::<m![Qs / 4 % 64], m![Qs % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), -1f32)
-        .vector_fp_binary(FpBinaryOp::AddF, &x_vrf)
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), s)
-        .vector_widen_concat::<m![Qs / 8 % 32], m![Qs % 8]>()
-        .vector_final()
-        .cast::<f8e4m3, m![Qs % 8 # 32]>()
-        .commit_trim::<m![Qs % 8]>()
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .commit_trim::<m![Qs % 32]>()
         .commit_view(pair.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Qs % 256]>(1));
-
     pair
 }
 
