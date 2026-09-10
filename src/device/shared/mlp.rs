@@ -689,7 +689,7 @@ fn contract_up_gate_full(
     ctx: &mut Context,
     x_trf: &TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2], m![H]>,
     packed: &DmTensor<f4e2m1, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H]>,
-) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16, Dummy2]> {
+) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]> {
     ctx.main
         .begin(packed.view())
         .fetch::<m![L % 30, H / 64], m![H % 64]>()
@@ -698,8 +698,10 @@ fn contract_up_gate_full(
         .contract_outer::<m![L % 30, H / 64], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![H / 16 % 4]>()
         .contract_time::<m![L % 30, H / 64]>()
-        .contract_lane::<m![L % 30, H / 64], m![H / 16 % 4, Dummy2]>(LaneMode::Interleaved)
-        .commit_trim::<m![H / 16 % 4, Dummy2]>()
+        // Sequential relocates Lane into OutTime (Interleaved would put it in OutPacket and, with
+        // only two active lanes, run the 8-wide output bus at a quarter rate).
+        .contract_lane::<m![L % 30, H / 64, Dummy2], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
+        .commit_trim::<m![H / 16 % 4]>()
         .commit()
 }
 
@@ -709,7 +711,7 @@ macro_rules! up_gate_reduce_full_fns {
     ($reduce:ident, $rows:literal) => {
         fn $reduce(
             ctx: &mut Context,
-            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16, Dummy2]>,
+            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]>,
             scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]>,
             offset: usize,
             out: &mut DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
@@ -717,21 +719,20 @@ macro_rules! up_gate_reduce_full_fns {
             // The same block scale multiplies both f8 pieces, so the scale is read once per block
             // and replayed over the Dummy2 axis the pass-A output now carries. Tile heights are
             // halved against V204 because the operand is twice as long and the VRF holds 8 KB.
-            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 16, Dummy2]> = ctx
+            let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 64, Dummy2, H / 16 % 4]> = ctx
                 .sub
                 .begin(scale_all.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
-                .fetch::<m![L % 30 = $rows], m![H / 16, Dummy2]>()
+                .fetch::<m![L % 30 = $rows], m![H / 64, Dummy2, H / 16 % 4]>()
                 .fetch_cast::<f32>()
-                .collect::<m![L % 30 = $rows, H / 64], m![H / 16 % 4, Dummy2]>()
+                .collect::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
                 .to_vrf();
 
             ctx.main
-                .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16, Dummy2]>(offset))
-                .fetch::<m![L % 30 = $rows, H / 64], m![H / 16 % 4, Dummy2]>()
-                .collect::<m![L % 30 = $rows, H / 64], m![H / 16 % 4, Dummy2]>()
+                .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 64, Dummy2, H / 16 % 4]>(offset))
+                .fetch::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
+                .collect::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
                 .vector_init()
                 .vector_intra_slice_tag(TagMode::Zero)
-                .vector_narrow_split::<m![L % 30 = $rows, H / 32], m![H / 16 % 2, Dummy2]>()
                 .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
                 .vector_intra_slice_reduce::<H, m![L % 30 = $rows], m![1 # 4]>(IntraSliceReduceOpF32::Add)
                 .vector_widen_pad::<m![1 # 8]>()
