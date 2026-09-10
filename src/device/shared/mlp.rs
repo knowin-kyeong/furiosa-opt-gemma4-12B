@@ -1106,12 +1106,12 @@ pub(crate) fn feedforward_v181_r8(
     // (+144), which is the point - the schedule believes this work hides behind the weight
     // stream and on hardware it does not. qkv is a different case (its Main is small next to its
     // stream, and its x2 region is re-read by every copy), so qkv keeps ring 32.
-    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Gf, Dummy2, 1 # 8], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Gf, Dummy2, Dummy256 / 32], m![Dummy2, H]> = ctx
+    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![C / 2, 1 # 8], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![C / 2, Dummy256 / 32], m![Dummy2, H]> = ctx
         .main
         .begin(x8.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .switch::<m![Gf, Dummy2, Dummy256 / 32], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 8 })
+        .switch::<m![C / 2, Dummy256 / 32], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 8 })
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .commit_trim::<m![H % 32]>()
         .commit();
@@ -1238,12 +1238,12 @@ pub(crate) fn feedforward_v181_r2(
     // (+144), which is the point - the schedule believes this work hides behind the weight
     // stream and on hardware it does not. qkv is a different case (its Main is small next to its
     // stream, and its x2 region is re-read by every copy), so qkv keeps ring 32.
-    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![Ds / 2, 1 # 2], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![Ds / 2, Dummy256 / 128], m![Dummy2, H]> = ctx
+    let x8: DmTensor<f8e4m3, Chip, UpGateClusters, m![H / 30, 1 # 2], m![Dummy2, H]> = x2.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, UpGateClusters, m![H / 30, Dummy256 / 128], m![Dummy2, H]> = ctx
         .main
         .begin(x8.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .switch::<m![Ds / 2, Dummy256 / 128], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 2 })
+        .switch::<m![H / 30, Dummy256 / 128], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 2 })
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .commit_trim::<m![H % 32]>()
         .commit();
