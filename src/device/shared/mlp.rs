@@ -724,7 +724,7 @@ macro_rules! up_gate_reduce_full_fns {
                 .begin(scale_all.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
                 .fetch::<m![L % 30 = $rows], m![H / 64, Dummy2, H / 16 % 4]>()
                 .fetch_cast::<f32>()
-                .collect::<m![L % 30 = $rows, H / 64, Dummy2], m![H / 16 % 4]>()
+                .collect::<m![L % 30 = $rows, H / 64], m![Dummy2, H / 16 % 4]>()
                 .to_vrf();
 
             ctx.main
