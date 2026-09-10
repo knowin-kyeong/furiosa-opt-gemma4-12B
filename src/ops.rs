@@ -584,35 +584,6 @@ pub fn sliding_attention_output(
 /// V251: the f8 split of x done on all 512 slices, with no HBM round trip.
 /// V257: attn_out with a single f8 piece of x.
 /// V260: attn_out with the contraction store split on the tile boundary.
-/// V260: attn_out with the contraction store split on the tile boundary.
-#[device(chip = 1)]
-pub fn sliding_attention_output_1p_split(
-    ctx: &mut Context,
-    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
-    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
-    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
-    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
-) {
-    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
-    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
-    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
-    let x_hbm = sliding::projection::project_output_1p_split(ctx, x, o_weight);
-    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
-    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
-    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
-    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
-    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
-}
-
-/// V240 sweep: the attention-output contraction with sequential lanes.
-/// V240 sweep: the O-weight rows in three tiles (44/44/32) instead of two.
-/// V247: the attention-output epilogue loads hoisted ahead of the weight stream.
-/// V248: the attention-output contraction with a 32-element fetch packet.
-/// V251: the f8 split of x done on all 512 slices, with no HBM round trip.
-/// V257: attn_out with a single f8 piece of x.
-/// V260: attn_out with the contraction store split on the tile boundary.
 #[device(chip = 1)]
 pub fn sliding_attention_output_1p_split(
     ctx: &mut Context,
@@ -866,61 +837,6 @@ pub fn decoder_feedforward(
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
     let x = shared::mlp::feedforward_v181(
-        ctx,
-        &x2_hbm,
-        &erf_scale,
-        &out_scale,
-        up_weight_packed,
-        gate_weight_packed,
-        down_weight_packed,
-        up_weight_scale,
-        gate_weight_scale,
-        down_weight_scale,
-        down_global_scale,
-    );
-
-    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
-    let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
-    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
-}
-
-/// Measurement variant: decoder_feedforward_v238.
-/// Measurement variant: the down projection on four column chunks (V237).
-/// V241 sweep: the down pass A in two 30-row tiles.
-/// V242 sweep: down tile plan s1.
-/// V246: the down projection on 30 rows x four 3,840-column chunks, all 256 slices live.
-/// V260: the down output stored in two tile-aligned pieces.
-/// V260: the down output stored in two tile-aligned pieces.
-#[device(chip = 1)]
-pub fn decoder_feedforward_v260(
-    ctx: &mut Context,
-    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
-    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
-    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
-    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
-    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
-    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
-    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
-    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
-    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
-    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
-    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
-    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
-    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
-) {
-    // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
-    // the pre-FF normalization and the final residual add.
-    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &residual, pre_ff_rms_weight);
-
-    // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
-    // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
-    // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
-    let (x2_hbm, erf_scale, out_scale) =
-        shared::mlp::stage_x_hi_lo_hbm_full(ctx, &x, up_global_scale, gate_global_scale);
-    // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
-    // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
-    let x = shared::mlp::feedforward_v260(
         ctx,
         &x2_hbm,
         &erf_scale,
