@@ -387,23 +387,25 @@ const REPS: usize = 13;
 #[allow(dead_code)]
 const BASE: &[&str] = &[""; REPS];
 
-/// V240 sweep, all in one job: ffn production vs the four-tile down stage (`t4`) and the
-/// interleaved up/gate lanes (`li`); qkv vs sequential lanes (`ls`); attn_out vs sequential
-/// lanes (`ls`) and a three-tile O-weight split (`t3`). Orders are rotated so no variant always
-/// eats the cold transition (V225's Latin square).
-const FFN_SWEEP: &[&str] = &[""; 3];
-
-const QKV_SWEEP: &[&str] = &[""; 3];
-
-const ATTN_SWEEP: &[&str] = &[
-    "", "p32", "p32", "", "", "p32", "p32", "", "", "p32", "p32", "",
-    "", "p32", "p32", "", "", "p32", "p32", "", "", "p32", "p32", "",
+/// Step 0 of the V250 plan: production ffn against the four-tile down stage (`t4`, which is
+/// exactly what `V243_submit` ships), alternating in pairs so neither side always eats the cold
+/// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
+/// over jobs, because between-job machine drift is what made the official draws disagree with the
+/// in-job A/B in the first place.
+const FFN_SWEEP: &[&str] = &[
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
+    "", "t4", "t4", "", "", "t4", "t4", "", "", "t4", "t4", "",
 ];
 
+/// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
+const QKV_SWEEP: &[&str] = &[""; 3];
+
+const ATTN_SWEEP: &[&str] = &[""; 3];
+
 const PLAN: &[Plan] = &[
-    Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_SWEEP },
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
+    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_SWEEP },
+    Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
