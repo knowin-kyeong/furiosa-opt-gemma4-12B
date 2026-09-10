@@ -268,7 +268,7 @@ pub(crate) fn normalize_add_scaled_reduced<Cluster: M>(
         .collect::<m![H / 8 % 60], m![H % 8]>()
         .to_vrf();
 
-    let mean_square: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+    let reduced_mean_square: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
         .main
         .begin(x.view())
         .fetch::<m![H / 16 % 30], m![H % 16]>()
@@ -283,18 +283,11 @@ pub(crate) fn normalize_add_scaled_reduced<Cluster: M>(
         .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
         .vector_fp_div(H_F32)
         .vector_widen_pad::<m![1 # 8]>()
-        .vector_final()
-        .commit_trim::<m![1 # 8]>()
-        .commit();
-    let reduced_mean_square: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
-        .main
-        .begin(mean_square.view())
-        .fetch::<m![1], m![1 # 8]>()
-        .collect::<m![1], m![1 # 8]>()
-        .vector_init()
+        // V263: the cross-slice sum joins the mean-square pass (Widen -> InterSliceReduce is a legal
+        // transition, furiosa-opt-std-0.6.0 stage/markers.rs:349), saving a pass and a commit on the
+        // tail of the kernel. Only Tag/Filter/Output may follow an inter-slice reduce, so the +EPS
+        // moves into the sqrt pass below. Paired Arena jobs: 8/8 faster, mean -876 cycles (-1.9%).
         .vector_inter_slice_reduce::<m![1 # 32, Dummy8], m![1]>(InterSliceReduceOpF32::Add)
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_clip(ClipBinaryOpF32::Add, EPS)
         .vector_final()
         .commit_trim::<m![1 # 8]>()
         .commit();
@@ -307,6 +300,7 @@ pub(crate) fn normalize_add_scaled_reduced<Cluster: M>(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, EPS)
         .vector_fp_unary(FpUnaryOp::Sqrt)
         .vector_widen_pad::<m![1 # 8]>()
         .vector_final()
