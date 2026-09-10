@@ -386,8 +386,17 @@ const REPS: usize = 13;
 
 const BASE: &[&str] = &[""; REPS];
 
+/// V232: production against the rotate-half-free RoPE, alternating in pairs so neither side always
+/// eats the cold transition. qkv stays first in PLAN because a kernel that follows twenty-odd
+/// launches of another starts with its program evicted -- V226 caught a single 184k qkv launch
+/// that way.
+const QKV_V232: &[&str] = &[
+    "", "r", "r", "", "", "r", "r", "", "", "r", "r", "",
+    "", "r", "r", "", "", "r", "r", "", "", "r", "r", "",
+];
+
 const PLAN: &[Plan] = &[
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: BASE },
+    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_V232 },
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: BASE },
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: BASE },
 ];
@@ -519,19 +528,44 @@ async fn sliding_project_qkv(
                 )
                 .await;
             }
+            "r" => {
+                launch(
+                    ops::sliding_project_qkv_v232,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if i == 0 {
+        // Compare the first launch of each distinct variant, not just the first launch overall.
+        if plan.order[..i].iter().all(|seen| seen != variant) {
             let width = Ns::SIZE * Ds::SIZE;
             let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
             let v = read_bf16(ctx, &v_cache).await[slot * width..(slot + 1) * width].to_vec();
-            outputs = vec![
-                ("expected.q", read_bf16(ctx, &q_out).await),
-                ("expected.k", k),
-                ("expected.v", v),
-            ];
+            outputs.push(("expected.q", read_bf16(ctx, &q_out).await));
+            outputs.push(("expected.k", k));
+            outputs.push(("expected.v", v));
         }
     }
     outputs
