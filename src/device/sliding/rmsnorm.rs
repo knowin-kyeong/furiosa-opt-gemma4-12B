@@ -1,7 +1,7 @@
 
 use furiosa_opt_std::prelude::*;
 
-use crate::axes::{Ds, Gs, Ns, Ps, Qs};
+use crate::axes::{Ds, Dummy2, Gs, Ns, Ps, Qs};
 use crate::device::layout::{Cluster, Slice};
 use crate::{Chip, EPS};
 
