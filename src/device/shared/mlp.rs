@@ -749,7 +749,7 @@ macro_rules! down_tile2_fns {
                 .cast::<bf16, m![1 # 16]>()
                 .transpose::<m![H % 15 = $rows / 4], m![H % 15 = $rows % 4 # 16]>()
                 .commit_trim::<m![H % 15 = $rows % 4]>()
-                .commit_view(out.view_mut().view_mut_all());
+                .commit_view(out.view_mut());
         }
     };
 }
