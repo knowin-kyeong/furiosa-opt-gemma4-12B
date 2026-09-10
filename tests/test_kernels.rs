@@ -387,10 +387,18 @@ const REPS: usize = 25;
 
 const BASE: &[&str] = &[""; REPS];
 
+/// V227: production against the two stationary-weight fills, order rotated every repetition so
+/// none of the three always eats the cold transition (V219's confound, V225's fix).
+const FFN_V227: &[&str] = &[
+    "", "s", "m", "s", "m", "", "m", "", "s",
+    "", "s", "m", "s", "m", "", "m", "", "s",
+    "", "s", "m", "s", "m", "", "m", "", "s",
+];
+
 const PLAN: &[Plan] = &[
+    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_V227 },
     Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: BASE },
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: BASE },
-    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: BASE },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
@@ -578,8 +586,10 @@ async fn sliding_attention_output(
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if i == 0 {
-            outputs = vec![("expected", read_bf16(ctx, &residual).await)];
+        // Compare the first launch of each distinct variant, not just the first launch overall:
+        // a variant that computes the wrong answer must not pass unnoticed.
+        if plan.order[..i].iter().all(|seen| seen != variant) {
+            outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
     outputs
@@ -650,12 +660,58 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
+            "s" => {
+                launch(
+                    ops::decoder_feedforward_v227,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "m" => {
+                launch(
+                    ops::decoder_feedforward_v227m,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for decoder_feedforward"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if i == 0 {
-            outputs = vec![("expected", read_bf16(ctx, &residual).await)];
+        // Compare the first launch of each distinct variant, not just the first launch overall:
+        // a variant that computes the wrong answer must not pass unnoticed.
+        if plan.order[..i].iter().all(|seen| seen != variant) {
+            outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
     outputs
