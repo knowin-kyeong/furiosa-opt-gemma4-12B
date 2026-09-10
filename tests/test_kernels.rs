@@ -391,11 +391,7 @@ const BASE: &[&str] = &[""; REPS];
 /// interleaved up/gate lanes (`li`); qkv vs sequential lanes (`ls`); attn_out vs sequential
 /// lanes (`ls`) and a three-tile O-weight split (`t3`). Orders are rotated so no variant always
 /// eats the cold transition (V225's Latin square).
-const FFN_SWEEP: &[&str] = &[
-    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
-    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
-    "", "t4", "c4", "t4", "c4", "", "c4", "", "t4",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 const QKV_SWEEP: &[&str] = &[""; 3];
 
@@ -560,6 +556,58 @@ async fn sliding_project_qkv(
                 )
                 .await;
             }
+            "sb" => {
+                launch(
+                    ops::sliding_project_qkv_sub,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_project_qkv_seq,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }
         bench.record(&key_of(plan.name, variant)).await;
@@ -601,6 +649,48 @@ async fn sliding_attention_output(
             "" => {
                 launch(
                     ops::sliding_attention_output,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ls" => {
+                launch(
+                    ops::sliding_attention_output_seq,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t3" => {
+                launch(
+                    ops::sliding_attention_output_t3,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "hl" => {
+                launch(
+                    ops::sliding_attention_output_hoist,
                     (
                         ctx,
                         &x,

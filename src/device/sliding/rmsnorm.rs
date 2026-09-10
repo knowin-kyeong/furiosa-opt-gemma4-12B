@@ -633,3 +633,194 @@ pub(crate) fn load_head_norm_weight<C: M, S: M>(
 ) -> VrfTensor<f32, Chip, C, S, m![Ds]> {
     load_norm_weight::<C, S>(ctx, rms_weight)
 }
+
+// -------------------------------------------------------------------------------------------
+// V247: the head RMSNorms with their sqrt pass on SubContext instead of MainContext.
+//
+// The static schedule says qkv runs MainContext 21,549 over 31 passes and SubContext 10,163 over
+// 25, so Main carries twice Sub's load; and `stage_x_hi_lo_hbm` proves a `ctx.sub` pass can run a
+// full vector chain and commit to DM, not just stage a TRF/VRF (V223's "sub cannot run vector
+// passes" was about `fetch_table_lookup`, which is Main-only). The three sqrt passes are the
+// cheapest thing to move: their operand is one `1 # 8` packet, so Sub's fixed 8 B read_size costs
+// four reads instead of Main's one, on 32 bytes.
+//
+// This is the experiment that decides whether the tail's ~600 cycles per pass (V218) is a
+// per-context issue cost that two contexts can overlap, or a PE-core in-order cost that no
+// amount of context juggling can split.
+
+/// `root_mean_square_heads` with the sqrt on Sub.
+fn root_mean_square_heads_sub<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    scale_vrf: &VrfTensor<f32, Chip, C, S, m![Ds]>,
+) -> VrfTensor<f32, Chip, C, S, m![1 # 8]> {
+    let mean_square: DmTensor<f32, Chip, C, S, m![1 # 8]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), scale_vrf)
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<Ds, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(DS_F32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_clip(ClipBinaryOpF32::Add, EPS)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let rms: DmTensor<f32, Chip, C, S, m![1 # 8]> = ctx
+        .sub
+        .begin(mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    ctx.sub
+        .begin(rms.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf()
+}
+
+pub(crate) fn normalize_query_heads_sub<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    channel_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+) -> DmTensor<bf16, Chip, C, S, m![Gs, Ds]> {
+    let channel_scale: HbmTensorView<'_, bf16, Chip, m![Ns, Gs, Ds]> = unsafe { channel_scale.view().reshape() };
+    let scale_dm: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = channel_scale.to_dm(&mut ctx.tdma);
+    let scale_vrf: VrfTensor<f32, Chip, C, S, m![Gs, Ds]> = ctx
+        .sub
+        .begin(scale_dm.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    let mean_square: DmTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<Ds, m![Gs], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(DS_F32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_clip(ClipBinaryOpF32::Add, EPS)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let rms: DmTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
+        .sub
+        .begin(mean_square.view())
+        .fetch::<m![Gs], m![1 # 8]>()
+        .collect::<m![Gs], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let weight_vrf = load_norm_weight::<C, S>(ctx, rms_weight);
+
+    let rms_vrf: VrfTensor<f32, Chip, C, S, m![Gs, 1 # 8]> = ctx
+        .sub
+        .begin(rms.view())
+        .fetch::<m![Gs], m![1 # 8]>()
+        .collect::<m![Gs], m![1 # 8]>()
+        .to_vrf();
+
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_fp_binary(FpBinaryOp::DivF, &rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
+
+pub(crate) fn normalize_key_heads_sub<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    channel_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
+    let scale_vrf = load_channel_scale_heads::<C, S>(ctx, channel_scale);
+    let rms_vrf = root_mean_square_heads_sub::<C, S>(ctx, x, &scale_vrf);
+    let weight_vrf = load_norm_weight::<C, S>(ctx, rms_weight);
+
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_fp_binary(FpBinaryOp::DivF, &rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
+        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
+
+pub(crate) fn normalize_value_heads_sub<C: M, S: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    channel_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+) -> DmTensor<bf16, Chip, C, S, m![Ds]> {
+    let scale_vrf = load_channel_scale_heads::<C, S>(ctx, channel_scale);
+    let rms_vrf = root_mean_square_heads_sub::<C, S>(ctx, x, &scale_vrf);
+
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &scale_vrf)
+        .vector_fp_div(&rms_vrf)
+        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .cast::<bf16, m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit()
+}
