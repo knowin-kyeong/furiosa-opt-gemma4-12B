@@ -3348,6 +3348,8 @@ pub(crate) fn feedforward_v260(
         );
     let p = contract_down_rows_16(ctx, &x_trf, &down2);
     reduce_down_rows_16(ctx, &p, &down_scale, &inv_s_vrf, 32, &mut down);
+    let p = contract_down_rows_12(ctx, &x_trf, &down3);
+    reduce_down_rows_12(ctx, &p, &down_scale, &inv_s_vrf, 48, &mut down);
     down.view()
         .tile::<m![H % 60], 30, m![H % 60 = 30 # 60]>(30)
         .to_hbm_view(

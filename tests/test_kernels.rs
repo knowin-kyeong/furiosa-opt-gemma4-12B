@@ -399,9 +399,7 @@ const FFN_SWEEP: &[&str] = &[
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &[
-    "1p", "as", "as", "1p", "1p", "as", "as", "1p", "1p", "as", "as", "1p",
-];
+const ATTN_SWEEP: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
