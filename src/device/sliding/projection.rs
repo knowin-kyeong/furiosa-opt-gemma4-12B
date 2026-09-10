@@ -360,3 +360,50 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V208: what rate does qkv's own weight layout actually stream at?
+//
+// V205 fitted attn_out's stream at 645 B/cycle with 256-byte runs. V197's run-length curve was
+// only ever measured out to 2,048-byte runs, where it was still falling (256 B 618, 512 B 595,
+// 1024 B 557, 2048 B 547). qkv's query weight gives each slice eight whole rows - one contiguous
+// 30,720-byte run, fifteen times past the right edge of that curve - and V207 then found that
+// deleting the 15.73 MB of K and V weight saves only 6-12k cycles, which is nowhere near
+// 15.73 MB / 645.
+//
+// So measure it directly, the way V196/V197 did: add one more load of the query weight and read
+// the increment. p0 keeps qkv's own 30,720-byte runs; p1 splits H into two column chunks so the
+// same bytes arrive in 1,920-byte runs (16 rows per slice, 128 row groups x 2 chunks). If the
+// curve keeps falling, p0 is much dearer than p1 even though p1's chunk offsets are only
+// 128-byte aligned; if the two match, run length is not the problem and qkv's fixed cost is.
+// ---------------------------------------------------------------------------------------------
+
+/// Extra load in qkv's own layout: 8 rows per slice, one 30,720-byte contiguous run.
+pub(crate) fn probe_query_weight_long_runs(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let probe: QueryWeight = weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// The same bytes in 1,920-byte runs: 16 rows per slice over 128 row groups x 2 column chunks.
+pub(crate) fn probe_query_weight_short_runs(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let probe: DmTensor<f8e4m3, Chip, QueryClusters, m![Qs / 16 % 128, H / 1920], m![Qs % 16, H % 1920]> =
+        weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<
+        f8e4m3,
+        Chip,
+        QueryClusters,
+        m![Qs / 16 % 128, H / 1920],
+        m![1],
+        m![Qs % 16 = 1, H % 1920],
+    > = ctx
+        .sub
+        .begin(probe.view().tile::<m![Qs % 16], 1, m![Qs % 16 = 1 # 16, H % 1920]>(0))
+        .fetch::<m![Qs % 16 = 1, H / 32 % 60], m![H % 32]>()
+        .collect::<m![Qs % 16 = 1, H / 32 % 60], m![H % 32]>()
+        .to_trf();
+}

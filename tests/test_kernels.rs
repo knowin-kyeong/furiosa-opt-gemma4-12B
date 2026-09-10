@@ -377,22 +377,22 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
+    // V208: one extra 15.73 MB query-weight load, in qkv's own 30,720-byte runs (p0) and
+    // in 1,920-byte runs (p1). The increment over the control is qkv's real stream rate.
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
-    t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
+    t("sliding_project_qkv", "p0", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
-    t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
+    t("sliding_project_qkv", "p0", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
     t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    t("sliding_project_qkv", "p0", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
+    t("sliding_project_qkv", "", 0.04),
+    t("sliding_project_qkv", "p0", 0.04),
+    t("sliding_project_qkv", "p1", 0.04),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
     t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
-    t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
@@ -436,6 +436,46 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture, variant: &str
 
     match variant {
         // VARIANTS:sliding_project_qkv
+        "p0" => launch(ops::sliding_project_qkv_p0, (
+            ctx,
+            &x,
+            &q_weight,
+            &k_weight,
+            &v_weight,
+            &q_weight_scale,
+            &k_weight_scale,
+            &v_weight_scale,
+            &input_rms_weight,
+            &q_rms_weight,
+            &k_rms_weight,
+            &kv_offset,
+            &rope_offset,
+            &cos,
+            &sin,
+            &mut k_cache,
+            &mut v_cache,
+            &mut q_out,
+        )).await,
+        "p1" => launch(ops::sliding_project_qkv_p1, (
+            ctx,
+            &x,
+            &q_weight,
+            &k_weight,
+            &v_weight,
+            &q_weight_scale,
+            &k_weight_scale,
+            &v_weight_scale,
+            &input_rms_weight,
+            &q_rms_weight,
+            &k_rms_weight,
+            &kv_offset,
+            &rope_offset,
+            &cos,
+            &sin,
+            &mut k_cache,
+            &mut v_cache,
+            &mut q_out,
+        )).await,
         "s2" => launch(ops::sliding_project_qkv_s2, (
             ctx,
             &x,
