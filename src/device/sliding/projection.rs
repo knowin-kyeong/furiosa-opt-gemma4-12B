@@ -1005,9 +1005,9 @@ pub(crate) fn project_output_gathered(
     let ringed: DmTensor<bf16, Chip, TwoClusters, m![H / 480 % 4, 1 # 64], m![H / 8 % 15, H / 120 % 4, H % 8]> = ctx
         .main
         .begin(contraction.view())
-        .fetch::<m![H / 8 % 15], m![H % 8]>()
+        .fetch::<m![H / 8 % 15], m![H % 8 # 16]>()
         .switch::<m![H / 480 % 4, 1 # 64], m![H / 8 % 15, H / 120 % 4]>(SwitchConfig::Broadcast1 { slice1: 4, slice0: 16 })
-        .collect::<m![H / 8 % 15, H / 120 % 4], m![H % 8]>()
+        .collect::<m![H / 8 % 15, H / 120 % 4], m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit();
 
