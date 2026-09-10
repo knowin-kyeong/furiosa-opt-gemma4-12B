@@ -698,27 +698,9 @@ fn contract_up_gate_full(
         .contract_outer::<m![L % 30, H / 64], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![H / 16 % 4]>()
         .contract_time::<m![L % 30, H / 64]>()
-        // Sequential relocates Lane into OutTime (Interleaved would put it in OutPacket and, with
-        // only two active lanes, run the 8-wide output bus at a quarter rate).
+        // Sequential relocates Lane into OutTime; Interleaved would put it in OutPacket and run
+        // the eight-wide output bus at a quarter rate with only two active lanes.
         .contract_lane::<m![L % 30, Dummy2, H / 64], m![H / 16 % 4 # 8]>(LaneMode::Sequential)
-        .commit_trim::<m![H / 16 % 4]>()
-        .commit()
-}
-
-/// V210: fold the two f8 pieces of x that pass A now emits as a Dummy2 axis in Time. One
-/// vector pass over 480 f32 per row, against the halved LUT+contract work in pass A.
-fn sum_x_pieces_full(
-    ctx: &mut Context,
-    partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 64, Dummy2, H / 16 % 4]>,
-) -> DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]> {
-    ctx.main
-        .begin(partials.view())
-        .fetch::<m![L % 30, H / 64], m![Dummy2, H / 16 % 4]>()
-        .collect::<m![L % 30, H / 64], m![Dummy2, H / 16 % 4]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_intra_slice_reduce::<Dummy2, m![L % 30, H / 64], m![H / 16 % 4]>(IntraSliceReduceOpF32::Add)
-        .vector_final()
         .commit_trim::<m![H / 16 % 4]>()
         .commit()
 }
@@ -729,14 +711,12 @@ macro_rules! up_gate_reduce_full_fns {
     ($reduce:ident, $rows:literal) => {
         fn $reduce(
             ctx: &mut Context,
-            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]>,
+            partials: &DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, Dummy2, H / 16]>,
             scale_all: &DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, H / 16]>,
             offset: usize,
+            piece: usize,
             out: &mut DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]>,
         ) {
-            // The same block scale multiplies both f8 pieces, so the scale is read once per block
-            // and replayed over the Dummy2 axis the pass-A output now carries. Tile heights are
-            // halved against V204 because the operand is twice as long and the VRF holds 8 KB.
             let scale_vrf: VrfTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30 = $rows, H / 16]> = ctx
                 .sub
                 .begin(scale_all.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
@@ -746,7 +726,12 @@ macro_rules! up_gate_reduce_full_fns {
                 .to_vrf();
 
             ctx.main
-                .begin(partials.view().tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, H / 16]>(offset))
+                .begin(
+                    partials
+                        .view()
+                        .tile::<m![Dummy2], 1, m![L % 30, Dummy2 = 1 #{!} 2, H / 16]>(piece)
+                        .tile::<m![L % 30], $rows, m![L % 30 = $rows # 30, Dummy2 = 1, H / 16]>(offset),
+                )
                 .fetch::<m![L % 30 = $rows, H / 128], m![H / 16 % 8]>()
                 .collect::<m![L % 30 = $rows, H / 128], m![H / 16 % 8]>()
                 .vector_init()
@@ -1035,10 +1020,10 @@ pub(crate) fn feedforward_v181(
         .commit_trim::<m![H % 32]>()
         .commit();
     let x: DmTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2, H]> = unsafe { x.reshape() };
-    // V210: the two f8 pieces of x go in *Lane*, not Time. With Lane = m![1] the Contraction
-    // Engine runs one of its eight lanes, and the Dummy2 replay makes MainContext fetch every
-    // weight packet twice - 36,526 static cycles for up and gate together, the largest single
-    // item in the project. Two active lanes let one weight fetch feed both pieces.
+    // V210: the two f8 pieces of x sit in *Lane*, not Time. With Lane = m![1] the Contraction
+    // Engine ran one of its eight lanes and the Dummy2 replay made MainContext fetch every weight
+    // packet twice - 36,526 static cycles across up and gate, the largest single item in the
+    // project. Two active lanes let one weight fetch feed both pieces.
     let x_trf: TrfTensor<f8e4m3, Chip, UpGateClusters, UpGateRowsFull, m![Dummy2], m![H]> = ctx
         .sub
         .begin(x.view())
@@ -1046,8 +1031,8 @@ pub(crate) fn feedforward_v181(
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
         .to_trf();
 
-    let up_partials = sum_x_pieces_full(ctx, &contract_up_gate_full(ctx, &x_trf, &up_w));
-    let gate_partials = sum_x_pieces_full(ctx, &contract_up_gate_full(ctx, &x_trf, &gate_w));
+    let up_partials = contract_up_gate_full(ctx, &x_trf, &up_w);
+    let gate_partials = contract_up_gate_full(ctx, &x_trf, &gate_w);
     let mut up0: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
     let mut up1: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
     let mut gate0: DmTensor<f32, Chip, UpGateClusters, UpGateRowsFull, m![L % 30, 1 # 8]> = DmTensor::new();
@@ -1068,6 +1053,7 @@ pub(crate) fn feedforward_v181(
     reduce_up_gate_full_8(ctx, &gate_partials, &gate_scale, 16, 1, &mut gate1);
     reduce_up_gate_full_6(ctx, &up_partials, &up_scale, 24, 1, &mut up1);
     reduce_up_gate_full_6(ctx, &gate_partials, &gate_scale, 24, 1, &mut gate1);
+
     let up = add_x_pieces_full(ctx, &up0, &up1);
     let gate = add_x_pieces_full(ctx, &gate0, &gate1);
 
