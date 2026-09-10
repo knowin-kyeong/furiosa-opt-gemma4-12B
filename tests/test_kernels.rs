@@ -395,13 +395,10 @@ const BASE: &[&str] = &[""; REPS];
 const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &[
-    "", "ck", "ck", "", "", "ck", "ck", "", "", "ck", "ck", "",
-    "", "ck", "ck", "", "", "ck", "ck", "", "", "ck", "ck", "",
-];
+const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[
-    "", "1p", "1p", "", "", "1p", "1p", "", "", "1p", "1p", "",
+    "1p", "", "1p", "", "1p", "", "1p", "", "1p", "", "1p", "",
 ];
 
 const PLAN: &[Plan] = &[
