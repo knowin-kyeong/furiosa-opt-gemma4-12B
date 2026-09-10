@@ -287,7 +287,7 @@ fn apply_output_channel_scale(
 // 514 B/cycle. The ring-64 gather disappears because the result is already where it belongs.
 // ---------------------------------------------------------------------------------------------
 
-pub(crate) type QueryChannelWeight = DmTensor<f8e4m3, Chip, HeadClusters, ChannelSlices, m![Ns % 4, Gs, H]>;
+pub(crate) type QueryChannelWeight = DmTensor<f8e4m3, Chip, HeadClusters, ChannelSlices, m![Gs, Ns % 4, H]>;
 
 pub(crate) fn load_query_weight_channels(
     ctx: &mut Context,
@@ -302,7 +302,7 @@ pub(crate) fn project_query_channels(
     ctx: &mut Context,
     x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
     weight_f8: &QueryChannelWeight,
-) -> DmTensor<bf16, Chip, HeadClusters, ChannelSlices, m![Ns % 4, Gs]> {
+) -> DmTensor<bf16, Chip, HeadClusters, ChannelSlices, m![Gs, Ns % 4]> {
     let x: DmTensorView<'_, f8e4m3, Chip, HeadClusters, ChannelSlices, m![Dummy2, H]> =
         unsafe { x.view().reshape() };
     let x_trf: TrfTensor<f8e4m3, Chip, HeadClusters, ChannelSlices, m![1], m![Dummy2, H]> = ctx
@@ -314,12 +314,12 @@ pub(crate) fn project_query_channels(
 
     ctx.main
         .begin(weight_f8.view())
-        .fetch::<m![Ns % 4, Gs, H / 64, Dummy2], m![H % 64]>()
-        .collect::<m![Ns % 4, Gs, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
-        .contract_outer::<m![Ns % 4, Gs, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .fetch::<m![Gs, Ns % 4, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Gs, Ns % 4, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Gs, Ns % 4, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![Ns % 4, Gs]>()
-        .contract_lane::<m![Ns % 4, Gs], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![Gs, Ns % 4]>()
+        .contract_lane::<m![Gs, Ns % 4], m![1 # 8]>(LaneMode::Interleaved)
         .cast::<bf16, m![1 # 16]>()
         .transpose::<m![Gs], m![Ns % 4 # 16]>()
         .commit_trim::<m![Ns % 4]>()
