@@ -1087,11 +1087,12 @@ pub(crate) fn feedforward_v181(
 pub(crate) fn probe_down_weight_960(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![H, L]>) {
     let probe: DmTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![H % 60, L % 1920]> =
         packed.to_dm(&mut ctx.tdma);
-    let _keep: TrfTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![1], m![H % 60 = 1, L % 1920]> = ctx
+    let _keep: TrfTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![1], m![H % 60 = 1, L % 1920]> = ctx
         .sub
         .begin(probe.view().tile::<m![H % 60], 1, m![H % 60 = 1 # 60, L % 1920]>(0))
         .fetch::<m![H % 60 = 1, L / 64 % 30], m![L % 64]>()
-        .collect::<m![H % 60 = 1, L / 64 % 30], m![L % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![H % 60 = 1, L / 64 % 30, L / 32 % 2], m![L % 32]>()
         .to_trf();
 }
 
@@ -1100,7 +1101,7 @@ pub(crate) fn probe_down_weight_3840(ctx: &mut Context, packed: &HbmTensor<f4e2m
     let probe: DmTensor<f4e2m1, Chip, DownClusters, m![H / 15 % 128, L / 7680], m![H % 15, L % 7680]> =
         packed.to_dm(&mut ctx.tdma);
     let _keep: TrfTensor<
-        f4e2m1,
+        f8e4m3,
         Chip,
         DownClusters,
         m![H / 15 % 128, L / 7680],
@@ -1110,6 +1111,7 @@ pub(crate) fn probe_down_weight_3840(ctx: &mut Context, packed: &HbmTensor<f4e2m
         .sub
         .begin(probe.view().tile::<m![H % 15], 1, m![H % 15 = 1 # 15, L % 7680]>(0))
         .fetch::<m![H % 15 = 1, L / 64 % 120], m![L % 64]>()
-        .collect::<m![H % 15 = 1, L / 64 % 120], m![L % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![H % 15 = 1, L / 64 % 120, L / 32 % 2], m![L % 32]>()
         .to_trf();
 }
