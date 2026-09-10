@@ -756,6 +756,7 @@ fn fold_x_pieces(
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_narrow_split::<m![L % 30, H / 64, Dummy2], m![H / 16 % 4]>()
         .vector_intra_slice_reduce::<Dummy2, m![L % 30, H / 64], m![H / 16 % 4]>(IntraSliceReduceOpF32::Add)
+        .vector_widen_pad::<m![H / 16 % 4 # 8]>()
         .vector_final()
         .commit_trim::<m![H / 16 % 4]>()
         .commit()
