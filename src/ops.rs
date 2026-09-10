@@ -541,8 +541,8 @@ pub fn sliding_project_qkv_p0(
     v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
     q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
 ) {
-    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
     sliding::projection::probe_query_weight_long_runs(ctx, q_weight);
+    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
 
     let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
     let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &x, input_rms_weight);
@@ -634,8 +634,8 @@ pub fn sliding_project_qkv_p1(
     v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
     q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
 ) {
-    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
     sliding::projection::probe_query_weight_short_runs(ctx, q_weight);
+    let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
 
     let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
     let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &x, input_rms_weight);
