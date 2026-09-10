@@ -360,3 +360,84 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V205 Phase 1: byte-scaling ladder (timing only, accuracy fails by design).
+//
+// The question this answers is the repository's open question #1: a kernel moves its weights at
+// ~310 B/cycle end to end, but an extra load added to the same kernel moves at 595-618 B/cycle
+// (V197). Either the kernel's own stream is half speed (an access-pattern problem), or the stream
+// is already at full speed and half the kernel is serial non-DMA time (a scheduling problem).
+//
+// The two hypotheses predict very different slopes, so measure the slope: hold every structure
+// fixed and vary only how many of the 120 rows per slice the O-weight tile carries. Rows above
+// `$rows` are never written, so the output is wrong on purpose - only the cycle count is read.
+//
+//   cycles = a + bytes / R,   bytes = 15,728,640 * $rows / 120
+//
+//   R ~ 600 B/cycle  =>  the stream is fine and `a` (~24k) is serial non-DMA time  -> Phase 2-B
+//   R ~ 310 B/cycle  =>  the kernel's own load really is half speed                -> Phase 2-A
+// ---------------------------------------------------------------------------------------------
+macro_rules! project_output_rows {
+    ($name:ident, $rows:literal) => {
+        pub(crate) fn $name(
+            ctx: &mut Context,
+            x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+            weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+        ) -> HbmTensor<bf16, Chip, m![H]> {
+            let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = $rows, Qs % 256]> =
+                weight
+                    .view()
+                    .tile::<m![H % 120], $rows, m![H / 120, H % 120 = $rows # 120, Qs]>(0)
+                    .to_dm(&mut ctx.tdma);
+
+            let xs: DmTensor<bf16, Chip, Cluster, XSlices256, m![Qs % 256]> = x.to_dm(&mut ctx.tdma);
+            let (x_hi, x_lo) = hi_lo_x256(ctx, &xs, 16f32);
+            let mut x2_hbm: HbmTensor<f8e4m3, Chip, m![Qs / 256, Dummy2, Qs % 256]> = HbmTensor::new();
+            x_hi.view().to_hbm_view(
+                &mut ctx.tdma,
+                x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 256, Dummy2 = 1 #{!} 2, Qs % 256]>(0),
+            );
+            x_lo.view().to_hbm_view(
+                &mut ctx.tdma,
+                x2_hbm.view_mut().tile::<m![Dummy2], 1, m![Qs / 256, Dummy2 = 1 #{!} 2, Qs % 256]>(1),
+            );
+
+            let x: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![Dummy2, Qs % 256]> =
+                x2_hbm.to_dm(&mut ctx.tdma);
+            let x_trf: TrfTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![1], m![Dummy2, Qs % 256]> = ctx
+                .sub
+                .begin(x.view())
+                .fetch::<m![Dummy2, Qs / 32 % 8], m![Qs % 32]>()
+                .collect::<m![Dummy2, Qs / 32 % 8], m![Qs % 32]>()
+                .to_trf();
+
+            let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> = DmTensor::new();
+            ctx.main
+                .begin(tile0.view())
+                .fetch::<m![H % 120 = $rows, Qs / 64 % 4, Dummy2], m![Qs % 64]>()
+                .collect::<m![H % 120 = $rows, Qs / 64 % 4, Dummy2, Qs / 32 % 2], m![Qs % 32]>()
+                .contract_outer::<m![H % 120 = $rows, Qs / 64 % 4, Dummy2], m![Qs % 64], _, _, _>(&x_trf)
+                .contract_packet::<m![1]>()
+                .contract_time::<m![H % 120 = $rows]>()
+                .contract_lane::<m![H % 120 = $rows], m![1 # 8]>(LaneMode::Interleaved)
+                .vector_init()
+                .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = $rows]>(InterSliceReduceOpF32::Add)
+                .vector_final()
+                .cast::<bf16, m![1 # 16]>()
+                .transpose::<m![H % 120 = $rows / 4], m![H % 120 = $rows % 4 # 16]>()
+                .commit_trim::<m![H % 120 = $rows % 4]>()
+                .commit_view(contraction.view_mut().tile::<m![H % 120], $rows, m![H % 120 = $rows #{!} 120]>(0));
+
+            let mut gathered_hbm: HbmTensor<bf16, Chip, m![H]> = HbmTensor::new();
+            contraction.view().to_hbm_view(&mut ctx.tdma, gathered_hbm.view_mut());
+            gathered_hbm
+        }
+    };
+}
+
+project_output_rows!(project_output_b120, 120);
+project_output_rows!(project_output_b88, 88);
+project_output_rows!(project_output_b60, 60);
+project_output_rows!(project_output_b32, 32);
+project_output_rows!(project_output_b16, 16);

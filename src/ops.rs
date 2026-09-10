@@ -518,3 +518,103 @@ pub fn final_norm_and_logits(
 
     capped.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
+
+/// V205 Phase 1 byte-scaling probe: the O-weight tile carries 120 of the 120 rows per slice, so
+/// the weight stream is 15,728,640 * 120/120 bytes with every other structure held fixed.
+/// Timing only - the rows above 120 are never written, so the output is wrong by design.
+#[device(chip = 1)]
+pub fn sliding_attention_output_b120(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_b120(ctx, x, o_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V205 Phase 1 byte-scaling probe: the O-weight tile carries 88 of the 120 rows per slice, so
+/// the weight stream is 15,728,640 * 88/120 bytes with every other structure held fixed.
+/// Timing only - the rows above 88 are never written, so the output is wrong by design.
+#[device(chip = 1)]
+pub fn sliding_attention_output_b88(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_b88(ctx, x, o_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V205 Phase 1 byte-scaling probe: the O-weight tile carries 60 of the 120 rows per slice, so
+/// the weight stream is 15,728,640 * 60/120 bytes with every other structure held fixed.
+/// Timing only - the rows above 60 are never written, so the output is wrong by design.
+#[device(chip = 1)]
+pub fn sliding_attention_output_b60(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_b60(ctx, x, o_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V205 Phase 1 byte-scaling probe: the O-weight tile carries 32 of the 120 rows per slice, so
+/// the weight stream is 15,728,640 * 32/120 bytes with every other structure held fixed.
+/// Timing only - the rows above 32 are never written, so the output is wrong by design.
+#[device(chip = 1)]
+pub fn sliding_attention_output_b32(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_b32(ctx, x, o_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V205 Phase 1 byte-scaling probe: the O-weight tile carries 16 of the 120 rows per slice, so
+/// the weight stream is 15,728,640 * 16/120 bytes with every other structure held fixed.
+/// Timing only - the rows above 16 are never written, so the output is wrong by design.
+#[device(chip = 1)]
+pub fn sliding_attention_output_b16(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_b16(ctx, x, o_weight);
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}

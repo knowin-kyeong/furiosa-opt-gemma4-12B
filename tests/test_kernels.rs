@@ -377,22 +377,26 @@ const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    // V205 Phase 1: the O-weight byte-scaling ladder, three passes over the five points
+    // plus the production two-tile shape as an anchor. Bytes = 15,728,640 * rows / 120.
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    t("sliding_attention_output", "b120", 0.05),
+    t("sliding_attention_output", "b88", 0.05),
+    t("sliding_attention_output", "b60", 0.05),
+    t("sliding_attention_output", "b32", 0.05),
+    t("sliding_attention_output", "b16", 0.05),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("sliding_project_qkv", "", 0.04),
-    t("sliding_project_qkv", "s2", 0.04),
+    t("sliding_attention_output", "b120", 0.05),
+    t("sliding_attention_output", "b88", 0.05),
+    t("sliding_attention_output", "b60", 0.05),
+    t("sliding_attention_output", "b32", 0.05),
+    t("sliding_attention_output", "b16", 0.05),
     t("sliding_attention_output", "", 0.05),
-    t("sliding_attention_output", "c512", 0.05),
-    t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
-    t("decoder_feedforward", "", 0.01),
-    t("decoder_feedforward", "s2", 0.01),
+    t("sliding_attention_output", "b120", 0.05),
+    t("sliding_attention_output", "b88", 0.05),
+    t("sliding_attention_output", "b60", 0.05),
+    t("sliding_attention_output", "b32", 0.05),
+    t("sliding_attention_output", "b16", 0.05),
 ];
 
 async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
@@ -499,6 +503,46 @@ async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture, variant:
 
     match variant {
         // VARIANTS:sliding_attention_output
+        "b120" => launch(ops::sliding_attention_output_b120, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "b88" => launch(ops::sliding_attention_output_b88, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "b60" => launch(ops::sliding_attention_output_b60, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "b32" => launch(ops::sliding_attention_output_b32, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        "b16" => launch(ops::sliding_attention_output_b16, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
         "c512" => launch(ops::sliding_attention_output_c512, (
             ctx,
             &x,
