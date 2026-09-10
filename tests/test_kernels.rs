@@ -364,42 +364,43 @@ async fn rope_table<D: AxisName>(
 
 struct Test {
     name: &'static str,
+    /// "" is the graded kernel; anything else selects an experiment variant in the shim below.
+    variant: &'static str,
     atol: f32,
     rtol: f32,
+}
+
+const fn t(name: &'static str, variant: &'static str, atol: f32) -> Test {
+    Test { name, variant, atol, rtol: RTOL }
 }
 
 const RTOL: f32 = 1e-2;
 
 const TESTS: &[Test] = &[
-    // Measurement only (tests/ is ignored by the grader): every kernel five times in one job,
-    // so a job shows the cold (first) launch and a median/stdev over four warm repeats.
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
-    Test { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL },
-    Test { name: "sliding_attention_output", atol: 0.05, rtol: RTOL },
-    Test { name: "decoder_feedforward", atol: 0.01, rtol: RTOL },
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "a256", 0.05),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "a256", 0.05),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "a256", 0.05),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "a256", 0.05),
+    t("sliding_attention_output", "", 0.05),
+    t("sliding_attention_output", "a256", 0.05),
+    t("sliding_project_qkv", "", 0.04),
+    t("decoder_feedforward", "", 0.01),
 ];
 
-async fn run_test(ctx: &mut Context, fixture: &Fixture, name: &'static str) -> Vec<(&'static str, Vec<f32>)> {
-    match name {
-        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture).await,
-        "sliding_attention_output" => sliding_attention_output(ctx, fixture).await,
-        "decoder_feedforward" => decoder_feedforward(ctx, fixture).await,
+async fn run_test(ctx: &mut Context, fixture: &Fixture, test: &Test) -> Vec<(&'static str, Vec<f32>)> {
+    match test.name {
+        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture, test.variant).await,
+        "sliding_attention_output" => sliding_attention_output(ctx, fixture, test.variant).await,
+        "decoder_feedforward" => decoder_feedforward(ctx, fixture, test.variant).await,
         other => panic!("no shim for test `{other}` -- add one in run_test"),
     }
 }
 
-async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("sliding_project_qkv", fixture);
 
     let input_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "input_rms_weight", RMS_WEIGHT).await;
@@ -429,9 +430,9 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
     let mut v_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
     let mut q_out: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = zeros(ctx).await;
 
-    launch(
-        ops::sliding_project_qkv,
-        (
+    match variant {
+        // VARIANTS:sliding_project_qkv
+        "" => launch(ops::sliding_project_qkv, (
             ctx,
             &x,
             &q_weight,
@@ -450,9 +451,9 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
             &mut k_cache,
             &mut v_cache,
             &mut q_out,
-        ),
-    )
-    .await;
+        )).await,
+        other => panic!("no variant `{other}` for sliding_project_qkv"),
+    };
 
     let width = Ns::SIZE * Ds::SIZE;
     let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
@@ -464,7 +465,7 @@ async fn sliding_project_qkv(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
     ]
 }
 
-async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("sliding_attention_output", fixture);
     let x: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = s.signs(ctx, "x", 1.0).await;
     let post_attn_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "post_attn_rms_weight", UNIT).await;
@@ -472,22 +473,30 @@ async fn sliding_attention_output(ctx: &mut Context, fixture: &Fixture) -> Vec<(
     let o_weight_scale: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "o_weight_scale", ROW_SCALE).await;
     let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
 
-    launch(
-        ops::sliding_attention_output,
-        (
+    match variant {
+        // VARIANTS:sliding_attention_output
+        "a256" => launch(ops::sliding_attention_output_a256, (
             ctx,
             &x,
             &post_attn_rms_weight,
             &o_weight,
             &o_weight_scale,
             &mut residual,
-        ),
-    )
-    .await;
+        )).await,
+        "" => launch(ops::sliding_attention_output, (
+            ctx,
+            &x,
+            &post_attn_rms_weight,
+            &o_weight,
+            &o_weight_scale,
+            &mut residual,
+        )).await,
+        other => panic!("no variant `{other}` for sliding_attention_output"),
+    };
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
-async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'static str, Vec<f32>)> {
+async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture, variant: &str) -> Vec<(&'static str, Vec<f32>)> {
     let s = Synth::new("decoder_feedforward", fixture);
 
     let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
@@ -516,9 +525,9 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
 
     let layer_scalar: HbmTensor<bf16, Chip, m![1 # 8]> = s.constant_bf16(ctx, "layer_scalar", &[LAYER_SCALAR; 8]).await;
 
-    launch(
-        ops::decoder_feedforward,
-        (
+    match variant {
+        // VARIANTS:decoder_feedforward
+        "" => launch(ops::decoder_feedforward, (
             ctx,
             &mut residual,
             &pre_ff_rms_weight,
@@ -533,9 +542,9 @@ async fn decoder_feedforward(ctx: &mut Context, fixture: &Fixture) -> Vec<(&'sta
             &down_global_scale,
             &post_ff_rms_weight,
             &layer_scalar,
-        ),
-    )
-    .await;
+        )).await,
+        other => panic!("no variant `{other}` for decoder_feedforward"),
+    };
     vec![("expected", read_bf16(ctx, &residual).await)]
 }
 
@@ -695,13 +704,19 @@ async fn main() {
     );
 
     let mut failures = Vec::new();
+    let mut samples: Vec<(String, u64)> = Vec::new();
     for test in TESTS {
+        let key = if test.variant.is_empty() {
+            test.name.to_string()
+        } else {
+            format!("{} {}", test.name, test.variant)
+        };
         if profile {
-            println!("==> {}", test.name);
+            println!("==> {key}");
             collector.clear();
         }
 
-        let outputs = run_test(&mut ctx, &fixture, test.name).await;
+        let outputs = run_test(&mut ctx, &fixture, test).await;
 
         let cycles = if profile {
             // Spans are decoded off the launch hot path during deferred read-back, not
@@ -720,16 +735,19 @@ async fn main() {
         let mut ok = true;
         for (label, actual) in &outputs {
             let display = if outputs.len() == 1 {
-                test.name.to_string()
+                key.clone()
             } else {
-                format!("{} {}", test.name, label.trim_start_matches("expected."))
+                format!("{} {}", key, label.trim_start_matches("expected."))
             };
             ok &= compare(&display, fixture.expect(test.name, label), actual, test.atol, test.rtol);
         }
 
         if profile {
             match cycles {
-                Some(c) => println!("    cycles={c}"),
+                Some(c) => {
+                    println!("    cycles={c}");
+                    samples.push((key.clone(), c));
+                }
                 None => println!("    cycles=none observed"),
             }
             println!();
@@ -737,6 +755,32 @@ async fn main() {
 
         if !ok {
             failures.push(test.name);
+        }
+    }
+
+    // Summary per (kernel, variant): the first launch is cold, median/stdev over the rest.
+    let mut keys: Vec<String> = samples.iter().map(|(k, _)| k.clone()).collect();
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+    if !samples.is_empty() {
+        println!();
+        println!("summary (cold = first launch; median/stdev over the later launches)");
+        for key in keys {
+            let vals: Vec<u64> = samples.iter().filter(|(k, _)| *k == key).map(|(_, c)| *c).collect();
+            let cold = vals[0];
+            let mut warm: Vec<u64> = vals[1..].to_vec();
+            warm.sort_unstable();
+            let (median, stdev) = if warm.is_empty() {
+                (0.0, 0.0)
+            } else {
+                let n = warm.len();
+                let median = if n % 2 == 1 { warm[n / 2] as f64 } else { (warm[n / 2 - 1] + warm[n / 2]) as f64 / 2.0 };
+                let mean = warm.iter().sum::<u64>() as f64 / n as f64;
+                let var = warm.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / n as f64;
+                (median, var.sqrt())
+            };
+            println!("    {key:40} n={} cold={cold} median={median:.0} stdev={stdev:.0} min={} max={}",
+                vals.len(), warm.first().copied().unwrap_or(cold), warm.last().copied().unwrap_or(cold));
         }
     }
 
