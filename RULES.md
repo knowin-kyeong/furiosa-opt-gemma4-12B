@@ -483,6 +483,9 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - V302: gather 출력 클러스터에 tile 표기를 써도 클러스터 1로 가지 않는다(무시) → RoPE HBM 왕복은 소스로 못 없앤다. post-V299 qkv 꼬리 = rope 왕복·대기 ~22k.
 - V303(down contraction Lane): 6/8 −0.24%, 미채택 — down 단계는 타일 로드에 묶여 있다. RoPE 패스 융합은 `to_vrf`가 텐서 전체 staging만 지원(tile 쓰기 없음)해
   q·k마다 Main 패스 1개 절감(~1–2k)이 상한이라 보류.
+- **V301_submit ffn 대기열 조사(crit.py, 279.9k launch):** DMA busy 240.9k · idle 39.0k. 최대 낭비는 **geglu 왕복 동기화 15.3k 중 FIFO 유휴 13.5k** —
+  정적 스케줄이 down 타일을 "타일 로드 → 그 타일 contraction"으로 파이프라인하느라 타일 1~3(49.5k)을 geglu store 뒤에 둔다(모델은 동기화를 600으로 본다).
+  그 밖에 down scale 로드 앞 유휴 7.6k, 꼬리 5.3k. V304(attn 한 타일)는 중립.
 - 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
