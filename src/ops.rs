@@ -35,6 +35,7 @@ pub fn embed_token(
     result.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
 
+
 #[device(chip = 1)]
 pub fn sliding_project_qkv(
     ctx: &mut Context,
@@ -58,32 +59,12 @@ pub fn sliding_project_qkv(
 ) {
     let q_weight = sliding::projection::load_query_weight(ctx, q_weight);
 
-    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, x);
-    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &x, input_rms_weight);
-
-    // Replicating x to every slice through the switch or a DM-to-DM DMA costs 54-62k cycles;
-    // staging the vector in HBM and loading it back replicated runs at HBM DMA speed. x goes as
-    // two f8 pieces of x times a power of two (their sum is exact), which the projections
-    // contract as f8 x f8 with no lookup pass; the head RMSNorms that follow are
-    // scale-invariant, so the factor is never undone.
-    // One copy, not sixteen: a copy axis the source lacks does not replicate the store (V50).
-    let x2_hbm = shared::mlp::stage_x_hi_lo_qkv_hbm(ctx, &x);
-    // Replicating x onto the 512 slices as one HBM load costs 512 DMA descriptors that all read
-    // the same 7.7 KB: on hardware that is ~45k cycles, not the 18k of the static model (V154).
-    // Instead eight copies per cluster come from HBM (16 descriptors) and a ring-32 switch
-    // broadcast fills each copy's 32 slices (V157: qkv 151k -> 108k, 3/3 PASS). The copies are
-    // loaded and switched on a real cluster axis: a pass on the dummy axis BothClusters serves
-    // one cluster only (V155).
-    let x8: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, 1 # 32], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
-        .main
-        .begin(x8.view())
-        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
-        .collect::<m![Dummy2, H / 32], m![H % 32]>()
-        .commit_trim::<m![H % 32]>()
-        .commit();
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
+    // V292: x is staged on both clusters (8 copies x 8 chunks in every 32-slice sub-ring) and replicated on
+    // chip by one ring-32 all-gather: no HBM hop, so no ExplicitSync idles the DMA queue (7/8 jobs, -1.3%).
+    let x = shared::xsw::load_blocks(ctx, x);
+    let x = shared::xsw::normalize_blocks_f32(ctx, &x, input_rms_weight);
+    let x2 = shared::xsw::stage_x_hi_lo_blocks(ctx, &x);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = shared::xsw::replicate_blocks(ctx, &x2);
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
