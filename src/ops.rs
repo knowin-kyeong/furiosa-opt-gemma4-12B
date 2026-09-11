@@ -441,3 +441,30 @@ pub fn probe_load_qi2(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs / 512 % 4 = 1, Qs % 2, H / 32], m![H % 32]>()
         .to_trf();
 }
+
+/// V317 probe: q_weight with cluster = row parity and slice = (row / 2) % 256: every read is one 3,840-byte row and
+/// consecutive rows go to different clusters.
+#[device(chip = 1)]
+pub fn probe_load_qx1(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs % 2], m![Qs / 2 % 256], m![Qs / 512 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs % 2], m![Qs / 2 % 256], m![1], m![Qs / 512 % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs / 512 % 8], 1, m![Qs / 512 % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs / 512 % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs / 512 % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V317 probe: q_weight with cluster = (row / 512) % 2 and slice = row % 256: every read is one row and the clusters
+/// alternate every 512 rows (whole KV-head groups).
+#[device(chip = 1)]
+pub fn probe_load_qxh(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 512 % 2], m![Qs % 256], m![Qs / 1024 % 4, Qs / 256 % 2, H]> =
+        q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 512 % 2], m![Qs % 256], m![1], m![Qs / 1024 % 4 = 1, Qs / 256 % 2, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs / 1024 % 4], 1, m![Qs / 1024 % 4 = 1 # 4, Qs / 256 % 2, H]>(0))
+        .fetch::<m![Qs / 1024 % 4 = 1, Qs / 256 % 2, H / 32], m![H % 32]>()
+        .collect::<m![Qs / 1024 % 4 = 1, Qs / 256 % 2, H / 32], m![H % 32]>()
+        .to_trf();
+}
