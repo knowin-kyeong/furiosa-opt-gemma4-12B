@@ -481,6 +481,8 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - **V301: ffn pass A의 LUT 조회 절반(V235)이 V293 경로에서 8/8 −2.3%** → `V301_submit`. V235가 중립이던 이유(gate 로드가 pass A를 묶음)가 V293의 x2 동기화 제거로 풀렸다 —
   "과거에 중립이던 절감은 임계 경로가 바뀐 뒤 다시 잴 것".
 - V302: gather 출력 클러스터에 tile 표기를 써도 클러스터 1로 가지 않는다(무시) → RoPE HBM 왕복은 소스로 못 없앤다. post-V299 qkv 꼬리 = rope 왕복·대기 ~22k.
+- V303(down contraction Lane): 6/8 −0.24%, 미채택 — down 단계는 타일 로드에 묶여 있다. RoPE 패스 융합은 `to_vrf`가 텐서 전체 staging만 지원(tile 쓰기 없음)해
+  q·k마다 Main 패스 1개 절감(~1–2k)이 상한이라 보류.
 - 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
