@@ -468,3 +468,39 @@ pub fn probe_load_qxh(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs / 1024 % 4 = 1, Qs / 256 % 2, H / 32], m![H % 32]>()
         .to_trf();
 }
+
+/// V321 probe: symmetric halves, one row per read (qi1 layout, H-tile keep-alive).
+#[device(chip = 1)]
+pub fn probe_load_qs1(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![Qs / 256 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![1], m![Qs / 256 % 8, H = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![H], 32, m![Qs / 256 % 8, H = 32 # 3840]>(0))
+        .fetch::<m![Qs / 256 % 8], m![H = 32]>()
+        .collect::<m![Qs / 256 % 8], m![H = 32]>()
+        .to_trf();
+}
+
+/// V321 probe: rows 0..2560 (62.5%) on cluster 0, 2560..4096 on cluster 1, one row per read.
+#[device(chip = 1)]
+pub fn probe_load_qa5(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs # 5120 / 2560], m![Qs # 5120 % 2560 % 256], m![Qs # 5120 % 2560 / 256, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs # 5120 / 2560], m![Qs # 5120 % 2560 % 256], m![1], m![Qs # 5120 % 2560 / 256, H = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![H], 32, m![Qs # 5120 % 2560 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Qs # 5120 % 2560 / 256], m![H = 32]>()
+        .collect::<m![Qs # 5120 % 2560 / 256], m![H = 32]>()
+        .to_trf();
+}
+
+/// V321 probe: rows 0..2304 (56.25%) on cluster 0, 2304..4096 on cluster 1, one row per read.
+#[device(chip = 1)]
+pub fn probe_load_qa9(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs # 4608 / 2304], m![Qs # 4608 % 2304 % 256], m![Qs # 4608 % 2304 / 256, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs # 4608 / 2304], m![Qs # 4608 % 2304 % 256], m![1], m![Qs # 4608 % 2304 / 256, H = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![H], 32, m![Qs # 4608 % 2304 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Qs # 4608 % 2304 / 256], m![H = 32]>()
+        .collect::<m![Qs # 4608 % 2304 / 256], m![H = 32]>()
+        .to_trf();
+}
