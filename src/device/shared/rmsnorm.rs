@@ -594,3 +594,11 @@ pub(crate) fn normalize_add_scaled_reduced_pre<Cluster: M>(
         .commit_trim::<m![H % 8]>()
         .commit()
 }
+
+/// X1/V271: `load_reducing` from the 256 B-aligned layout `project_output_e5_96_x1` stores.
+pub(crate) fn load_reducing_x1<Cluster: M>(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H / 120, H % 120 # 128]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    x.to_dm(&mut ctx.tdma)
+}

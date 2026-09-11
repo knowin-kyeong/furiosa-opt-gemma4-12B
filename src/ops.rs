@@ -720,6 +720,28 @@ pub fn sliding_attention_output_e5_96(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// X1/V271: 96/24 tiles, contraction output stored at 256 B-aligned offsets.
+#[device(chip = 1)]
+pub fn sliding_attention_output_e5_96_x1(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_e5_96_x1(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing_x1::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 /// E5/V266: attn_out with O-weight tiles 104/16.
 #[device(chip = 1)]
 pub fn sliding_attention_output_e5_104(

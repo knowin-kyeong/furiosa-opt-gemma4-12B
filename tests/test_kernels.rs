@@ -398,14 +398,7 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[
-    "tb", "td", "te",
-    "te", "td", "tb",
-    "td", "tb", "te",
-    "te", "tb", "td",
-    "tb", "td", "te",
-    "te", "td", "tb",
-    "td", "tb", "te",
-    "te", "tb", "td",
+    "tb", "tx", "tx", "tb", "tb", "tx", "tx", "tb", "tb", "tx", "tx", "tb", "tb", "tx", "tx", "tb",
 ];
 
 const PLAN: &[Plan] = &[
@@ -720,6 +713,20 @@ async fn sliding_attention_output(
             "te" => {
                 launch(
                     ops::sliding_attention_output_e5_92,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "tx" => {
+                launch(
+                    ops::sliding_attention_output_e5_96_x1,
                     (
                         ctx,
                         &x,
