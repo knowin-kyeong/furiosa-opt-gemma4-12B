@@ -269,7 +269,7 @@ pub fn decoder_feedforward(
     let out_all = shared::xsw::broadcast_scalar_blocks(ctx, out_b);
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
-    let x = shared::mlp::feedforward_v181_sw(
+    let x = shared::mlp::feedforward_v301(
         ctx,
         x_rep,
         erf_all,
