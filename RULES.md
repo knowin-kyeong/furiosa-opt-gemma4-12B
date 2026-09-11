@@ -488,6 +488,11 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
   그 밖에 down scale 로드 앞 유휴 7.6k, 꼬리 5.3k. V304(attn 한 타일)는 중립.
 - **V305(down weight 한 명령) 6/6 +14.1k 기각:** 합친 로드도 정적 스케줄러는 첫 소비자(down contraction) 바로 앞, 즉 geglu store 뒤에 둔다.
   hop 유휴는 회수되지 않고 타일 로드↔contraction 파이프라인만 잃는다. geglu hop 유휴 13.5k는 로드 모양으로는 못 줄인다.
+- **V306(out_scale을 꼬리 곱으로) 12/12 −4.9k(−1.76%) → `V306_submit`.** 판독(ffn PE 프로그램 `DUMP_PE_PROGRAM` + span): 명령은 정적 시작 순서로
+  클러스터당 TUC 큐 하나에 들어가고, DMA 발행은 앞선 DMA 완료(`wait_dma` TUC 명령)와 **앞에 선 TU pass의 종료**를 기다린다. 실물 TU는 정적의 1.6~3.6배
+  (switch 295 → 1,069, pass B 761 → 2,757, 스칼라 StoVrf 267 → 505~3,114), DMA는 ~2.15배라 **TU 체인 뒤에 줄 선 로드가 DMA 엔진을 놀린다.**
+  `StoTab`(f4 LUT 적재, 정적 1,293)은 Main pass가 끝날 때까지 기다린다(실물 6~9k로 보임). ⇒ **큰 로드 앞 창에서 작은 TU pass·switch를 빼는 변경을 찾는다.**
+  남은 창: ffn 머리(up weight 발행 11.2k, 앞의 x 스테이징 StoVrf 3.1k · LUT · StoTab · cfg), down_scale 앞(erf switch · StoVrf · pass B 4개), qkv 꼬리(rope 왕복).
 - 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
