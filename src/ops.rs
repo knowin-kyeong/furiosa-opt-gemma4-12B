@@ -441,3 +441,39 @@ pub fn probe_load_qi2(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs / 512 % 4 = 1, Qs % 2, H / 32], m![H % 32]>()
         .to_trf();
 }
+
+/// V298 probe: q_weight, rows interleaved within each head (1-row runs, stride 64 rows).
+#[device(chip = 1)]
+pub fn probe_load_qh1(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 512 % 4, Qs % 64], m![Qs / 64 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 512 % 4, Qs % 64], m![1], m![Qs / 64 % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs / 64 % 8], 1, m![Qs / 64 % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs / 64 % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs / 64 % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V298 probe: k_weight, rows interleaved within each head (1-row runs, stride 64 rows).
+#[device(chip = 1)]
+pub fn probe_load_kvh1(ctx: &mut Context, k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps / 256 % 4, Ps % 64], m![Ps / 64 % 4, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps / 256 % 4, Ps % 64], m![1], m![Ps / 64 % 4 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Ps / 64 % 4], 1, m![Ps / 64 % 4 = 1 # 4, H]>(0))
+        .fetch::<m![Ps / 64 % 4 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Ps / 64 % 4 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V298 probe: k_weight in the production layout (4 consecutive rows per slice).
+#[device(chip = 1)]
+pub fn probe_load_kv01(ctx: &mut Context, k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps / 4 % 256], m![Ps % 4, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps / 4 % 256], m![1], m![Ps % 4 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Ps % 4], 1, m![Ps % 4 = 1 # 4, H]>(0))
+        .fetch::<m![Ps % 4 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Ps % 4 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
