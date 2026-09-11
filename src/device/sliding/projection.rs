@@ -4,7 +4,7 @@ use furiosa_opt_std::prelude::*;
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
 use crate::hi_lo_trunc_fns;
-use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
+use crate::device::layout::{Cluster, HeadClusters, HeadSlicesPerCluster, Slice};
 
 // Both clusters do real work: the query rows are split across the two clusters and then
 // 256 slices per cluster, 8 rows each.
@@ -19,28 +19,22 @@ pub(crate) fn load_query_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Ch
     weight.to_dm(&mut ctx.tdma)
 }
 
-pub(crate) fn project_query(
+pub(crate) fn project_query<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    x_trf: &TrfTensor<f8e4m3, Chip, C, S, m![1], m![Dummy2, H]>,
     weight_f8: &QueryWeight,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
-    // x (two f8 pieces whose sum is bf16 x times a power of two) is replicated onto every
-    // slice of both clusters. Each weight packet is streamed twice (the Dummy2 time axis) so
-    // the Time Reducer adds the dot products with the two pieces.
-    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
-    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRows, m![1], m![Dummy2, H]> = ctx
-        .sub
-        .begin(x)
-        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .collect::<m![Dummy2, H / 32], m![H % 32]>()
-        .to_trf();
-
-    let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRows, m![Qs % 8]> = ctx
+    // x (two f8 pieces whose sum is bf16 x times a power of two) already sits in the TRF of every
+    // slice of both clusters, written there by the broadcast pass. Each weight packet is streamed
+    // twice (the Dummy2 time axis) so the Time Reducer adds the dot products with the two pieces.
+    // A TrfTensor cannot be relabelled, so the weight takes the TRF's cluster/slice labels.
+    let weight: DmTensorView<'_, f8e4m3, Chip, C, S, m![Qs % 8, H]> = unsafe { weight_f8.view().reshape() };
+    let contraction: DmTensor<bf16, Chip, C, S, m![Qs % 8]> = ctx
         .main
-        .begin(weight_f8.view())
+        .begin(weight)
         .fetch::<m![Qs % 8, H / 64, Dummy2], m![H % 64]>()
         .collect::<m![Qs % 8, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
-        .contract_outer::<m![Qs % 8, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .contract_outer::<m![Qs % 8, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![Qs % 8]>()
         .contract_lane::<m![Qs % 8], m![1 # 8]>(LaneMode::Interleaved)
@@ -77,14 +71,15 @@ pub(crate) fn load_kv_weight(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip,
     weight.to_dm(&mut ctx.tdma)
 }
 
-fn project_one_kv_matrix(
+fn project_one_kv_matrix<C: M, S: M>(
     ctx: &mut Context,
-    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]>,
+    x_trf: &TrfTensor<f8e4m3, Chip, C, S, m![1], m![Dummy2, H]>,
     weight_f8: &KvWeight,
 ) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
-    let contraction: DmTensor<bf16, Chip, KvClusters, KvRows, m![Ps % 4]> = ctx
+    let weight: DmTensorView<'_, f8e4m3, Chip, C, S, m![Ps % 4, H]> = unsafe { weight_f8.view().reshape() };
+    let contraction: DmTensor<bf16, Chip, C, S, m![Ps % 4]> = ctx
         .main
-        .begin(weight_f8.view())
+        .begin(weight)
         .fetch::<m![Ps % 4, H / 64, Dummy2], m![H % 64]>()
         .collect::<m![Ps % 4, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
         .contract_outer::<m![Ps % 4, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
@@ -109,25 +104,17 @@ fn project_one_kv_matrix(
         .commit()
 }
 
-pub(crate) fn project_key_value(
+pub(crate) fn project_key_value<C: M, S: M>(
     ctx: &mut Context,
-    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    x_trf: &TrfTensor<f8e4m3, Chip, C, S, m![1], m![Dummy2, H]>,
     k_weight: &KvWeight,
     v_weight: &KvWeight,
 ) -> (
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
     DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
 ) {
-    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRows, m![Dummy2, H]> = unsafe { x.view().reshape() };
-    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRows, m![1], m![Dummy2, H]> = ctx
-        .sub
-        .begin(x)
-        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
-        .collect::<m![Dummy2, H / 32], m![H % 32]>()
-        .to_trf();
-
-    let k = project_one_kv_matrix(ctx, &x_trf, k_weight);
-    let v = project_one_kv_matrix(ctx, &x_trf, v_weight);
+    let k = project_one_kv_matrix(ctx, x_trf, k_weight);
+    let v = project_one_kv_matrix(ctx, x_trf, v_weight);
 
     (k, v)
 }

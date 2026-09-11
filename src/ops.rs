@@ -74,23 +74,26 @@ pub fn sliding_project_qkv(
     // broadcast fills each copy's 32 slices (V157: qkv 151k -> 108k, 3/3 PASS). The copies are
     // loaded and switched on a real cluster axis: a pass on the dummy axis BothClusters serves
     // one cluster only (V155).
+    // V276: the broadcast pass ends in the TRF instead of DM (`to_trf` is legal after `collect`), so
+    // x is never committed to 512 slices and the two Sub passes that staged it into the query and
+    // key/value layouts are gone; the projections relabel their weights to the TRF's axes. Paired
+    // Arena jobs: 16/16 faster, mean -4,258 cycles (-4.3%). (A Main vector pass that writes a VRF
+    // directly compiles too, but hangs the device: V274.)
     let x8: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, 1 # 32], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
-    let x: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, Dummy256 / 8], m![Dummy2, H]> = ctx
+    let x_trf: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Dummy8, Dummy256 / 8], m![1], m![Dummy2, H]> = ctx
         .main
         .begin(x8.view())
         .fetch::<m![Dummy2, H / 32], m![H % 32]>()
         .switch::<m![Dummy8, Dummy256 / 8], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 32 })
         .collect::<m![Dummy2, H / 32], m![H % 32]>()
-        .commit_trim::<m![H % 32]>()
-        .commit();
-    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = unsafe { x.reshape() };
+        .to_trf();
     let k_weight = sliding::projection::load_kv_weight(ctx, k_weight);
     let v_weight = sliding::projection::load_kv_weight(ctx, v_weight);
 
     // q, k and v come back one head per slice; the head-wise RMSNorms and RoPE stay in that
     // layout (no transposes in or broadcasts out) and the outputs are written from it.
-    let q = sliding::projection::project_query(ctx, &x, &q_weight);
-    let (k, v) = sliding::projection::project_key_value(ctx, &x, &k_weight, &v_weight);
+    let q = sliding::projection::project_query(ctx, &x_trf, &q_weight);
+    let (k, v) = sliding::projection::project_key_value(ctx, &x_trf, &k_weight, &v_weight);
 
     // The projections' per-channel weight scales are folded into the head RMSNorms (their
     // loads are eight descriptors in the head layout instead of 512 in the projection layout).
