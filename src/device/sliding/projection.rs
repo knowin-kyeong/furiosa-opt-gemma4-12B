@@ -295,3 +295,84 @@ fn apply_output_channel_scale(
 
     output
 }
+
+/// OC harness copy.
+pub(crate) fn project_output_oc(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> DmTensor<bf16, Chip, Cluster, crate::device::shared::rmsnorm::ReducingSlices, m![H % 480]> {
+    // OC: one cluster, so the contraction output reaches the RMSNorm's reducing layout through a same-cluster
+    // DM->DM relay instead of an HBM store + ExplicitSync + reload (the sync alone is 4-16k cycles on hardware).
+    // 256 slices = 16 row groups of 240 rows x 16 column chunks of 256; the rows come in two tiles, 192 then 48.
+    let tile0: DmTensor<f8e4m3, Chip, Cluster, OneClusterRowsByColumns, m![H % 240 = 192, Qs % 256]> = weight
+        .view()
+        .tile::<m![H % 240], 192, m![H / 240, H % 240 = 192 # 240, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let tile1: DmTensor<f8e4m3, Chip, Cluster, OneClusterRowsByColumns, m![H % 240 = 48, Qs % 256]> = weight
+        .view()
+        .tile::<m![H % 240], 48, m![H / 240, H % 240 = 48 # 240, Qs]>(192)
+        .to_dm(&mut ctx.tdma);
+
+    // V257 (STAGE 1 ONLY, RULES 10.0n): one f8 piece of x, s = 16.
+    let xs: DmTensor<bf16, Chip, Cluster, OneClusterRowsByColumns, m![Qs % 256]> = x.to_dm(&mut ctx.tdma);
+    let x: DmTensor<f8e4m3, Chip, Cluster, OneClusterRowsByColumns, m![Qs % 256]> = ctx
+        .main
+        .begin(xs.view())
+        .fetch::<m![Qs / 16 % 16], m![Qs % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Qs / 8 % 32], m![Qs % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Qs / 4 % 64], m![Qs % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 16f32)
+        .vector_widen_concat::<m![Qs / 8 % 32], m![Qs % 8]>()
+        .vector_final()
+        .cast::<f8e4m3, m![Qs % 8 # 32]>()
+        .commit_trim::<m![Qs % 8]>()
+        .commit();
+    let x_trf: TrfTensor<f8e4m3, Chip, Cluster, OneClusterRowsByColumns, m![1], m![Qs % 256]> = ctx
+        .sub
+        .begin(x.view())
+        .fetch::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .collect::<m![Qs / 32 % 8], m![Qs % 32]>()
+        .to_trf();
+
+    let mut contraction: DmTensor<bf16, Chip, Cluster, OneClusterRows, m![H % 240]> = DmTensor::new();
+    ctx.main
+        .begin(tile0.view())
+        .fetch::<m![H % 240 = 192, Qs / 64 % 4], m![Qs % 64]>()
+        .collect::<m![H % 240 = 192, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 240 = 192, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 240 = 192]>()
+        .contract_lane::<m![H % 240 = 192], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<OneClusterRows, m![H % 240 = 192]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 240 = 192 / 4], m![H % 240 = 192 % 4 # 16]>()
+        .commit_trim::<m![H % 240 = 192 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 240], 192, m![H % 240 = 192 #{!} 240]>(0));
+    ctx.main
+        .begin(tile1.view())
+        .fetch::<m![H % 240 = 48, Qs / 64 % 4], m![Qs % 64]>()
+        .collect::<m![H % 240 = 48, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 240 = 48, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![H % 240 = 48]>()
+        .contract_lane::<m![H % 240 = 48], m![1 # 8]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_inter_slice_reduce::<OneClusterRows, m![H % 240 = 48]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![H % 240 = 48 / 4], m![H % 240 = 48 % 4 # 16]>()
+        .commit_trim::<m![H % 240 = 48 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 240], 48, m![H % 240 = 48 #{!} 240]>(192));
+
+    contraction.to_dm(&mut ctx.tdma)
+}
+
+/// OC: one cluster, 16 row groups of 240 rows (x 16 column chunks for the weight) = 256 slices.
+type OneClusterRows = m![H / 240, 1 # 16];
+type OneClusterRowsByColumns = m![H / 240, Qs / 256];
