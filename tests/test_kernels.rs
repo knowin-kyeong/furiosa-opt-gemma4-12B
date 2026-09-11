@@ -392,15 +392,15 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[""; 3];
+const FFN_SWEEP: &[&str] = &["sw", "", "", "sw", "sw", "", "", "sw", "sw", "", "", "sw"];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &["sw", "", "", "sw", "sw", "", "", "sw", "sw", "", "", "sw", "sw", ""];
+const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_SWEEP },
+    Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
@@ -458,123 +458,112 @@ fn key_of(name: &str, variant: &str) -> String {
 
 async fn run_plan(ctx: &mut Context, fixture: &Fixture, bench: &Bench, plan: &Plan) -> Vec<(&'static str, Vec<f32>)> {
     match plan.name {
-        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture, bench, plan).await,
+        "decoder_feedforward" => decoder_feedforward(ctx, fixture, bench, plan).await,
         other => panic!("no shim for test `{other}` -- add one in run_plan"),
     }
 }
 
-async fn sliding_project_qkv(
+
+
+async fn decoder_feedforward(
     ctx: &mut Context,
     fixture: &Fixture,
     bench: &Bench,
     plan: &Plan,
 ) -> Vec<(&'static str, Vec<f32>)> {
-    let s = Synth::new("sliding_project_qkv", fixture);
+    let s = Synth::new("decoder_feedforward", fixture);
 
-    let input_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "input_rms_weight", RMS_WEIGHT).await;
-    let x: HbmTensor<bf16, Chip, m![H]> = exact_rmsnorm_input(ctx, &s).await;
+    let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
+    let pre_ff_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "pre_ff_rms_weight", UNIT).await;
+    let post_ff_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "post_ff_rms_weight", UNIT).await;
 
-    let q_weight: HbmTensor<f8e4m3, Chip, m![Qs, H]> = s.f8(ctx, "q_weight", WEIGHT_EXP, true).await;
-    let k_weight: HbmTensor<f8e4m3, Chip, m![Ps, H]> = s.f8(ctx, "k_weight", WEIGHT_EXP, true).await;
-    let v_weight: HbmTensor<f8e4m3, Chip, m![Ps, H]> = s.f8(ctx, "v_weight", WEIGHT_EXP, true).await;
-    let q_weight_scale: HbmTensor<bf16, Chip, m![Qs]> = s.bf16(ctx, "q_weight_scale", ROW_SCALE).await;
-    let k_weight_scale: HbmTensor<bf16, Chip, m![Ps]> = s.bf16(ctx, "k_weight_scale", ROW_SCALE).await;
-    let v_weight_scale: HbmTensor<bf16, Chip, m![Ps]> = s.bf16(ctx, "v_weight_scale", ROW_SCALE).await;
-    let q_rms_weight: HbmTensor<bf16, Chip, m![Ds]> = s.bf16(ctx, "q_rms_weight", UNIT).await;
-    let k_rms_weight: HbmTensor<bf16, Chip, m![Ds]> = s.bf16(ctx, "k_rms_weight", UNIT).await;
+    let up_weight_packed: HbmTensor<f4e2m1, Chip, m![L, H]> = s.f4(ctx, "up_weight_packed").await;
+    let gate_weight_packed: HbmTensor<f4e2m1, Chip, m![L, H]> = s.f4(ctx, "gate_weight_packed").await;
+    let down_weight_packed: HbmTensor<f4e2m1, Chip, m![H, L]> = s.f4(ctx, "down_weight_packed").await;
+    let up_weight_scale: HbmTensor<f8e4m3, Chip, m![L, H / 16]> =
+        s.f8(ctx, "up_weight_scale", LOCAL_SCALE_EXP, false).await;
+    let gate_weight_scale: HbmTensor<f8e4m3, Chip, m![L, H / 16]> =
+        s.f8(ctx, "gate_weight_scale", LOCAL_SCALE_EXP, false).await;
+    let down_weight_scale: HbmTensor<f8e4m3, Chip, m![H, L / 16]> =
+        s.f8(ctx, "down_weight_scale", LOCAL_SCALE_EXP, false).await;
 
-    let (cos_values, sin_values) = rope_tables(Ds::SIZE, 10_000.0, 1.0, POS);
-    let cos: HbmTensor<bf16, Chip, m![E, Ds]> = rope_table::<Ds>(ctx, &s, "cos", &cos_values, POS).await;
-    let sin: HbmTensor<bf16, Chip, m![E, Ds]> =
-        rope_table::<Ds>(ctx, &s, "sin", &negate_low_half(&sin_values), POS).await;
-    let rope_offset: HbmTensor<i32, Chip, m![1]> =
-        s.constant_i32(ctx, "rope_offset", (POS * Ds::SIZE * 2) as i32).await;
+    let up_global_scale: HbmTensor<f32, Chip, m![1]> = s
+        .constant_f32(ctx, "up_global_scale", &[1.0 / RAW_GLOBAL_SCALES[0]])
+        .await;
+    let gate_global_scale: HbmTensor<f32, Chip, m![1]> = s
+        .constant_f32(ctx, "gate_global_scale", &[1.0 / RAW_GLOBAL_SCALES[1]])
+        .await;
+    let down_global_scale: HbmTensor<f32, Chip, m![1]> = s
+        .constant_f32(ctx, "down_global_scale", &[1.0 / RAW_GLOBAL_SCALES[2]])
+        .await;
 
-    let slot = POS % Ts::SIZE;
-    let offset = (slot * Ns::SIZE * Ds::SIZE * 2) as i32;
-    let kv_offset: HbmTensor<i32, Chip, m![1]> = s.constant_i32(ctx, "kv_offset", offset).await;
+    let layer_scalar: HbmTensor<bf16, Chip, m![1 # 8]> = s.constant_bf16(ctx, "layer_scalar", &[LAYER_SCALAR; 8]).await;
 
-    let mut k_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
-    let mut v_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
-    let mut q_out: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = zeros(ctx).await;
-
-    // Nothing here is re-uploaded between launches: qkv is idempotent (every launch writes the
-    // same values into the same k/v-cache slot and into q_out), so the weights, tables and caches
-    // are built once and the loop is pure launch + measure. The read-back is 8.4 MB, so it runs
-    // once, after the first launch.
+    // 99.5 MB of packed weights and scales, uploaded once. Only `residual` (7.7 KB) is restored
+    // per launch -- without that the second launch compounds the first one's output and FAILs.
     let mut outputs: Vec<(&'static str, Vec<f32>)> = Vec::new();
     for (i, variant) in plan.order.iter().enumerate() {
+        if i > 0 {
+            residual = s.bf16(ctx, "residual", UNIT).await;
+        }
         bench.arm();
         match *variant {
             "" => {
                 launch(
-                    ops::sliding_project_qkv,
+                    ops::decoder_feedforward,
                     (
                         ctx,
-                        &x,
-                        &q_weight,
-                        &k_weight,
-                        &v_weight,
-                        &q_weight_scale,
-                        &k_weight_scale,
-                        &v_weight_scale,
-                        &input_rms_weight,
-                        &q_rms_weight,
-                        &k_rms_weight,
-                        &kv_offset,
-                        &rope_offset,
-                        &cos,
-                        &sin,
-                        &mut k_cache,
-                        &mut v_cache,
-                        &mut q_out,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
                     ),
                 )
                 .await;
             }
             "sw" => {
                 launch(
-                    ops::sliding_project_qkv_sw,
+                    ops::decoder_feedforward_sw,
                     (
                         ctx,
-                        &x,
-                        &q_weight,
-                        &k_weight,
-                        &v_weight,
-                        &q_weight_scale,
-                        &k_weight_scale,
-                        &v_weight_scale,
-                        &input_rms_weight,
-                        &q_rms_weight,
-                        &k_rms_weight,
-                        &kv_offset,
-                        &rope_offset,
-                        &cos,
-                        &sin,
-                        &mut k_cache,
-                        &mut v_cache,
-                        &mut q_out,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
                     ),
                 )
                 .await;
             }
-            other => panic!("no variant `{other}` for sliding_project_qkv"),
+            other => panic!("no variant `{other}` for decoder_feedforward"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
+        // Compare the first launch of each distinct variant, not just the first launch overall:
+        // a variant that is fast but wrong must not pass unnoticed.
         if plan.order[..i].iter().all(|seen| seen != variant) {
-            let width = Ns::SIZE * Ds::SIZE;
-            let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
-            let v = read_bf16(ctx, &v_cache).await[slot * width..(slot + 1) * width].to_vec();
-            outputs.push(("expected.q", read_bf16(ctx, &q_out).await));
-            outputs.push(("expected.k", k));
-            outputs.push(("expected.v", v));
+            outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
     outputs
 }
-
-
 
 fn compare(label: &str, expected: &[f32], actual: &[f32], atol: f32, rtol: f32) -> bool {
     assert_eq!(
