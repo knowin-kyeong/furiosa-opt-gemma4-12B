@@ -632,6 +632,72 @@ pub fn sliding_attention_output_one_piece(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// E5/V266: attn_out with O-weight tiles 72/48.
+#[device(chip = 1)]
+pub fn sliding_attention_output_e5_72(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_e5_72(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// E5/V266: attn_out with O-weight tiles 96/24.
+#[device(chip = 1)]
+pub fn sliding_attention_output_e5_96(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_e5_96(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// E5/V266: attn_out with O-weight tiles 104/16.
+#[device(chip = 1)]
+pub fn sliding_attention_output_e5_104(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x_hbm = sliding::projection::project_output_e5_104(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 /// V240 sweep: the attention-output contraction with sequential lanes.
 /// V240 sweep: the O-weight rows in three tiles (44/44/32) instead of two.
 /// V247: the attention-output epilogue loads hoisted ahead of the weight stream.

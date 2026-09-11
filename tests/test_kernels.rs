@@ -392,14 +392,21 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[
-    "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4", "t4", "ds", "ds", "t4",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &[""; 3];
+const ATTN_SWEEP: &[&str] = &[
+    "1p", "ta", "tb", "tc",
+    "tc", "tb", "ta", "1p",
+    "tb", "1p", "tc", "ta",
+    "ta", "tc", "1p", "tb",
+    "1p", "ta", "tb", "tc",
+    "tc", "tb", "ta", "1p",
+    "tb", "1p", "tc", "ta",
+    "ta", "tc", "1p", "tb",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -643,6 +650,48 @@ async fn sliding_attention_output(
             "as" => {
                 launch(
                     ops::sliding_attention_output_1p_split,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "ta" => {
+                launch(
+                    ops::sliding_attention_output_e5_104,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "tb" => {
+                launch(
+                    ops::sliding_attention_output_e5_96,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "tc" => {
+                launch(
+                    ops::sliding_attention_output_e5_72,
                     (
                         ctx,
                         &x,
