@@ -12,6 +12,11 @@
 | `pairjobs.sh <repo> <tag> <kernel> <base> <test> <N>` | **pod:** 짝비교 Arena 잡 N개 — 잡마다 두 변형의 median·차이·PASS/FAIL 수, 끝에 부호검정 p. **FAIL이 있는 잡의 시간은 믿지 않는다** |
 | `multijobs.sh <repo> <tag> <kernel> <base> <variant...>` | **pod:** pairjobs.sh의 다변형판 — 한 잡 안에서 여러 변형을 base와 짝비교 (N은 환경변수, 기본 16). 잡마다 변형별 차이, 끝에 변형별 부호검정 p |
 | `draw.sh <branch> <N> [srcdir]` | **pod:** 제출 전용 clone(기본 `/root/lab3`)에서 직렬 draw N회. 도는 동안 그 clone에서 checkout 금지 |
+| `arm.py <test_fn> <tag> <ops_fn>` · `arm.py --sweep <CONST> <tag...>` | 하네스 test 파일 편집: `""` arm을 복제해 변형 arm을 만들고, sweep을 설정한다 (태그 2개면 ABBA ×4, 3개 이상이면 회전; `_` = `""`). **상태를 바꾸는 변형은 `--sweep <CONST> <variant> _ _`로 변형을 첫 launch에 둔 잡을 먼저** (RULES §10.0p) |
+| `mk_base273.py <harness_tests.rs>` | submit 트리에 하네스 test 파일을 설치하고 `""` 외 arm을 전부 지운다 — 기준 arm이 곧 제출 코드가 된다 (`V277`의 첫 커밋) |
+| `tl.py <schedule.json> [min_dur]` | 정적 스케줄 타임라인 (시작 순, 컨텍스트, 소스 줄) |
+| `schedcmp.py <base.json> <variant.json> [tail_n]` | 두 정적 스케줄 비교: makespan · DMA busy · 명령 수, 변형의 꼬리 |
+| `addr.py <schedule.json>` | DM(Sram) 텐서 주소 지도: 슬라이스당 오프셋·크기·수명과 읽고 쓰는 명령 (`DramReuse` 조사용) |
 
 원격 pod에서는 `/root/env.sh`를 source한 뒤 저장소 루트에서 실행한다:
 

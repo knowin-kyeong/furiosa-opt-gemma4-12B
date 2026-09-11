@@ -450,7 +450,41 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0o 2026-09-11 — furiosa-opt book 라운드: 규칙을 읽고, 전부 쟀다 (가장 최신, 여기서 시작할 것)
+### 10.0p 2026-09-11 — 레지스터 직접 쓰기 라운드: 가짜 −4.3%를 잡았다 (가장 최신, 여기서 시작할 것)
+
+**상태 한 줄.** 공식 최고 **7.0314** 그대로 (2위, 1위 #663 **7.2164**). 코드 SOTA **`V273_submit` `331104b`** 그대로.
+V273 draw 누적 7회, 최고 6.7103 — 기록을 못 넘었다. 이번 라운드에 채택된 변경은 없다.
+
+#### ① 한 일과 결과
+| 실험 | 가설 | 결과 |
+|---|---|---|
+| Z1 정적 탐침 → `V274` | 꼬리 pass가 `.vector_final().to_vrf()`로 VRF를 직접 쓴다 (`CanApplyToVrf for PositionVectorFinal`) | 정적 attn −285 · ffn −491 · qkv RoPE +2,584. **실물: `PXI-601` 커널 멈춤** (2/2 잡) → 모든 사이트 닫힘 |
+| Q2b 정적 탐침 → `V276` → `V278` | qkv ring-32 broadcast pass가 `collect().to_trf()`로 TRF를 직접 쓴다 (`CanApplyToTrf for PositionCollect`) | 정적 −1,085. 짝비교 **16/16, −4.3%, p < 1e-4 — 가짜**: 제출 검증 FAIL, 변형 먼저 잡 FAIL |
+| `V277` (F2b) | 같은 쓰기를 ffn up/gate에 | 9/9 느림 (평균 +6,211) |
+| `V279` (Q2a) | Sub staging 하나를 Q·K·V가 공유 (정확) | **11/11 느림 (+7.5%)** — 정적 +1.3%의 5배 |
+| load order s1–s6 | V weight를 마지막으로 보내기 | 정적 동일 또는 +566 — 닫힘 |
+| D1 | attn `DramReuse` 회피 (reload 버퍼 선할당) | 정적 동일 — 닫힘 |
+
+#### ② 새 규칙
+1. **TRF/VRF는 Sub staging으로만 채운다.** Main pass의 레지스터 직접 쓰기는 DSL·lowering·정적 스케줄을 모두 통과하지만,
+   실물에서 VRF 쓰기는 커널을 멈추고(PXI-601) TRF 쓰기는 contraction에 x를 전달하지 못한다.
+2. **짝비교 하네스는 기준 arm이 남긴 상태를 변형에게 넘겨준다.** 정확도는 variant별 첫 launch에서만 보고, 기준 arm이 먼저 돌면
+   TRF·VRF·DM scratch가 올바른 값으로 채워져 있다. 상태를 쓰는 방식(레지스터 쓰기, staging 제거, 버퍼 공유)을 바꾸는 변형은
+   **`arm.py --sweep <CONST> <variant> _ _`로 변형을 첫 launch에 둔 잡 하나를 먼저** 돌리고, 채택 전 **제출 브랜치의 단독 검증을 생략하지 않는다.**
+   p < 1e-4의 16/16도 이 함정 앞에서는 증거가 아니다.
+3. **새 형태는 16잡 배치 전에 잡 하나로 멈춤부터 본다** — 멈추면 그 잡의 나머지 launch가 사라져 `pairjobs.sh`의 중앙값이 빈칸(`tn= tz=`)이 된다.
+4. 정적 모델은 여전히 부호까지 틀린다: Q2a 정적 +1.3% / 실물 +7.5%, F2b 정적 −0.4% / 실물 +2.1%.
+
+#### ③ 도구와 다음 할 일
+- **하네스 base:** `V277_ffn_switch_to_trf`의 첫 커밋 **`1d38e0e` = V273_submit + 하네스 (variant arm 제거, sweep ×3)**. 새 실험은 여기서 가지를 쳐
+  커널 복사본만 추가한다 (V274처럼 옛 하네스 브랜치에 헬퍼를 복사하지 않는다).
+- 새 도구 (`scripts/dev/`): `arm.py` (arm 추가 · sweep 설정), `mk_base273.py` (submit 트리에 하네스 설치), `tl.py` (정적 타임라인),
+  `schedcmp.py` (정적 스케줄 비교), `addr.py` (DM 텐서 주소 지도 · 물리 페이지).
+- **다음 후보: 실물 타임라인.** `furiosa_profiled_run`은 디코드한 span마다 `name` + `begin_cycle` + `end_cycle`을 `span::npu`로 넘기는데
+  (0.6.0 `backend/npu/ffi.rs`) 하네스는 begin/end로 커널 창만 계산한다. 이름까지 덤프하면 정적 모델이 아니라 **하드웨어의 임계 경로**를 볼 수 있다
+  (브랜치 `V280_hw_span_dump`, 진행 중).
+
+### 10.0o 2026-09-11 — furiosa-opt book 라운드: 규칙을 읽고, 전부 쟀다
 
 **상태 한 줄.** 공식 최고 **7.0314** (`V267_submit` `c6f4a80` (= V258 + V260 + V263), `e1fd59ad`) — 리더보드 **2위**. 1위 #663 **7.2164**
 (92,586 / 39,406 / 273,805)이 qkv·ffn에서 앞서고, **attn_out은 우리 38,623이 리더보드 전체 최고**다(꼬리 draw).

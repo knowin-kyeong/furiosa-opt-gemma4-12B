@@ -59,6 +59,10 @@
 | `V268_submit` | attn_out: O-weight 타일 88/32 → 96/24 (V266) | −723 (−1.5%), 19/24 |
 | **`V273_submit`** | attn_out: contraction 출력을 256 B 정렬 오프셋에 store (V271) | −831 (−1.7%), 13/16 |
 
+> **2026-09-11 04시 라운드 — 채택 없음.** qkv에서 16/16 · −4.3%로 보였던 Q2b(broadcast pass가 TRF를 직접 쓴다)는
+> **하네스 착시**였다: 기준 arm이 먼저 채워 둔 TRF를 읽어 PASS했고, 제출 검증(차가운 단독 실행)에서 FAIL했다
+> (RESULTS `V276`/`V278`, RULES §10.0p). V273 draw는 누적 7회, 최고 6.7103.
+
 ## 1.1 공식 리더보드 (moa-submitter)
 
 | 날짜 | submission | 코드 | qkv | attn_out | ffn | score | 순위 |
