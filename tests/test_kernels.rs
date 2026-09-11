@@ -392,19 +392,12 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[""; 3];
+const FFN_SWEEP: &[&str] = &[
+    "dn", "g6", "g6", "dn", "dn", "g6", "g6", "dn", "dn", "g6", "g6", "dn", "dn", "g6", "g6", "dn",
+];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &[
-    "", "r16", "r8",
-    "r8", "r16", "",
-    "r16", "", "r8",
-    "r8", "", "r16",
-    "", "r16", "r8",
-    "r8", "r16", "",
-    "r16", "", "r8",
-    "r8", "", "r16",
-];
+const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
 
@@ -878,6 +871,28 @@ async fn decoder_feedforward(
             "dn" => {
                 launch(
                     ops::decoder_feedforward_v260_nf,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "g6" => {
+                launch(
+                    ops::decoder_feedforward_x6,
                     (
                         ctx,
                         &mut residual,
