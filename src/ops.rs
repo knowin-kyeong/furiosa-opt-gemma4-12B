@@ -233,6 +233,7 @@ pub fn full_attention_output(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+
 #[device(chip = 1)]
 pub fn decoder_feedforward(
     ctx: &mut Context,
@@ -252,21 +253,26 @@ pub fn decoder_feedforward(
 ) {
     // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
     // the pre-FF normalization and the final residual add.
-    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    let x = shared::rmsnorm::normalize_reduced_f32_fused::<Cluster>(ctx, &residual, pre_ff_rms_weight);
+    // V293: the pre-FF norm, the hi/lo split and the geglu scalars run on both clusters (8 copies x 8 chunks in
+    // every 32-slice sub-ring) and x is replicated on chip: no x2 HBM hop, so no ExplicitSync idles the DMA queue
+    // (13/16 Arena jobs, -1.8k). The post-FF tail keeps cluster 0's block 0, which is exactly ReducingSlices.
+    let residual_b = shared::xsw::load_blocks(ctx, residual_hbm);
+    let x = shared::xsw::normalize_blocks_f32_fused(ctx, &residual_b, pre_ff_rms_weight);
 
     // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
     // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
     // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
-    let (x2_hbm, erf_scale, out_scale) =
-        shared::mlp::stage_x_hi_lo_hbm_full(ctx, &x, up_global_scale, gate_global_scale);
+    let (x2, erf_b, out_b) = shared::xsw::stage_x_hi_lo_full_blocks(ctx, &x, up_global_scale, gate_global_scale);
+    let x_rep = shared::xsw::replicate_blocks(ctx, &x2);
+    let erf_all = shared::xsw::broadcast_scalar_blocks(ctx, erf_b);
+    let out_all = shared::xsw::broadcast_scalar_blocks(ctx, out_b);
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
-    let x = shared::mlp::feedforward_v181(
+    let x = shared::mlp::feedforward_v181_sw(
         ctx,
-        &x2_hbm,
-        &erf_scale,
-        &out_scale,
+        x_rep,
+        erf_all,
+        out_all,
         up_weight_packed,
         gate_weight_packed,
         down_weight_packed,
@@ -277,6 +283,7 @@ pub fn decoder_feedforward(
     );
 
     // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual: DmTensor<bf16, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![H % 480]> = unsafe { residual_b.reshape() };
     let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
