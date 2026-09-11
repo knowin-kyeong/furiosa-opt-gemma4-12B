@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-12 (5):** 코드 SOTA → **`V313_submit`** (V306_submit + ffn down 출력 단일 store, 짝비교 12/12 −1.04%; Arena 25/25 PASS ×2, 8a38b1b). V306_submit draw 최고 7.2047 — 공식 최고 7.2264 그대로 (2위).
+
 > **2026-09-12 (4):** 코드 SOTA → **`V306_submit`** (V301_submit + ffn out_scale을 꼬리 곱으로, 짝비교 12/12 −1.76%; Arena 25/25 PASS ×2, a589eed). V301_submit draw 6.82 / 6.34 / 7.03 / 6.69 / 6.90 / 6.45 — 공식 최고 7.2264 그대로 (2위).
 
 > **2026-09-12 (3):** 코드 SOTA → **`V301_submit`** (V299_submit + ffn pass A x 조각 Lane, 짝비교 8/8 −2.3%). V299_submit draw 6.7338 외 진행 중. 공식 최고 7.2264 (2위).
