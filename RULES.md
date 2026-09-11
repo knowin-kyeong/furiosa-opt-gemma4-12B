@@ -472,7 +472,7 @@ draw는 pod `/root/drawchain_follow.sh <branch> <first_batch> <n>`이 12회 배�
 3. **`commit_cast`/`commit_cast_relu`는 0.6.0에 있다**(`engine/commit_adapter.rs:174`): f32→bf16 cast를 commit 경로로 접어 Cast Engine을 sub Vector Engine 작업에 비워 준다.
 4. 0.6.0에는 `#[unroll]`이 없고 채점기가 받는 스케줄러 env 노브도 없다. 공식 transformer 예제는 weight를 `to_dm` 한 번 → sub staging으로 TRF(Lane)에, 활성값은 main 스트림으로 — qkv·attn의 Lane 8 사용과 같다.
 
-**이번 캠페인 슬롯:** `V326`(qkv 큐 전체 몫 균형 탐침) → 조건부 `V327`(qkv 비대칭 head 커널) · `V328`(ffn CustomBroadcast 정리) · `V329`(ffn h 재로드 사본 탐침) · V323 패키지 16잡 재측정(job 20380 `rngd rerun`, attn a53 vs sym).
+**이번 캠페인 슬롯:** `V326`(qkv 큐 전체 몫 균형 탐침) → 조건부 `V327`(qkv 비대칭 head 커널) · `V328`(ffn CustomBroadcast 정리) · `V329`(ffn h 재로드 사본 탐침) · V323 패키지 16잡 재측정(job 20380 `rngd rerun`) — **결과: a53 +2.0%(11/16 느림) · a67 +7.4%(16/16) → attn 클러스터 몫 계열 닫힘.** 6잡 −461(4/6)은 노이즈였다 — 클러스터 지연 계열 판정은 16잡으로.
 
 ### 10.0s 2026-09-12 — 동기화는 클러스터 1의 지연이다, 칩 안 복제로 HBM 왕복 둘을 없앴다
 
