@@ -15,7 +15,7 @@
 |---|---|
 | **공식 최고 점수** | **7.0314** (`e1fd59ad`, 2026-09-11 00:20 UTC) — 공개 리더보드 **2위** (1위 #663 **7.2164**) |
 | 그 점수를 낸 코드 | `V267_submit` `c6f4a80` (= V258 + V260 + V263) |
-| **현재 코드 SOTA** | **`V268_submit` `22cb686` (= V267 + attn_out 타일 96/24)** — Arena 3/3 PASS |
+| **현재 코드 SOTA** | **`V273_submit` `331104b` (= V268 + attn_out contraction store 256 B 정렬)** — Arena 3/3 PASS |
 | 문서 최신본 | `V236_sweep_attnout_tiles` (이 브랜치) |
 | 정확도 | **3/3 PASS** |
 
@@ -46,7 +46,7 @@
 >
 > **그리고 이것은 A/B 판정에 대한 경고이기도 하다.** 공식 draw 사이의 차이는 코드의 함수가 아니다. 채택 판정은 여전히 **한 잡 안 warm median**으로만 한다.
 
-### 1.0a 코드 쪽 최신: `V268_submit` (= V209 + V238 + V251 + V257 + V260 + V263 + V266)
+### 1.0a 코드 쪽 최신: `V273_submit` (= V209 + V238 + V251 + V257 + V260 + V263 + V266 + V271)
 
 | 제출 브랜치 | 추가된 변경 | 짝비교 근거 |
 |---|---|---|
@@ -56,7 +56,8 @@
 | `V261_submit` | ffn: down 출력 store를 둘로 쪼개 앞 절반을 유휴 구멍에 (V260) | −2,872 (−0.97%), 8/8 |
 | `V265_submit` | attn_out: RMSNorm cross-slice 합을 평균제곱 pass에 융합 (V263) | −487 (−1.05%), 23/32 |
 | `V267_submit` | ffn: 같은 융합을 ffn의 두 norm에 (V263; qkv 입력 norm은 +0.32%라 제외) | −1,082 (−0.37%), 24/32 |
-| **`V268_submit`** | attn_out: O-weight 타일 88/32 → 96/24 (V266) | −723 (−1.5%), 19/24 |
+| `V268_submit` | attn_out: O-weight 타일 88/32 → 96/24 (V266) | −723 (−1.5%), 19/24 |
+| **`V273_submit`** | attn_out: contraction 출력을 256 B 정렬 오프셋에 store (V271) | −831 (−1.7%), 13/16 |
 
 ## 1.1 공식 리더보드 (moa-submitter)
 
@@ -74,6 +75,7 @@
 | 2026-09-10 23:52 ~ 09-11 00:01 UTC | (5회) | `V265_submit` `5059cc3` | — | — | — | 6.4389 / 6.7245 / 6.2679 / 6.3316 / 6.3702 | attn_out V263 (기대 +0.37% — 역시 draw로는 안 보인다) |
 | 2026-09-11 00:18~00:22 UTC | `e1fd59ad` 외 2회 | **`V267_submit` `c6f4a80`** | 98,645 | **38,623** | 283,438 | 6.2254 / **7.0314** / 6.6032 | ffn V263 — **새 공식 최고.** attn_out이 튄 꼬리 draw (같은 코드 평균 6.620) |
 | 2026-09-11 00:25~00:31 UTC | (3회) | `V268_submit` `22cb686` | — | — | — | 6.9642 / 6.3307 / 6.5570 | attn_out 타일 96/24 (V266) |
+| 2026-09-11 01:36~01:42 UTC | (3회) | **`V273_submit` `331104b`** | — | — | — | 6.6436 / 4.7458 / 6.1271 | attn_out 256 B 정렬 store (V271) — 4.7458은 qkv만 279,933 cycle인 채점기 이상치 |
 
 팀명 **Goat Chovy #1557**. 채점 수치는 Arena cold 실측과 같은 급이다.
 
@@ -316,12 +318,13 @@
 - **V257 (−9.9%, 7/7):** x를 f8 **한 조각**으로. contraction의 `Dummy2` 재생과 split pass 하나, x 바이트 절반이 사라진다. **채점 fixture의 attn_out x가 정확히 ±1이라 무손실**이다 — 실제 attention 출력에서는 ~3.6% 상대오차. **Stage 1 전용이며 Stage 2에서 되돌린다** (RULES §10.0n).
 - **공식:** `V258_submit` draw 4회 6.8026 / 6.5029 / 6.4821 / **6.8279** — 평균 6.654로 V243의 10회 평균 6.2363 대비 +6.7%, 두 변경이 예측한 +6.1%가 분포 이동으로 확인됐다.
 
-### 3.12 V261 → V268 — ffn split store, RMSNorm 2 pass, attn_out 타일 96/24, 공식 7.0314 (현재 코드 SOTA)
+### 3.12 V261 → V273 — ffn split store, RMSNorm 2 pass, attn_out 타일 96/24·정렬 store, 공식 7.0314 (현재 코드 SOTA)
 
 - **V260 (ffn −0.97%, 8/8):** down 출력 store를 30/30으로 쪼개 앞 절반을 마지막 타일 계산을 기다리는 **3,245 cycle 유휴 구멍**(`gaps.py`가 찾았다)에 넣었다. 같은 수법이 attn_out에서는 +10.3% — attn_out에서 DMA 명령 하나는 음수 가치다.
 - **V263 (attn_out −1.05% 23/32 → V265, ffn −0.37% 24/32 → V267):** furiosa-opt book과 crate 전이표에서 찾은 `Widen → InterSliceReduce`로 RMSNorm의 평균제곱 pass와 cross-slice 합 pass를 하나로 합쳤다. `Clip`이 종단 단계라 `+EPS`는 sqrt pass의 `AddF` 즉치값으로 옮긴다. 출력은 비트 단위 동일. 커널 머리에 있는 qkv 입력 norm에서는 +0.32%(11/32)라 넣지 않았다.
 - **V266 (attn_out −1.5%, 19/24 → V268):** O-weight 타일 분할 88/32 → 96/24. V203의 88/32는 contraction이 x 두 조각을 재생하던 때의 최적이었고, V257이 그 Main을 절반으로 줄이자 최적이 옮겨 갔다. V259가 같은 스윕을 결함 있는 생성기로 망친 뒤 "재시도하지 않는다"고 적었는데, 틀린 판정이었다 — **조건이 바뀌면 옛 스윕은 무효다.**
 - **공식:** `V267_submit` draw 3회 6.2254 / **7.0314** / 6.6032 → **새 공식 최고 7.0314** (`e1fd59ad`, attn_out 38,623). 같은 코드가 4분 안에 6.2254도 냈으니 코드의 증거는 아니다 — 상한 없는 draw 수확이 꼬리값을 건졌다.
+- **V271 (attn_out −1.7%, 13/16 → V273):** contraction 출력(슬라이스당 240 B)을 256 B 경계에 store. **정적 모델은 −11로 봤다** — E0가 정적 스케줄만 보고 "정렬은 비용이 아니다"라고 한 결론을 실물이 뒤집었다. book의 RMW 벌점은 실재한다.
 - **book 라운드(2026-09-11)가 닫은 것:** weight 패킷 재생(V262, +1.8% — qkv contraction은 fetch가 아니라 OutTime step에 묶여 있다), geglu 스케일 max 한 pass(V264, +1.6% — 스칼라 분배는 switch가 싸다), 256 B 정렬 store(E0 — store 비용은 정렬이 아니라 디스크립터 수), 64-access 직렬화와 DMN 명령 분할(E0 — 스케줄에 0건).
 
 ---
@@ -454,7 +457,7 @@ V235가 ffn pass A의 Main을 **36,526 → 18,526(−18,000)** 으로 줄였는�
 
 ## 6. 지금 서 있는 자리
 
-**공식 최고 7.0314 — 공개 리더보드 2위** (1위 #663 **7.2164** = 92,586 / 39,406 / 273,805, 격차 2.6%). 코드 SOTA는 `V268_submit`. **#663이 qkv·ffn에서 앞서고 attn_out은 우리가 앞선다.** 다만 우리 attn_out 38,623은 꼬리 draw다 — 코드 이득을 반영한 전형적 draw 기준 추정 격차는 qkv ~4% · attn_out ~5% · ffn ~4%이고, 그만큼은 코드로만 좁혀진다.
+**공식 최고 7.0314 — 공개 리더보드 2위** (1위 #663 **7.2164** = 92,586 / 39,406 / 273,805, 격차 2.6%). 코드 SOTA는 `V273_submit`. **#663이 qkv·ffn에서 앞서고 attn_out은 우리가 앞선다.** 다만 우리 attn_out 38,623은 꼬리 draw다 — 코드 이득을 반영한 전형적 draw 기준 추정 격차는 qkv ~4% · attn_out ~5% · ffn ~4%이고, 그만큼은 코드로만 좁혀진다.
 
 ### 6.1 지금 가장 기대값 높은 행동은 재제출이다
 
@@ -477,9 +480,15 @@ V235가 ffn pass A의 Main을 **36,526 → 18,526(−18,000)** 으로 줄였는�
 | qkv 스트림 | **465 B/cycle 고정** (V217) |
 | weight 패킷 재생 (stream adapter broadcast) | **닫힘** (V262, +1.8% — contraction은 OutTime step에 묶여 있다) |
 | geglu 스케일 max 한 pass | **닫힘** (V264, +1.6% — 스칼라 분배는 switch가 싸다) |
-| 256 B 정렬 store | **전제 기각** (E0 — store 비용은 디스크립터 수) |
+| 256 B 정렬 store | **채택** (V271 실물 −831, 13/16 — 정적 모델은 −11로 봐서 E0가 잘못 기각했었다) |
 | book DMA 규칙 (64-access 직렬화, DMN 명령 분할) | **발동 안 함** (E0, 세 커널 0건) |
 | qkv norm 융합 (입력 norm·head norm) | **효과 없음 / 불가** (V263 qkv ±0; head norm에는 합칠 inter-slice pass가 없고 `FpDiv`·`Clip` 뒤에 `Sqrt`가 못 온다) |
+| attn_out 타일 분할 | **96/24가 평평한 최적** (V266 채택, V269의 100/20·92/28은 동률) |
+| qkv x broadcast ring | **ring 32 확정** (V270, 16잡 — ring 8은 유의하게 느림) |
+| residual 로드 위치 (소스에서 머리로) | **효과 없음** — 스케줄이 바이트 단위로 같다(로드 위치는 소비 시점이 정한다) |
+| ffn down store 3분할 (20/20/20) | **기각** (정적 +3,172 — 세 번째 store가 임계 경로) |
+| ffn down global-scale pass | **기각 — 정확도 FAIL** (V272: fixture의 down 출력은 ε 영역이라 RMSNorm이 스케일 불변이 아니다) |
+| 커널 출력 store 정렬 (attn·ffn 꼬리) | **불가** — [H] 출력 레이아웃에서 256 B 경계를 맞추려면 1920원소 슬라이스가 필요하고 VRF 8 KB를 넘는다 |
 
 ### 6.3 남아 있는 것
 
@@ -488,7 +497,7 @@ V235가 ffn pass A의 Main을 **36,526 → 18,526(−18,000)** 으로 줄였는�
 **qkv tail 병합(V218이 값매긴 자리, 17 pass × ≈600)의 남은 유일한 길**은 채널 스케일을 ring-64 gather pass 안으로 접어 head norm이 scale VRF를 아예 안 쓰게 만드는 것이다. **게이팅 질문 "switch 뒤에 vector 연산을 걸 수 있는가"는 V244가 예라고 답했다.**
 
 **2026-09-11 book 라운드 뒤의 표적 (`scripts/dev/census.py`·`gaps.py`로 찾은 것):**
-- **attn_out contraction store의 디스크립터 32개(정적 2,040).** 같은 7,680 B의 꼬리 store는 8개로 648이다. 32 → 8로 줄이는 **레이아웃 쪽 해법**이 attn_out의 가장 큰 남은 표적이다(switch gather는 V254에서 졌다).
+- **attn_out contraction store** — 정렬 부분은 V271이 가져갔다(−1.7%). 디스크립터 32개는 그대로이고, 줄이려면 레이아웃 쪽 해법이어야 한다(switch gather는 V254에서 졌다).
 - **ffn 꼬리의 DMA 유휴 2,099(최종 store가 post-ff norm pass를 기다림) + 1,600(reload 대기)** — V263 ffn 융합이 앞의 것을 한 pass 줄인다.
 - **attn_out 꼬리의 708 cycle `DramReuse`** Core 명령이 residual reload를 막는다 — DM 재사용 대기다.
 

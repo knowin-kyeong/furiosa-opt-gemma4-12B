@@ -454,7 +454,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 **상태 한 줄.** 공식 최고 **7.0314** (`V267_submit` `c6f4a80` (= V258 + V260 + V263), `e1fd59ad`) — 리더보드 **2위**. 1위 #663 **7.2164**
 (92,586 / 39,406 / 273,805)이 qkv·ffn에서 앞서고, **attn_out은 우리 38,623이 리더보드 전체 최고**다(꼬리 draw).
-코드 SOTA는 **`V268_submit` `22cb686` (= V267 + attn_out 타일 96/24)**. 제출 상한은 없다(§5.4).
+코드 SOTA는 **`V273_submit` `331104b` (= V268 + attn_out contraction store 256 B 정렬)**. 제출 상한은 없다(§5.4).
 
 #### ① 이번 라운드가 한 일
 사용자 지시: book의 Mapping / Moving / Computing 장을 읽고 축마다 최적화를 찾아 실험·스윕·제출까지. 세 갈래로 읽은 뒤
@@ -463,7 +463,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 | 실험 | 가설 (근거) | 결과 |
 |---|---|---|
-| E0 census | 64-access 직렬화 · DMN 경계 명령 분할이 발동하는가 (`scripts/dev/census.py`) | **둘 다 0건.** store 비용은 정렬이 아니라 **디스크립터 수** → 정렬 store(E4)는 실행하지 않았다 |
+| E0 census | 64-access 직렬화 · DMN 경계 명령 분할이 발동하는가 (`scripts/dev/census.py`) | **둘 다 0건.** (**정정:** "store 비용은 정렬이 아니라 디스크립터 수"라는 여기의 결론은 정적 모델만 본 것이었다 — 실물은 정렬을 청구한다, ⑤의 V271) |
 | `V262` (E1) | qkv weight 패킷을 stream adapter로 재생 (`stream_adapter.rs`: `OutTime = [Time, broadcast]`) | 합법·정확, **+1.8% 기각** (6/7) — contraction은 OutTime step에 묶여 있다 |
 | `V263` (E2) | RMSNorm 3 pass → 2 (`Widen → InterSliceReduce`; `Clip`이 종단이라 `+EPS`는 `AddF` 즉치값) | **attn_out −1.05% 채택** (23/32) → `V265_submit` · **ffn −0.37% 채택** (24/32) → `V267_submit` · qkv +0.32% 미채택 (11/32) |
 | `V264` (E3) | geglu 스케일 max 한 pass (ring-256 switch 제거) | gathered 레이아웃은 lowering 거부, full 레이아웃은 **+1.6% 기각** (8/8) — 스칼라는 switch가 싸다 |
@@ -478,7 +478,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
    `Clip`은 종단, `FpDiv`와 `IntraSliceReduce` 뒤에 `Sqrt`는 못 온다 (`furiosa-opt-std-0.6.0/src/engine/vector/stage/markers.rs`).
 2. **inter-slice reduce 축은 슬라이스 분할의 최내측이어야 한다** — 패딩이 최내측인 `m![L / 480 % 16, 1 # 16]`에서는 불가.
 3. **stream adapter broadcast는 합법이지만, fetch를 줄여도 contraction은 빨라지지 않는다** (V262).
-4. **HBM store 비용 ∝ 디스크립터 수** — attn contraction store 32개 = 정적 2,040, 같은 바이트의 꼬리 store 8개 = 648.
+4. **정적 모델은 HBM 쓰기의 256 B 정렬을 값매기지 않지만 실물은 청구한다** — attn contraction 출력을 256 B 경계에 쓰자 정적 −11, 실물 **−831 (13/16, V271)**. 정렬과 디스크립터에 관한 판단은 짝비교로만 한다(E0가 정적 스케줄만 보고 틀렸다).
 5. **스칼라 분배는 switch, 벌크 재분배는 HBM** (V264 + V250).
 6. **효과가 2% 미만이면 변형당 8회 × 16잡 이상으로 판정한다** — V263 attn_out이 첫 8잡 8/8 뒤 다음 8잡 4/8이었다.
 7. **꼬리의 pass는 청구되고 머리의 pass는 숨는다** — 같은 norm 융합이 attn_out·ffn 꼬리에서 이기고 qkv 머리에서는 0 또는 손해였다.
@@ -495,12 +495,30 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - 로컬 Bash 도구가 긴 heredoc을 가끔 통째로 파싱 실패한다 → 긴 편집은 Write 도구로 파일에 쓰고 `python3 파일`로 실행.
 
 #### ④ 남은 표적 (census와 gaps가 가리킨 곳)
-- **attn_out contraction store의 디스크립터 32개** — 같은 바이트를 8개로 쓰는 레이아웃이면 정적 ~1.4k. switch gather는 V254에서 졌으니 레이아웃 쪽 해법이어야 한다.
+- **attn_out contraction store의 디스크립터 32개** — 정렬 부분은 V271이 가져갔다(−1.7%). 개수를 줄이는 것은 레이아웃 쪽 해법이어야 한다 (switch gather는 V254에서 졌다).
 - **ffn 꼬리 DMA 유휴 2,099 + 1,600** (post-ff norm pass 대기 · reload 대기), **attn_out 꼬리의 `DramReuse` 708.**
 - **다른 상수 스윕도 옛 조건에서 고른 것이 있다** — 규칙 8에 따라 V257·V260·V263 이후 조건에서 ffn down 타일(16/16/16/12)과 split store 비율을 다시 볼 가치가 있다.
 - #663(7.2164)과의 공식 격차는 2.6%다. 꼬리 draw 하나가 격차의 절반을 메웠으니 **최고 코드의 draw 수확은 계속하되**,
   전형적 draw 기준 격차(추정 qkv ~4% · attn_out ~5% · ffn ~4%)는 코드로만 줄어든다.
 - **Stage 2 착수 시 V257을 되돌린다** (§10.0n).
+
+#### ⑤ 추가 라운드 (2026-09-11 오전): 옛 조건의 상수를 다시 재고, 정적 탐침으로 후보를 골랐다
+| 실험 | 결과 |
+|---|---|
+| `V269` attn 타일 100/20 · 92/28 vs 96/24 | 둘 다 8/16, p = 1.0 → **96/24가 평평한 최적** |
+| `V270` qkv ring 16 · 8 vs 32 (16잡) | ring 16 +698 (7/16), ring 8 **+1,308 (3/16, p = 0.021)** → **ring 32 확정** |
+| 정적 탐침 X5: residual 로드를 머리로 | 스케줄이 바이트 단위로 같다 — 로드 위치는 소비 시점이 정한다(소스 순서 무시) |
+| 정적 탐침 X3: ffn down store 20/20/20 | +3,172 — 세 번째 store가 임계 경로에 남는다 |
+| **`V271` attn contraction store를 256 B 정렬 오프셋에 (X1)** | 정적 −11, **실물 −831 (13/16, p = 0.021) → `V273_submit`**. E0의 결론(정렬 무관)을 뒤집었다 |
+| `V272` ffn down global-scale pass 제거 (X6, RMSNorm 스케일 불변성) | 정적 −480, **정확도 FAIL (16/16 잡)** — fixture의 down 출력이 ε 영역이라 스케일 불변이 아니다 |
+
+제출: `V273_submit` Arena 3/3 PASS, draw 6.6436 / 4.7458 / 6.1271 — 4.7458은 qkv 하나만 279,933 cycle이다(V265 이래 바뀌지 않은 qkv 코드의 채점기 이상치; attn 43,485 · ffn 288,516은 정상이고 전부 PASS).
+**교훈 셋.** ① 정적 탐침은 기각 필터가 아니라 **후보를 고르는 데만** 쓴다 — X1은 정적 −11이었지만 실물에서 이겼다.
+② **norm의 스케일 불변성을 쓰기 전에 ε 영역인지 확인한다** — 채점 fixture는 weight 행 스케일이 ≤1e-3이라 활성값의 평균제곱이 ε(1e-6) 근처다.
+③ 쓰기 정렬은 실물 비용이지만 **커널 출력 store([H] 고정 레이아웃)는 정렬할 수 없다** — 1920원소 슬라이스가 필요하고 VRF 8 KB를 넘는다.
+**다음 세션의 열린 항목:** qkv 채널 스케일을 ring-64 head gather 안으로 접기(V244가 컴파일을 열었고 미측정, 회계상 순 −3 pass — §10.0k ⑨).
+256 B 경계에서 시작하지 않는 중간 store(ffn down split store의 슬라이스당 60 B, geglu·x 스테이징 store)는 정렬 후보지만, 패딩이 reload 디스크립터를 늘리지 않는 형상을 먼저 찾아야 한다.
+**시도하지 말 것:** 4×960 norm 레이아웃 — 슬라이스당 VRF 세 개(scale · weight · residual)가 11.5 KB라 8 KB 한도를 넘는다.
 
 ### 10.0n 2026-09-11 — Stage 2로 가져가면 안 되는 변경이 하나 생겼다 (반드시 읽을 것)
 
