@@ -395,7 +395,7 @@ const BASE: &[&str] = &[""; REPS];
 const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &["", "qs1", "qa5", "qa9", "qa5", "qs1", "qa9", "qs1", "qa5", "qa9", "qs1", "qa9", "qa5", ""];
+const QKV_SWEEP: &[&str] = &["", "b", "q5", "kv5", "q9", "q9", "kv5", "q5", "b", "q5", "q9", "b", "kv5", ""];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
 
@@ -564,6 +564,18 @@ async fn sliding_project_qkv(
             }
             "qa9" => {
                 launch(ops::probe_load_qa9, (ctx, &q_weight)).await;
+            }
+            "b" => {
+                launch(ops::probe_bal_b, (ctx, &q_weight, &k_weight, &v_weight)).await;
+            }
+            "q5" => {
+                launch(ops::probe_bal_q5, (ctx, &q_weight, &k_weight, &v_weight)).await;
+            }
+            "kv5" => {
+                launch(ops::probe_bal_kv5, (ctx, &q_weight, &k_weight, &v_weight)).await;
+            }
+            "q9" => {
+                launch(ops::probe_bal_q9, (ctx, &q_weight, &k_weight, &v_weight)).await;
             }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }

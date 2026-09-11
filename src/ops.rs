@@ -504,3 +504,127 @@ pub fn probe_load_qa9(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs # 4608 % 2304 / 256], m![H = 32]>()
         .to_trf();
 }
+
+/// V326 probe: Q, K and V all split 50/50 (overall 50%). One row per HBM read, H-32-column TRF keep-alive per tensor.
+#[device(chip = 1)]
+pub fn probe_bal_b(
+    ctx: &mut Context,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) {
+    let q: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![Qs / 256 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _q_keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![1], m![Qs / 256 % 8, H = 32]> = ctx
+        .sub
+        .begin(q.view().tile::<m![H], 32, m![Qs / 256 % 8, H = 32 # 3840]>(0))
+        .fetch::<m![Qs / 256 % 8], m![H = 32]>()
+        .collect::<m![Qs / 256 % 8], m![H = 32]>()
+        .to_trf();
+    let k: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _k_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(k.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+    let v: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = v_weight.to_dm(&mut ctx.tdma);
+    let _v_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(v.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+}
+
+/// V326 probe: Q 62.5% on cluster 0, K/V 50% (overall 56.25%). One row per HBM read, H-32-column TRF keep-alive per tensor.
+#[device(chip = 1)]
+pub fn probe_bal_q5(
+    ctx: &mut Context,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) {
+    let q: DmTensor<f8e4m3, Chip, m![Qs # 5120 / 2560], m![Qs # 5120 % 2560 % 256], m![Qs # 5120 % 2560 / 256, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _q_keep: TrfTensor<f8e4m3, Chip, m![Qs # 5120 / 2560], m![Qs # 5120 % 2560 % 256], m![1], m![Qs # 5120 % 2560 / 256, H = 32]> = ctx
+        .sub
+        .begin(q.view().tile::<m![H], 32, m![Qs # 5120 % 2560 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Qs # 5120 % 2560 / 256], m![H = 32]>()
+        .collect::<m![Qs # 5120 % 2560 / 256], m![H = 32]>()
+        .to_trf();
+    let k: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _k_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(k.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+    let v: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = v_weight.to_dm(&mut ctx.tdma);
+    let _v_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(v.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+}
+
+/// V326 probe: Q 50%, K/V 62.5% on cluster 0 (overall 56.25%). One row per HBM read, H-32-column TRF keep-alive per tensor.
+#[device(chip = 1)]
+pub fn probe_bal_kv5(
+    ctx: &mut Context,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) {
+    let q: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![Qs / 256 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _q_keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![1], m![Qs / 256 % 8, H = 32]> = ctx
+        .sub
+        .begin(q.view().tile::<m![H], 32, m![Qs / 256 % 8, H = 32 # 3840]>(0))
+        .fetch::<m![Qs / 256 % 8], m![H = 32]>()
+        .collect::<m![Qs / 256 % 8], m![H = 32]>()
+        .to_trf();
+    let k: DmTensor<f8e4m3, Chip, m![Ps # 2560 / 1280], m![Ps # 2560 % 1280 % 256], m![Ps # 2560 % 1280 / 256, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _k_keep: TrfTensor<f8e4m3, Chip, m![Ps # 2560 / 1280], m![Ps # 2560 % 1280 % 256], m![1], m![Ps # 2560 % 1280 / 256, H = 32]> = ctx
+        .sub
+        .begin(k.view().tile::<m![H], 32, m![Ps # 2560 % 1280 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Ps # 2560 % 1280 / 256], m![H = 32]>()
+        .collect::<m![Ps # 2560 % 1280 / 256], m![H = 32]>()
+        .to_trf();
+    let v: DmTensor<f8e4m3, Chip, m![Ps # 2560 / 1280], m![Ps # 2560 % 1280 % 256], m![Ps # 2560 % 1280 / 256, H]> = v_weight.to_dm(&mut ctx.tdma);
+    let _v_keep: TrfTensor<f8e4m3, Chip, m![Ps # 2560 / 1280], m![Ps # 2560 % 1280 % 256], m![1], m![Ps # 2560 % 1280 / 256, H = 32]> = ctx
+        .sub
+        .begin(v.view().tile::<m![H], 32, m![Ps # 2560 % 1280 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Ps # 2560 % 1280 / 256], m![H = 32]>()
+        .collect::<m![Ps # 2560 % 1280 / 256], m![H = 32]>()
+        .to_trf();
+}
+
+/// V326 probe: Q 56.25% on cluster 0, K/V 50% (overall 53.1%). One row per HBM read, H-32-column TRF keep-alive per tensor.
+#[device(chip = 1)]
+pub fn probe_bal_q9(
+    ctx: &mut Context,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) {
+    let q: DmTensor<f8e4m3, Chip, m![Qs # 4608 / 2304], m![Qs # 4608 % 2304 % 256], m![Qs # 4608 % 2304 / 256, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _q_keep: TrfTensor<f8e4m3, Chip, m![Qs # 4608 / 2304], m![Qs # 4608 % 2304 % 256], m![1], m![Qs # 4608 % 2304 / 256, H = 32]> = ctx
+        .sub
+        .begin(q.view().tile::<m![H], 32, m![Qs # 4608 % 2304 / 256, H = 32 # 3840]>(0))
+        .fetch::<m![Qs # 4608 % 2304 / 256], m![H = 32]>()
+        .collect::<m![Qs # 4608 % 2304 / 256], m![H = 32]>()
+        .to_trf();
+    let k: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = k_weight.to_dm(&mut ctx.tdma);
+    let _k_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(k.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+    let v: DmTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![Ps / 256 % 4, H]> = v_weight.to_dm(&mut ctx.tdma);
+    let _v_keep: TrfTensor<f8e4m3, Chip, m![Ps / 1024], m![Ps % 256], m![1], m![Ps / 256 % 4, H = 32]> = ctx
+        .sub
+        .begin(v.view().tile::<m![H], 32, m![Ps / 256 % 4, H = 32 # 3840]>(0))
+        .fetch::<m![Ps / 256 % 4], m![H = 32]>()
+        .collect::<m![Ps / 256 % 4], m![H = 32]>()
+        .to_trf();
+}
