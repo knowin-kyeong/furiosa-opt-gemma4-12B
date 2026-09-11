@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-12 (3):** 코드 SOTA → **`V301_submit`** (V299_submit + ffn pass A x 조각 Lane, 짝비교 8/8 −2.3%). V299_submit draw 6.7338 외 진행 중. 공식 최고 7.2264 (2위).
+
 > **2026-09-12 (2):** 코드 SOTA → **`V299_submit`** (V293_submit + qkv Q/K/V weight head 안 행 교차, 짝비교 8/8 −8.8%). 공식 최고 **7.2264** (V293_submit draw 091cfa9f, 2위; 1위 #663 7.3097). RULES §10.0s.
 
 > **2026-09-12:** 코드 SOTA → **`V293_submit` `4f8cb73`** (V273 + V292 qkv 칩 안 x 복제 −1.3% + V293 ffn −0.6%, Arena 25/25 PASS). 공식 최고는 7.0314 그대로(draw 복권). 동기화 대기 = 동시 DMA에서 느려지는 클러스터 1의 지연(V294). RULES §10.0s.
