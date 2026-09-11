@@ -450,7 +450,31 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0s 2026-09-12 — 동기화는 클러스터 1의 지연이다, 칩 안 복제로 HBM 왕복 둘을 없앴다 (가장 최신, 여기서 시작할 것)
+### 10.0t 2026-09-12 — 공식 1위 7.3136, 남은 최대 비용은 클러스터 1 지연, book이 알려 준 switch의 DMA 점유 (가장 최신, 여기서 시작할 것)
+
+**상태.** 공식 최고 **7.3136**(`0ead0b04`, `V313_submit` draw — qkv 87,602 / attn 40,305 / ffn 271,797) → **리더보드 1위**(2위 #663 7.3097 = 91,578 / 39,144 / 268,129).
+V313 draw 배치 2·3은 6.45~7.31, 평균 ≈6.87 — 최고가 평균 +6.5%다. **8.0은 draw로 불가능하고 코드 평균 +9.4%가 필요하다.**
+draw는 pod `/root/drawchain_follow.sh <branch> <first_batch> <n>`이 12회 배치로 계속 돌린다(`/root/draw_src`, 로그 `/root/drawloop_<branch>.batch<N>.log`; 도는 동안 `draw_src`·`lab3` 금지).
+
+**V313 실물 임계 경로** (`scripts/dev/span/crit.py`를 pod에 stdin으로 넘겨 실행, warm launch #1, 정적 `/root/tk/S313_*.json`):
+
+| 커널 | launch | 사슬 | 이름 붙은 대기 |
+|---|---:|---|---|
+| qkv | 95.3k | DMA 70.5k · 동기화 8.9k · TU 6.6k · slack 5.1k (+ 끝 동기화 4.0k) | V 로드 뒤 RoPE cs 재로드 동기화(`rope.rs:280→283`) 8.9k + 끝 4.0k ≈ **13%** |
+| attn | 45.3k | DMA 30.4k · 동기화 9.4k · TU 4.5k | contraction store 뒤 동기화(`projection.rs:238`) **9.4~12.6k** |
+| ffn | 274.9k | DMA 258.5k · 동기화 13.6k · TU 14.9k · slack 13.2k | geglu hop 동기화 **12.9k** · down_scale 로드 slack **3,144**(erf switch `xsw.rs:368` → StoVrf `f8split.rs:70` 2.76k → StoVrf `mlp.rs:722`가 끝난 뒤 150,730 발행) · inv_s 재로드 slack 2,441 · down x 재로드 9.1k(1.97 MB, 216 B/cycle, 영역당 32 reader) |
+
+모든 동기화는 클러스터 0이 클러스터 1을 기다리는 시간이다(V294). 몫을 클러스터 0으로 옮겨야만 줄고, 행 단위 읽기에서만 통한다(V321 vs V323·V324).
+
+**book·논문 재독** (Switch Engine · DMA Engine · Memory Performance · Schedule/Tuning · Transformer 사례, TCP ISCA'24, IEEE Micro HC2024)
+1. **CustomBroadcast의 SFR 쓰기는 DMA 엔진과 sub 컨텍스트를 점유한다.** 정적 스케줄은 switch pass를 MainContext로만 둔다(S313: `xsw.rs:168` · `xsw.rs:368` · `mlp.rs:216` · `mlp.rs:285`) — V306이 정적의 3배를 번 기전이다. 큰 로드 앞 CustomBroadcast 제거는 정적 스크린이 과소평가하므로 짝비교로 판정한다.
+2. **0.6.0에는 DMA 엔진 지정 API가 없다**(`Context.tdma`는 marker, `DmnIndex`/`DmaDescriptor` 비공개). DMN당 128 B/cycle(32 슬라이스가 데이터 경로 공유), 클러스터당 256 B/cycle(DMN 인터리빙), **슬라이스당 DMA 명령 큐 2칸**, HBM 채널 컨트롤러 큐 64칸, 명령당 startup ≈500.
+3. **`commit_cast`/`commit_cast_relu`는 0.6.0에 있다**(`engine/commit_adapter.rs:174`): f32→bf16 cast를 commit 경로로 접어 Cast Engine을 sub Vector Engine 작업에 비워 준다.
+4. 0.6.0에는 `#[unroll]`이 없고 채점기가 받는 스케줄러 env 노브도 없다. 공식 transformer 예제는 weight를 `to_dm` 한 번 → sub staging으로 TRF(Lane)에, 활성값은 main 스트림으로 — qkv·attn의 Lane 8 사용과 같다.
+
+**이번 캠페인 슬롯:** `V326`(qkv 큐 전체 몫 균형 탐침) → 조건부 `V327`(qkv 비대칭 head 커널) · `V328`(ffn CustomBroadcast 정리) · `V329`(ffn h 재로드 사본 탐침) · V323 패키지 16잡 재측정(job 20380 `rngd rerun`, attn a53 vs sym).
+
+### 10.0s 2026-09-12 — 동기화는 클러스터 1의 지연이다, 칩 안 복제로 HBM 왕복 둘을 없앴다
 
 코드 SOTA **`V301_submit`**(V299_submit + V301 ffn pass A Lane), 공식 최고 **7.2264**(V293_submit draw; 이전 7.0314)(V267/V273 계열의 운 좋은 draw; V273 draw 평균 ≈6.56).
 짝비교 합산 기대 개선은 기하평균 +0.6%라 draw 하나로는 보이지 않는다(σ≈2.5%). 7.03을 확실히 넘으려면 몇 % 단위 구조 개선이 더 필요하다.
