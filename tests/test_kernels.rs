@@ -398,14 +398,7 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[
-    "1p", "ta", "tb", "tc",
-    "tc", "tb", "ta", "1p",
-    "tb", "1p", "tc", "ta",
-    "ta", "tc", "1p", "tb",
-    "1p", "ta", "tb", "tc",
-    "tc", "tb", "ta", "1p",
-    "tb", "1p", "tc", "ta",
-    "ta", "tc", "1p", "tb",
+    "1p", "tb", "tb", "1p", "1p", "tb", "tb", "1p", "1p", "tb", "tb", "1p", "1p", "tb", "tb", "1p",
 ];
 
 const PLAN: &[Plan] = &[
