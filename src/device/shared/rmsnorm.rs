@@ -19,6 +19,14 @@ pub(crate) fn load_reducing<Cluster: M>(
     x.to_dm(&mut ctx.tdma)
 }
 
+/// V271: `load_reducing` from the 256 B-aligned layout `project_output` stores the attention output in.
+pub(crate) fn load_reducing_aligned<Cluster: M>(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H / 120, H % 120 # 128]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    x.to_dm(&mut ctx.tdma)
+}
+
 pub(crate) fn normalize<Cluster: M, Slice: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,

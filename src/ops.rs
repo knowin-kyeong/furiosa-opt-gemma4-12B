@@ -192,7 +192,7 @@ pub fn sliding_attention_output(
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
     let x_hbm = sliding::projection::project_output(ctx, x, o_weight);
     // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
-    let x = shared::rmsnorm::load_reducing::<Cluster>(ctx, &x_hbm);
+    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &x_hbm);
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
     // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
     let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
