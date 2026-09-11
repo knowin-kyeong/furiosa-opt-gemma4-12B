@@ -442,6 +442,10 @@ impl Bench {
         match cycles.or_else(|| self.collector.window_cycles()) {
             Some(c) => {
                 println!("    {key} cycles={c}");
+                let seen = self.samples.borrow().iter().filter(|(k, _)| k == key).count();
+                if seen < 2 {
+                    self.collector.dump(&format!("{key}#{seen}"));
+                }
                 self.samples.borrow_mut().push((key.to_string(), c));
             }
             None => println!("    {key} cycles=none observed"),
@@ -726,10 +730,11 @@ fn compare(label: &str, expected: &[f32], actual: &[f32], atol: f32, rtol: f32) 
 
 const TRACING_TARGET_NPU: &str = "span::npu";
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Span {
     begin: u64,
     end: u64,
+    name: String,
 }
 
 /// A minimal `tracing::Subscriber`: all we need is to see each `span::npu` span's fields
@@ -751,6 +756,32 @@ impl Collector {
         self.spans.lock().unwrap().len()
     }
 
+    /// Every span of the last launch, cycle-relative and sorted, then one line per span name.
+    fn dump(&self, label: &str) {
+        let spans = self.spans.lock().unwrap();
+        let Some(b0) = spans.iter().map(|s| s.begin).min() else {
+            return;
+        };
+        let mut sorted: Vec<&Span> = spans.iter().collect();
+        println!("SPANS\t{label}\tn={}", sorted.len());
+        for s in sorted.iter().take(2500) {
+            println!("SPAN\t{label}\t{}\t{}\t{}\t{}", s.begin - b0, s.end - b0, s.end.saturating_sub(s.begin), s.name);
+        }
+        let mut groups: HashMap<String, (usize, u64, u64, u64)> = HashMap::new();
+        for s in &sorted {
+            let g = groups.entry(s.name.clone()).or_insert((0, 0, u64::MAX, 0));
+            g.0 += 1;
+            g.1 += s.end.saturating_sub(s.begin);
+            g.2 = g.2.min(s.begin - b0);
+            g.3 = g.3.max(s.end - b0);
+        }
+        let mut gv: Vec<(String, (usize, u64, u64, u64))> = groups.into_iter().collect();
+        gv.sort_by_key(|(_, g)| g.2);
+        for (name, g) in gv {
+            println!("GROUP\t{label}\tcount={}\tsum={}\tfirst={}\tlast={}\t{name}", g.0, g.1, g.2, g.3);
+        }
+    }
+
     /// Real total cycles for whatever ran since the last `clear`: the union of every
     /// span observed (min begin .. max end).
     fn window_cycles(&self) -> Option<u64> {
@@ -765,6 +796,7 @@ impl Collector {
 struct FieldExtractor {
     begin: Option<u64>,
     end: Option<u64>,
+    name: Option<String>,
 }
 
 impl tracing::field::Visit for FieldExtractor {
@@ -776,7 +808,17 @@ impl tracing::field::Visit for FieldExtractor {
         }
     }
 
-    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "name" {
+            self.name = Some(value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "name" && self.name.is_none() {
+            self.name = Some(format!("{value:?}"));
+        }
+    }
 }
 
 impl tracing::Subscriber for Collector {
@@ -789,7 +831,8 @@ impl tracing::Subscriber for Collector {
             let mut extractor = FieldExtractor::default();
             attrs.record(&mut extractor);
             if let (Some(begin), Some(end)) = (extractor.begin, extractor.end) {
-                self.spans.lock().unwrap().push(Span { begin, end });
+                let name = extractor.name.clone().unwrap_or_default();
+                self.spans.lock().unwrap().push(Span { begin, end, name });
             }
         }
         // 0 is reserved by `span::Id`; spans aren't tracked individually here, so the
@@ -823,6 +866,7 @@ fn settle() -> Duration {
 
 #[tokio::main]
 async fn main() {
+    unsafe { std::env::set_var("TUC_PROFILE_LEVEL", "trace") };
     let fixture = Fixture::load(&fixture_path());
     fixture.assert_every_expectation_is_tested();
     let mut ctx = Context::acquire();
