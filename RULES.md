@@ -496,6 +496,10 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - **V307(qkv RoPE를 클러스터별 gather로) 중립(6/12, +90):** `dma_gather_unscaled`에 두 클러스터 head 슬라이스의 DM 인덱스(`rope_offset ≫ 9`)를 주면
   각 클러스터가 제 행을 읽는다(PASS) — HBM 왕복·동기화 없는 gather가 가능하다는 것은 확인. 그러나 **동기화를 없애도 클러스터 1의 DMA 지연은 끝 동기화로 옮겨 갈 뿐**이다.
   ⇒ 실물 이득은 **두 클러스터 DMA가 함께 노는 시간**(대칭 TUC 큐 막힘, V306), DMA 효율(디스크립터·정렬), TU 꼬리에서만 나온다. 동기화 자체를 표적으로 삼지 말 것.
+- **V308(ffn 머리 순서 강제 탐침) 6/6 +1.9k 기각:** up weight를 x 로드 바로 뒤로 강제하면 머리 유휴 5.7k는 사라지지만 rms weight · LUT · cfg가 44k 로드 뒤로 밀려 더 잃는다.
+  **정적 makespan은 이번 세션 네 번 모두 실물의 부호를 맞췄다**(V305 +5.6k → +14.1k, V306 −1.6k → −4.9k, V307 +76 → +90, V308 +1.7k → +1.9k) — 구조·순서 후보는 컴파일 + `--dump-schedule`로 먼저 거른다.
+  도구: `BEAM_SEARCH_TRACE_DUMP_PATH` 경로 추출은 scratchpad `beampath.py`(pod `/root/tk/`), 순서 강제 A/B는 `probe_build.sh <lab> <kernel> <order> <tag>` + `pairs_lab.sh`(첫 잡 뒤 `rngd rerun`).
+  캐시에 커널이 있으면 빔 추적이 안 나온다 — `target/furiosa-opt` 아래 그 커널 파일을 지우고 컴파일할 것.
 - 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
