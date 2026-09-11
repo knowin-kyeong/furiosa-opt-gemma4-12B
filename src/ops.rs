@@ -266,14 +266,15 @@ pub fn decoder_feedforward(
     let (x2, erf_b, out_b) = shared::xsw::stage_x_hi_lo_full_blocks(ctx, &x, up_global_scale, gate_global_scale);
     let x_rep = shared::xsw::replicate_blocks(ctx, &x2);
     let erf_all = shared::xsw::broadcast_scalar_blocks(ctx, erf_b);
-    let out_all = shared::xsw::broadcast_scalar_blocks(ctx, out_b);
+    // V306: out_scale stays on cluster 0 block 0 (= ReducingSlices) and is applied in the tail multiply.
+    let out_tail: DmTensor<f32, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![1 # 8]> = unsafe { out_b.reshape() };
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
-    let x = shared::mlp::feedforward_v301(
+    let x = shared::mlp::feedforward_v306(
         ctx,
         x_rep,
         erf_all,
-        out_all,
+        out_tail,
         up_weight_packed,
         gate_weight_packed,
         down_weight_packed,
