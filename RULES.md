@@ -452,7 +452,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 ### 10.0s 2026-09-12 — 동기화는 클러스터 1의 지연이다, 칩 안 복제로 HBM 왕복 둘을 없앴다 (가장 최신, 여기서 시작할 것)
 
-코드 SOTA **`V293_submit` `4f8cb73`**(V273 + V292 qkv + V293 ffn), 공식 최고는 여전히 **7.0314**(V267/V273 계열의 운 좋은 draw; V273 draw 평균 ≈6.56).
+코드 SOTA **`V299_submit`**(V293_submit + V299 qkv head 안 행 교차), 공식 최고 **7.2264**(V293_submit draw; 이전 7.0314)(V267/V273 계열의 운 좋은 draw; V273 draw 평균 ≈6.56).
 짝비교 합산 기대 개선은 기하평균 +0.6%라 draw 하나로는 보이지 않는다(σ≈2.5%). 7.03을 확실히 넘으려면 몇 % 단위 구조 개선이 더 필요하다.
 
 **확정 사실**
@@ -471,6 +471,14 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
   (클러스터 단독은 DM 쓰기 한계 ~262 B/cycle, 둘이면 합 ~420 B/cycle, 클러스터 0 우선) ⇒ 레버는 **바이트당 HBM 속도(런 구조)**: attn O-weight(256 B 런) ~680 B/cycle vs qkv Q(30.7 KB 연속) ~500.
   **V296 탐침 진행 중:** q_weight를 attn식 256 B 열 청크 레이아웃(`m![Qs / 128 % 16, H / 256 # 16]`)으로 로드한 속도.
 - qkv: V 로드 뒤에 남은 rope HBM 왕복(gather·store·sync·reload)과 꼬리 17.7k. attn: contraction 병합 동기화(= 클러스터 1 지연) 10~15k.
+
+**같은 날 이어서 (V296~V300) — 로드 속도는 런 구조가 정한다, qkv −8.8%**
+- 두 클러스터 로드는 HBM 읽기 대역폭을 나눠 쓰므로, 남은 레버는 **바이트당 HBM 속도**다. qkv weight를 **행 하나씩(3,840 B = 256 B 정렬) 읽게** 슬라이스 배치만 바꾸면
+  q_weight −15%, k_weight −18%(V297·V298). head 모음과 맞추려면 head의 64 슬라이스 안에서 교차하고(원소 k = 행/64, 슬라이스 s = 행 % 64),
+  ring-64 `Broadcast1`에 k를 Time으로 넣으면 packet-major 도착이 자연 순서가 된다. 1값 패킷은 commit할 수 없어(8~32 B) transpose로 4개씩 묶는다.
+- **V299(qkv 커널 적용): 8/8, −9,079 (−8.8%)** → `V299_submit`. 같은 트릭을 ffn up weight(1,920 B 행 = 7.5 granule)에 쓰면 +27%로 나빠진다(V300) — 이득은 행이 256 B로 정렬될 때만.
+- 256 B 열 청크 레이아웃(`H / 256 # 16`)은 load 컴파일러 ICE(V296).
+- 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
 
