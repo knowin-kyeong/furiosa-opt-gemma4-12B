@@ -145,13 +145,13 @@ pub(crate) fn project_output(
     // partials are summed across slices within a cluster; the per-channel weight scale is
     // applied by the post-attention RMSNorm (rmsnorm::normalize_add_scaled_reduced), which
     // keeps its load out of the front of the DMA queue.
-    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 88, Qs % 256]> = weight
+    let tile0: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 96, Qs % 256]> = weight
         .view()
-        .tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 # 120, Qs]>(0)
+        .tile::<m![H % 120], 96, m![H / 120, H % 120 = 96 # 120, Qs]>(0)
         .to_dm(&mut ctx.tdma);
-    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 32, Qs % 256]> = weight
+    let tile1: DmTensor<f8e4m3, Chip, TwoClusters, HiddenRowsByColumns256, m![H % 120 = 24, Qs % 256]> = weight
         .view()
-        .tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 # 120, Qs]>(88)
+        .tile::<m![H % 120], 24, m![H / 120, H % 120 = 24 # 120, Qs]>(96)
         .to_dm(&mut ctx.tdma);
 
     // V251: the f8 split runs where the contraction needs it -- on all 512 slices -- instead of on
@@ -199,34 +199,34 @@ pub(crate) fn project_output(
     let mut contraction: DmTensor<bf16, Chip, TwoClusters, HiddenRows256, m![H % 120]> = DmTensor::new();
     ctx.main
         .begin(tile0.view())
-        .fetch::<m![H % 120 = 88, Qs / 64 % 4], m![Qs % 64]>()
-        .collect::<m![H % 120 = 88, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
-        .contract_outer::<m![H % 120 = 88, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
+        .fetch::<m![H % 120 = 96, Qs / 64 % 4], m![Qs % 64]>()
+        .collect::<m![H % 120 = 96, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 120 = 96, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 120 = 88]>()
-        .contract_lane::<m![H % 120 = 88], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H % 120 = 96]>()
+        .contract_lane::<m![H % 120 = 96], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 88]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 96]>(InterSliceReduceOpF32::Add)
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H % 120 = 88 / 4], m![H % 120 = 88 % 4 # 16]>()
-        .commit_trim::<m![H % 120 = 88 % 4]>()
-        .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120]>(0));
+        .transpose::<m![H % 120 = 96 / 4], m![H % 120 = 96 % 4 # 16]>()
+        .commit_trim::<m![H % 120 = 96 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 120], 96, m![H % 120 = 96 #{!} 120]>(0));
     ctx.main
         .begin(tile1.view())
-        .fetch::<m![H % 120 = 32, Qs / 64 % 4], m![Qs % 64]>()
-        .collect::<m![H % 120 = 32, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
-        .contract_outer::<m![H % 120 = 32, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
+        .fetch::<m![H % 120 = 24, Qs / 64 % 4], m![Qs % 64]>()
+        .collect::<m![H % 120 = 24, Qs / 64 % 4, Qs / 32 % 2], m![Qs % 32]>()
+        .contract_outer::<m![H % 120 = 24, Qs / 64 % 4], m![Qs % 64], _, _, _>(&x_trf)
         .contract_packet::<m![1]>()
-        .contract_time::<m![H % 120 = 32]>()
-        .contract_lane::<m![H % 120 = 32], m![1 # 8]>(LaneMode::Interleaved)
+        .contract_time::<m![H % 120 = 24]>()
+        .contract_lane::<m![H % 120 = 24], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
-        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 32]>(InterSliceReduceOpF32::Add)
+        .vector_inter_slice_reduce::<HiddenRows256, m![H % 120 = 24]>(InterSliceReduceOpF32::Add)
         .vector_final()
         .cast::<bf16, m![1 # 16]>()
-        .transpose::<m![H % 120 = 32 / 4], m![H % 120 = 32 % 4 # 16]>()
-        .commit_trim::<m![H % 120 = 32 % 4]>()
-        .commit_view(contraction.view_mut().tile::<m![H % 120], 32, m![H % 120 = 32 #{!} 120]>(88));
+        .transpose::<m![H % 120 = 24 / 4], m![H % 120 = 24 % 4 # 16]>()
+        .commit_trim::<m![H % 120 = 24 % 4]>()
+        .commit_view(contraction.view_mut().tile::<m![H % 120], 24, m![H % 120 = 24 #{!} 120]>(96));
 
     // Each cluster writes its half of the [H] vector to HBM; the caller loads it back in the
     // layout it needs. (Collecting the 32 row groups onto one slice first, to cut the 64
