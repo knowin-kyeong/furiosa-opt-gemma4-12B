@@ -1681,3 +1681,42 @@ pub(crate) fn feedforward_v306(
 
     down
 }
+
+// ---------------------------------------------------------------------------------------------
+// V310: down-scale load cost by column-chunk layout (extra loads at the kernel head).
+// ---------------------------------------------------------------------------------------------
+/// 8 chunks x 60 rows (production layout): 120-byte runs per row.
+pub(crate) fn probe_down_scale_8(ctx: &mut Context, scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>) {
+    let probe: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = scale.to_dm(&mut ctx.tdma);
+    let _keep: VrfTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 1, L / 16 % 120]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 60], 1, m![H % 60 = 1 # 60, L / 16 % 120]>(0))
+        .fetch::<m![H % 60 = 1], m![L / 16 % 120]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60 = 1, L / 128 % 15], m![L / 16 % 8]>()
+        .to_vrf();
+}
+
+/// 4 chunks x 30 rows: 240-byte runs per row.
+pub(crate) fn probe_down_scale_4(ctx: &mut Context, scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>) {
+    let probe: DmTensor<f8e4m3, Chip, DownClusters, m![H / 30 % 64, L / 3840], m![H % 30, L / 16 % 240]> = scale.to_dm(&mut ctx.tdma);
+    let _keep: VrfTensor<f32, Chip, DownClusters, m![H / 30 % 64, L / 3840], m![H % 30 = 1, L / 16 % 240]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 30], 1, m![H % 30 = 1 # 30, L / 16 % 240]>(0))
+        .fetch::<m![H % 30 = 1], m![L / 16 % 240]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 30 = 1, L / 128 % 30], m![L / 16 % 8]>()
+        .to_vrf();
+}
+
+/// 2 chunks x 15 rows: 480-byte runs per row.
+pub(crate) fn probe_down_scale_2(ctx: &mut Context, scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>) {
+    let probe: DmTensor<f8e4m3, Chip, DownClusters, m![H / 15 % 128, L / 7680], m![H % 15, L / 16 % 480]> = scale.to_dm(&mut ctx.tdma);
+    let _keep: VrfTensor<f32, Chip, DownClusters, m![H / 15 % 128, L / 7680], m![H % 15 = 1, L / 16 % 480]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 15], 1, m![H % 15 = 1 # 15, L / 16 % 480]>(0))
+        .fetch::<m![H % 15 = 1], m![L / 16 % 480]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 15 = 1, L / 128 % 60], m![L / 16 % 8]>()
+        .to_vrf();
+}
