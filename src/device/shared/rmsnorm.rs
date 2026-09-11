@@ -27,6 +27,14 @@ pub(crate) fn load_reducing_aligned<Cluster: M>(
     x.to_dm(&mut ctx.tdma)
 }
 
+/// V322: `load_reducing` from the 128-row groups `project_output_as` stores (256 B each).
+pub(crate) fn load_reducing_aligned128<Cluster: M>(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H / 128, H % 128]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+    x.to_dm(&mut ctx.tdma)
+}
+
 pub(crate) fn normalize<Cluster: M, Slice: M>(
     ctx: &mut Context,
     x: &DmTensor<bf16, Chip, Cluster, Slice, m![H]>,
