@@ -2,7 +2,7 @@
 use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
-use crate::axes::{C, Dummy2, Dummy256, Dummy8, H, L};
+use crate::axes::{C, Dummy2, Dummy256, Dummy8, Gf, H, L};
 use crate::device::layout::{Cluster, Slice};
 use crate::device::shared::rmsnorm::{self, ReducingSlices};
 use crate::{hi_lo_fns, max_square_fns, pow2_scale_fns, stage_packet_fns};
@@ -3384,4 +3384,34 @@ pub(crate) fn feedforward_v260(
         .commit();
 
     down
+}
+
+/// R16/V270 (V206 helper): x onto every slice of a cluster from 16 HBM copies and a ring-16 broadcast.
+pub(crate) fn broadcast_x_r16<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![Gf, Dummy256 / 16], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![Gf, 1 # 16], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![Gf, Dummy256 / 16], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 16 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
+}
+
+/// R16/V270 (V206 helper): x onto every slice of a cluster from 32 HBM copies and a ring-8 broadcast.
+pub(crate) fn broadcast_x_r8<Cl: M>(
+    ctx: &mut Context,
+    x2_hbm: &HbmTensor<f8e4m3, Chip, m![Dummy2, H]>,
+) -> DmTensor<f8e4m3, Chip, Cl, m![C / 2, Dummy256 / 32], m![Dummy2, H]> {
+    let copies: DmTensor<f8e4m3, Chip, Cl, m![C / 2, 1 # 8], m![Dummy2, H]> = x2_hbm.to_dm(&mut ctx.tdma);
+    ctx.main
+        .begin(copies.view())
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .switch::<m![C / 2, Dummy256 / 32], m![Dummy2, H / 32]>(SwitchConfig::CustomBroadcast { ring_size: 8 })
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit()
 }

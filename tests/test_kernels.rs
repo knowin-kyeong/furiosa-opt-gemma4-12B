@@ -392,18 +392,21 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[
-    "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds", "ds", "dn", "dn", "ds",
-];
+const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[
-    "", "nf", "nf", "", "", "nf", "nf", "", "", "nf", "nf", "", "", "nf", "nf", "",
+    "", "r16", "r8",
+    "r8", "r16", "",
+    "r16", "", "r8",
+    "r8", "", "r16",
+    "", "r16", "r8",
+    "r8", "r16", "",
+    "r16", "", "r8",
+    "r8", "", "r16",
 ];
 
-const ATTN_SWEEP: &[&str] = &[
-    "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p", "1p", "n1", "n1", "1p",
-];
+const ATTN_SWEEP: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
@@ -567,6 +570,58 @@ async fn sliding_project_qkv(
             "nf" => {
                 launch(
                     ops::sliding_project_qkv_nf,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "r16" => {
+                launch(
+                    ops::sliding_project_qkv_r16,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "r8" => {
+                launch(
+                    ops::sliding_project_qkv_r8,
                     (
                         ctx,
                         &x,
