@@ -400,3 +400,45 @@ pub fn probe_load_ug2(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Ch
         .commit_trim::<m![H % 32]>()
         .commit();
 }
+
+/// V324 probe: production layout, 7680 / 7680 rows, 30 contiguous rows per slice.
+#[device(chip = 1)]
+pub fn probe_load_s30(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L / 7680], m![L / 30 % 256], m![L % 30, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L / 7680], m![L / 30 % 256], m![L % 30, H = 64]> = ctx
+        .main
+        .begin(w.view().tile::<m![H], 64, m![L % 30, H = 64 # 3840]>(0))
+        .fetch::<m![L % 30], m![H = 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 30, H = 64 / 32], m![H = 64 % 32]>()
+        .commit_trim::<m![H = 64 % 32]>()
+        .commit();
+}
+
+/// V324 probe: 8192 / 7168 rows (53.3% on cluster 0), 32 rows per slice.
+#[device(chip = 1)]
+pub fn probe_load_u53(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L # 16384 / 8192], m![L # 16384 % 8192 / 32], m![L # 16384 % 32, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L # 16384 / 8192], m![L # 16384 % 8192 / 32], m![L # 16384 % 32, H = 64]> = ctx
+        .main
+        .begin(w.view().tile::<m![H], 64, m![L # 16384 % 32, H = 64 # 3840]>(0))
+        .fetch::<m![L # 16384 % 32], m![H = 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L # 16384 % 32, H = 64 / 32], m![H = 64 % 32]>()
+        .commit_trim::<m![H = 64 % 32]>()
+        .commit();
+}
+
+/// V324 probe: 10240 / 5120 rows (66.7% on cluster 0), 40 rows per slice.
+#[device(chip = 1)]
+pub fn probe_load_u67(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L # 20480 / 10240], m![L # 20480 % 10240 / 40], m![L # 20480 % 40, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L # 20480 / 10240], m![L # 20480 % 10240 / 40], m![L # 20480 % 40, H = 64]> = ctx
+        .main
+        .begin(w.view().tile::<m![H], 64, m![L # 20480 % 40, H = 64 # 3840]>(0))
+        .fetch::<m![L # 20480 % 40], m![H = 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L # 20480 % 40, H = 64 / 32], m![H = 64 % 32]>()
+        .commit_trim::<m![H = 64 % 32]>()
+        .commit();
+}

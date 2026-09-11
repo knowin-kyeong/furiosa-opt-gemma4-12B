@@ -392,7 +392,7 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &["", "ug0", "ug1", "ug2", "ug1", "ug0", "ug2", "ug0", "ug1", "ug2", "ug0", "ug2", "ug1", ""];
+const FFN_SWEEP: &[&str] = &["", "s30", "u53", "u67", "u67", "u53", "s30", "u53", "s30", "u67", "s30", "u67", "u53", ""];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
@@ -538,6 +538,15 @@ async fn decoder_feedforward(
             }
             "ug2" => {
                 launch(ops::probe_load_ug2, (ctx, &up_weight_packed)).await;
+            }
+            "s30" => {
+                launch(ops::probe_load_s30, (ctx, &up_weight_packed)).await;
+            }
+            "u53" => {
+                launch(ops::probe_load_u53, (ctx, &up_weight_packed)).await;
+            }
+            "u67" => {
+                launch(ops::probe_load_u67, (ctx, &up_weight_packed)).await;
             }
             other => panic!("no variant `{other}` for decoder_feedforward"),
         }
