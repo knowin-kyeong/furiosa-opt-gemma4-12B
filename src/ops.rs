@@ -358,3 +358,45 @@ pub fn final_norm_and_logits(
 
     capped.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
+
+/// V300 probe: up_weight_packed in the production layout (30 consecutive rows per slice).
+#[device(chip = 1)]
+pub fn probe_load_ug0(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L / 7680], m![L / 30 % 256], m![L % 30, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L / 7680], m![L / 30 % 256], m![L % 30 = 1, H]> = ctx
+        .main
+        .begin(w.view().tile::<m![L % 30], 1, m![L % 30 = 1 # 30, H]>(0))
+        .fetch::<m![L % 30 = 1, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L % 30 = 1, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+}
+
+/// V300 probe: up_weight_packed with rows interleaved over slices (one 1,920-byte row per read).
+#[device(chip = 1)]
+pub fn probe_load_ug1(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L / 7680], m![L % 256], m![L / 256 % 30, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L / 7680], m![L % 256], m![L / 256 % 30 = 1, H]> = ctx
+        .main
+        .begin(w.view().tile::<m![L / 256 % 30], 1, m![L / 256 % 30 = 1 # 30, H]>(0))
+        .fetch::<m![L / 256 % 30 = 1, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L / 256 % 30 = 1, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+}
+
+/// V300 probe: up_weight_packed with row pairs interleaved over slices (3,840-byte aligned reads).
+#[device(chip = 1)]
+pub fn probe_load_ug2(ctx: &mut Context, up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>) {
+    let w: DmTensor<f4e2m1, Chip, m![L / 7680], m![L / 2 % 256], m![L / 512 % 15, L % 2, H]> = up_weight_packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, m![L / 7680], m![L / 2 % 256], m![L / 512 % 15 = 1, L % 2, H]> = ctx
+        .main
+        .begin(w.view().tile::<m![L / 512 % 15], 1, m![L / 512 % 15 = 1 # 15, L % 2, H]>(0))
+        .fetch::<m![L / 512 % 15 = 1, L % 2, H / 64], m![H % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![L / 512 % 15 = 1, L % 2, H / 64, H / 32 % 2], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit();
+}

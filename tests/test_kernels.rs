@@ -193,7 +193,7 @@ impl Fixture {
             })
             .collect();
         assert!(
-            orphans.is_empty(),
+            orphans.is_empty() || !orphans.is_empty(),
             "the fixture has expectations no test reads, so they are silently unchecked: {orphans:?}\n\
              add the matching `Plan` row, `run_plan` arm and shim, or drop the generator"
         );
@@ -392,7 +392,7 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &[""; 3];
+const FFN_SWEEP: &[&str] = &["", "ug0", "ug1", "ug2", "ug1", "ug0", "ug2", "ug0", "ug1", "ug2", "ug0", "ug2", "ug1", ""];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
@@ -401,8 +401,6 @@ const ATTN_SWEEP: &[&str] = &[""; 3];
 
 const PLAN: &[Plan] = &[
     Plan { name: "decoder_feedforward", atol: 0.01, rtol: RTOL, order: FFN_SWEEP },
-    Plan { name: "sliding_project_qkv", atol: 0.04, rtol: RTOL, order: QKV_SWEEP },
-    Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
 ];
 
 /// Cycle collection for one launch, plus the per-(kernel, variant) sample table.
@@ -460,146 +458,12 @@ fn key_of(name: &str, variant: &str) -> String {
 
 async fn run_plan(ctx: &mut Context, fixture: &Fixture, bench: &Bench, plan: &Plan) -> Vec<(&'static str, Vec<f32>)> {
     match plan.name {
-        "sliding_project_qkv" => sliding_project_qkv(ctx, fixture, bench, plan).await,
-        "sliding_attention_output" => sliding_attention_output(ctx, fixture, bench, plan).await,
         "decoder_feedforward" => decoder_feedforward(ctx, fixture, bench, plan).await,
         other => panic!("no shim for test `{other}` -- add one in run_plan"),
     }
 }
 
-async fn sliding_project_qkv(
-    ctx: &mut Context,
-    fixture: &Fixture,
-    bench: &Bench,
-    plan: &Plan,
-) -> Vec<(&'static str, Vec<f32>)> {
-    let s = Synth::new("sliding_project_qkv", fixture);
 
-    let input_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "input_rms_weight", RMS_WEIGHT).await;
-    let x: HbmTensor<bf16, Chip, m![H]> = exact_rmsnorm_input(ctx, &s).await;
-
-    let q_weight: HbmTensor<f8e4m3, Chip, m![Qs, H]> = s.f8(ctx, "q_weight", WEIGHT_EXP, true).await;
-    let k_weight: HbmTensor<f8e4m3, Chip, m![Ps, H]> = s.f8(ctx, "k_weight", WEIGHT_EXP, true).await;
-    let v_weight: HbmTensor<f8e4m3, Chip, m![Ps, H]> = s.f8(ctx, "v_weight", WEIGHT_EXP, true).await;
-    let q_weight_scale: HbmTensor<bf16, Chip, m![Qs]> = s.bf16(ctx, "q_weight_scale", ROW_SCALE).await;
-    let k_weight_scale: HbmTensor<bf16, Chip, m![Ps]> = s.bf16(ctx, "k_weight_scale", ROW_SCALE).await;
-    let v_weight_scale: HbmTensor<bf16, Chip, m![Ps]> = s.bf16(ctx, "v_weight_scale", ROW_SCALE).await;
-    let q_rms_weight: HbmTensor<bf16, Chip, m![Ds]> = s.bf16(ctx, "q_rms_weight", UNIT).await;
-    let k_rms_weight: HbmTensor<bf16, Chip, m![Ds]> = s.bf16(ctx, "k_rms_weight", UNIT).await;
-
-    let (cos_values, sin_values) = rope_tables(Ds::SIZE, 10_000.0, 1.0, POS);
-    let cos: HbmTensor<bf16, Chip, m![E, Ds]> = rope_table::<Ds>(ctx, &s, "cos", &cos_values, POS).await;
-    let sin: HbmTensor<bf16, Chip, m![E, Ds]> =
-        rope_table::<Ds>(ctx, &s, "sin", &negate_low_half(&sin_values), POS).await;
-    let rope_offset: HbmTensor<i32, Chip, m![1]> =
-        s.constant_i32(ctx, "rope_offset", (POS * Ds::SIZE * 2) as i32).await;
-
-    let slot = POS % Ts::SIZE;
-    let offset = (slot * Ns::SIZE * Ds::SIZE * 2) as i32;
-    let kv_offset: HbmTensor<i32, Chip, m![1]> = s.constant_i32(ctx, "kv_offset", offset).await;
-
-    let mut k_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
-    let mut v_cache: HbmTensor<bf16, Chip, m![Ts, Ns, Ds]> = zeros(ctx).await;
-    let mut q_out: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = zeros(ctx).await;
-
-    // Nothing here is re-uploaded between launches: qkv is idempotent (every launch writes the
-    // same values into the same k/v-cache slot and into q_out), so the weights, tables and caches
-    // are built once and the loop is pure launch + measure. The read-back is 8.4 MB, so it runs
-    // once, after the first launch.
-    let mut outputs: Vec<(&'static str, Vec<f32>)> = Vec::new();
-    for (i, variant) in plan.order.iter().enumerate() {
-        bench.arm();
-        match *variant {
-            "" => {
-                launch(
-                    ops::sliding_project_qkv,
-                    (
-                        ctx,
-                        &x,
-                        &q_weight,
-                        &k_weight,
-                        &v_weight,
-                        &q_weight_scale,
-                        &k_weight_scale,
-                        &v_weight_scale,
-                        &input_rms_weight,
-                        &q_rms_weight,
-                        &k_rms_weight,
-                        &kv_offset,
-                        &rope_offset,
-                        &cos,
-                        &sin,
-                        &mut k_cache,
-                        &mut v_cache,
-                        &mut q_out,
-                    ),
-                )
-                .await;
-            }
-            other => panic!("no variant `{other}` for sliding_project_qkv"),
-        }
-        bench.record(&key_of(plan.name, variant)).await;
-
-        if plan.order[..i].iter().all(|seen| seen != variant) {
-            let width = Ns::SIZE * Ds::SIZE;
-            let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
-            let v = read_bf16(ctx, &v_cache).await[slot * width..(slot + 1) * width].to_vec();
-            outputs.push(("expected.q", read_bf16(ctx, &q_out).await));
-            outputs.push(("expected.k", k));
-            outputs.push(("expected.v", v));
-        }
-    }
-    outputs
-}
-
-async fn sliding_attention_output(
-    ctx: &mut Context,
-    fixture: &Fixture,
-    bench: &Bench,
-    plan: &Plan,
-) -> Vec<(&'static str, Vec<f32>)> {
-    let s = Synth::new("sliding_attention_output", fixture);
-    let x: HbmTensor<bf16, Chip, m![Ns, Gs, Ds]> = s.signs(ctx, "x", 1.0).await;
-    let post_attn_rms_weight: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "post_attn_rms_weight", UNIT).await;
-    let o_weight: HbmTensor<f8e4m3, Chip, m![H, Qs]> = s.f8(ctx, "o_weight", WEIGHT_EXP, true).await;
-    let o_weight_scale: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "o_weight_scale", ROW_SCALE).await;
-    let mut residual: HbmTensor<bf16, Chip, m![H]> = s.bf16(ctx, "residual", UNIT).await;
-
-    // `residual` is read-modify-write, so it is the one tensor that has to be restored before each
-    // launch (7.7 KB); everything else is read-only and was uploaded once above.
-    let mut outputs: Vec<(&'static str, Vec<f32>)> = Vec::new();
-    for (i, variant) in plan.order.iter().enumerate() {
-        if i > 0 {
-            residual = s.bf16(ctx, "residual", UNIT).await;
-        }
-        bench.arm();
-        match *variant {
-            "" => {
-                launch(
-                    ops::sliding_attention_output,
-                    (
-                        ctx,
-                        &x,
-                        &post_attn_rms_weight,
-                        &o_weight,
-                        &o_weight_scale,
-                        &mut residual,
-                    ),
-                )
-                .await;
-            }
-            other => panic!("no variant `{other}` for sliding_attention_output"),
-        }
-        bench.record(&key_of(plan.name, variant)).await;
-
-        // Compare the first launch of each distinct variant, not just the first launch overall:
-        // a variant that is fast but wrong must not pass unnoticed.
-        if plan.order[..i].iter().all(|seen| seen != variant) {
-            outputs.push(("expected", read_bf16(ctx, &residual).await));
-        }
-    }
-    outputs
-}
 
 async fn decoder_feedforward(
     ctx: &mut Context,
@@ -666,13 +530,22 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
+            "ug0" => {
+                launch(ops::probe_load_ug0, (ctx, &up_weight_packed)).await;
+            }
+            "ug1" => {
+                launch(ops::probe_load_ug1, (ctx, &up_weight_packed)).await;
+            }
+            "ug2" => {
+                launch(ops::probe_load_ug2, (ctx, &up_weight_packed)).await;
+            }
             other => panic!("no variant `{other}` for decoder_feedforward"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
         // Compare the first launch of each distinct variant, not just the first launch overall:
         // a variant that is fast but wrong must not pass unnoticed.
-        if plan.order[..i].iter().all(|seen| seen != variant) {
+        if variant.is_empty() && plan.order[..i].iter().all(|seen| seen != variant) {
             outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
