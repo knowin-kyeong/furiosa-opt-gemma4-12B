@@ -295,3 +295,129 @@ fn apply_output_channel_scale(
 
     output
 }
+
+// ---------------------------------------------------------------------------------------------
+// V287: the Q/K/V weights on half the slices. V286 timed the query weight's hardware load at 612-630 B/cycle at
+// 16-32 rows per live slice against 505-520 at 8, and qkv's critical path is its DMA FIFO. Live slices sit at even
+// indices so every DMN still takes traffic; x stays replicated on every slice and is reshaped onto the live half.
+// ---------------------------------------------------------------------------------------------
+type QueryRowsH2 = m![Qs / 16 % 128, 1 # 2];
+pub(crate) type QueryWeightH2 = DmTensor<f8e4m3, Chip, QueryClusters, QueryRowsH2, m![Qs % 16, H]>;
+
+pub(crate) fn load_query_weight_h2(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) -> QueryWeightH2 {
+    weight.to_dm(&mut ctx.tdma)
+}
+
+type KvRowsH2 = m![Ps / 8 % 128, 1 # 2];
+pub(crate) type KvWeightH2 = DmTensor<f8e4m3, Chip, KvClusters, KvRowsH2, m![Ps % 8, H]>;
+
+pub(crate) fn load_kv_weight_h2(ctx: &mut Context, weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>) -> KvWeightH2 {
+    weight.to_dm(&mut ctx.tdma)
+}
+
+pub(crate) fn project_query_h2(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    weight_f8: &QueryWeightH2,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
+    // x (two f8 pieces whose sum is bf16 x times a power of two) is replicated onto every
+    // slice of both clusters. Each weight packet is streamed twice (the Dummy2 time axis) so
+    // the Time Reducer adds the dot products with the two pieces.
+    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRowsH2, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRowsH2, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRowsH2, m![Qs % 16]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Qs % 16, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Qs % 16, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Qs % 16, H / 64, Dummy2], m![H % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Qs % 16]>()
+        .contract_lane::<m![Qs % 16], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Qs / 4 % 4], m![Qs % 4 # 16]>()
+        .commit_trim::<m![Qs % 4]>()
+        .commit();
+
+    // The per-channel weight scale is applied by the query RMSNorm that follows (loaded there
+    // in the head layout with eight descriptors instead of 512 here).
+    // Each cluster holds four heads spread over 64 slices x 8 rows each; a ring-64 gather
+    // puts every head on one slice, the layout the query RMSNorm and RoPE work in, without
+    // leaving the cluster (the two clusters then post-process their four heads in parallel).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Gs, Ds / 16, 1 # 2], m![Ds % 16]> =
+        unsafe { contraction.view().reshape() };
+    // V287: 32 live slices x 16 rows per head, padding innermost; the ring is still 64 slices and every head lands on
+    // the slice HeadSlicesPerCluster puts it on.
+    let gathered: DmTensor<bf16, Chip, HeadClusters, m![Ns % 4, 1 # 32, 1 # 2], m![Gs, Ds]> = ctx
+        .main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 16]>()
+        .switch::<m![Ns % 4, 1 # 32, 1 # 2], m![Gs, Ds / 16]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 2 })
+        .collect::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .commit_trim::<m![Ds % 16]>()
+        .commit();
+    unsafe { gathered.reshape() }
+}
+
+fn project_one_kv_matrix_h2(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH2, m![1], m![Dummy2, H]>,
+    weight_f8: &KvWeightH2,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+    let contraction: DmTensor<bf16, Chip, KvClusters, KvRowsH2, m![Ps % 8]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Ps % 8, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Ps % 8, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps % 8, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ps % 8]>()
+        .contract_lane::<m![Ps % 8], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Ps / 4 % 2], m![Ps % 4 # 16]>()
+        .commit_trim::<m![Ps % 4]>()
+        .commit();
+
+    // The per-channel weight scale is applied by the head RMSNorm that follows.
+    // Ring-64 gather to one head per slice within the cluster (see project_query).
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds / 8, 1 # 2], m![Ds % 8]> =
+        unsafe { contraction.view().reshape() };
+    let gathered: DmTensor<bf16, Chip, HeadClusters, m![Ns % 4, 1 # 32, 1 # 2], m![Ds]> = ctx
+        .main
+        .begin(scaled)
+        .fetch::<m![1], m![Ds % 8 # 16]>()
+        .switch::<m![Ns % 4, 1 # 32, 1 # 2], m![Ds / 8]>(SwitchConfig::Broadcast1 { slice1: 32, slice0: 2 })
+        .collect::<m![Ds / 8], m![Ds % 8 # 16]>()
+        .commit_trim::<m![Ds % 8]>()
+        .commit();
+    unsafe { gathered.reshape() }
+}
+
+pub(crate) fn project_key_value_h2(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    k_weight: &KvWeightH2,
+    v_weight: &KvWeightH2,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRowsH2, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH2, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let k = project_one_kv_matrix_h2(ctx, &x_trf, k_weight);
+    let v = project_one_kv_matrix_h2(ctx, &x_trf, v_weight);
+
+    (k, v)
+}
