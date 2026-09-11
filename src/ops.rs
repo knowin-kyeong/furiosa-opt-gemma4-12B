@@ -272,7 +272,7 @@ pub fn decoder_feedforward(
     // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
     // the pre-FF normalization and the final residual add.
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
-    let x = shared::rmsnorm::normalize_reduced_f32::<Cluster>(ctx, &residual, pre_ff_rms_weight);
+    let x = shared::rmsnorm::normalize_reduced_f32_fused::<Cluster>(ctx, &residual, pre_ff_rms_weight);
 
     // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
     // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
