@@ -417,3 +417,27 @@ pub fn probe_load_c53(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
         .to_trf();
 }
+
+/// V297 probe: q_weight with slice = row % 256 inside each cluster: every read is one 3,840-byte row.
+#[device(chip = 1)]
+pub fn probe_load_qi1(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![Qs / 256 % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs % 256], m![1], m![Qs / 256 % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs / 256 % 8], 1, m![Qs / 256 % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs / 256 % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs / 256 % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V297 probe: q_weight with slice = (row / 2) % 256 inside each cluster: every read is two rows (7,680 bytes).
+#[device(chip = 1)]
+pub fn probe_load_qi2(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 2 % 256], m![Qs / 512 % 4, Qs % 2, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 2 % 256], m![1], m![Qs / 512 % 4 = 1, Qs % 2, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs / 512 % 4], 1, m![Qs / 512 % 4 = 1 # 4, Qs % 2, H]>(0))
+        .fetch::<m![Qs / 512 % 4 = 1, Qs % 2, H / 32], m![H % 32]>()
+        .collect::<m![Qs / 512 % 4 = 1, Qs % 2, H / 32], m![H % 32]>()
+        .to_trf();
+}

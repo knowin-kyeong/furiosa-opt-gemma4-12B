@@ -395,7 +395,7 @@ const BASE: &[&str] = &[""; REPS];
 const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
-const QKV_SWEEP: &[&str] = &["", "c01", "c53", "c53", "c01", "c01", "c53", "c53", "c01", "c0", "c1", "c01", "c53", ""];
+const QKV_SWEEP: &[&str] = &["", "c01", "qi1", "qi2", "qi1", "c01", "qi2", "c01", "qi1", "qi2", "c01", "qi2", "qi1", ""];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
 
@@ -544,11 +544,17 @@ async fn sliding_project_qkv(
             "c53" => {
                 launch(ops::probe_load_c53, (ctx, &q_weight)).await;
             }
+            "qi1" => {
+                launch(ops::probe_load_qi1, (ctx, &q_weight)).await;
+            }
+            "qi2" => {
+                launch(ops::probe_load_qi2, (ctx, &q_weight)).await;
+            }
             other => panic!("no variant `{other}` for sliding_project_qkv"),
         }
         bench.record(&key_of(plan.name, variant)).await;
 
-        if !variant.starts_with('c') && plan.order[..i].iter().all(|seen| seen != variant) {
+        if variant.is_empty() && plan.order[..i].iter().all(|seen| seen != variant) {
             let width = Ns::SIZE * Ds::SIZE;
             let k = read_bf16(ctx, &k_cache).await[slot * width..(slot + 1) * width].to_vec();
             let v = read_bf16(ctx, &v_cache).await[slot * width..(slot + 1) * width].to_vec();
