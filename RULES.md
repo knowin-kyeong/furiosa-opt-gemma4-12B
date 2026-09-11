@@ -450,7 +450,39 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0p 2026-09-11 — 레지스터 직접 쓰기 라운드: 가짜 −4.3%를 잡았다 (가장 최신, 여기서 시작할 것)
+### 10.0q 2026-09-11 — 실물 타임라인을 얻었다: 동기화 대기와 명령 순서 (가장 최신, 여기서 시작할 것)
+
+**상태 한 줄.** 공식 최고 **7.0314** 그대로 (2위, 1위 #663 **7.2164**). 코드 SOTA **`V273_submit`** 그대로, 채택 없음.
+`V273_submit` draw 루프가 pod `/root/drawloop.sh`로 돈다(`/root/drawloop_V273_submit.log`; 도는 동안 `/root/lab3` 건드리지 말 것).
+
+#### ① 도구: 실물 span 타임라인 (`V280_hw_span_dump`)
+- 테스트 바이너리가 `main` 첫 줄에서 `TUC_PROFILE_LEVEL=trace`를 켜고 span `name`을 기록한다 → launch당 ffn 144 · qkv 82 · attn 24 span
+  (`DMA`, `Renegade::TuExec`, `StoVrf`/`StoTrf`/`StoTab`, `Cluster`). 새 가설은 **정적 스케줄보다 먼저 이 span으로** 본다.
+- 판독법: SPAN 줄(도착 순서, 정렬 안 됨)을 정렬하고 `Cluster` 구간, DMA 합집합의 빈 구간, 동기화와 함께 끝나는 긴 TuExec을 찾는다.
+- 채택 판정은 여전히 **trace 없는** 짝비교 잡 + 변형 먼저 잡 + 제출 검증이다.
+
+#### ② 판독 (V273 코드)
+1. **`Cluster` span = 클러스터 간 HBM store 뒤 ExplicitSync 대기, 실물 0.4~15k cycle이고 같은 코드에서도 launch마다 무작위다** (정적 600).
+   ffn 9개 합 32.4k(11%), qkv 16.6k(16%), attn post-store 4~14k. **store 하나 = 동기화 하나**, `dma_gather_unscaled`도 gather마다 하나.
+2. 동기화 뒤에 나열된 Sub staging은 대기 끝까지 멈추고, attn의 x reload는 대기가 끝나야 시작한다 → **attn launch 분산(42k ↔ 49k)의 주성분이자 공식 draw 복권의 큰 몫.**
+3. PE는 명령 목록을 정적 begin 순서로 걸으며 입력이 준비될 때까지 멈춘다(attn tile1 로드 발행이 tile0 로드 끝까지, qkv Q 로드가 x2 동기화 + switch 뒤로 밀린다).
+   서로 다른 버퍼로의 로드는 겹쳐 돌 수 있다(`qb`: weight 로드 셋). **그러나 같은 버퍼의 타일 로드는 겹치지 않고, 겹치는 메모리 트래픽은 서로를 늦춘다(V282 +17%).**
+4. 같은 잡 qkv: base 102,973 · `qb` 89,648 · `qa` 114,226(vs 100,682) — 순서·동기화 위치가 수만 cycle을 좌우한다. 올바른 변형으로 `qb`의 순서를 얻는 법은 아직 없다.
+
+#### ③ 이번 라운드 실패 (다시 하지 말 것)
+| 시도 | 결과 |
+|---|---|
+| `V281` BC (attn norm 꼬리를 두 클러스터에서) | 대기 길이는 구조와 무관 — 기각 |
+| `V282` ST (O-weight 타일을 한 버퍼로) | 정적 순서는 바뀌었지만 실물 +17% — 기각 |
+| ffn store 병합 m1 / m2 | 컴파일러 크래시(HBM `[Dummy2, 1 # 8]`) / LIR ICE |
+| RoPE head-layout gather R1b | 컴파일은 되나 동기화 수 그대로 + 인덱스 단위 변환 필요 — 보류 |
+
+#### ④ 남은 레버 후보
+- **임계 경로 위의 동기화 수를 줄이는 구조.** qkv x2 HBM hop(store + 동기화 + x8 로드)을 클러스터마다 x path를 돌려 switch(gather → 재정렬 fetch → broadcast)로 대체 — 설계가 크고 V250(switch 벌크 이동은 느림)과 겨뤄야 한다.
+- qkv에서 목록상 Q 로드 앞에 있는 모든 것(입력 norm + hi/lo 분해 ~13k 실물 + x2 동기화)을 줄이면 Q·K 체인 전체가 당겨진다. V263 융합 norm은 qkv에서 +0.32%(11/32)로 미채택이었다 — span으로 체인이 실제로 당겨지는지부터 볼 것.
+- draw는 싸고 분산이 크다(①-2): 코드 SOTA로 계속 뽑는다(§5.4).
+
+### 10.0p 2026-09-11 — 레지스터 직접 쓰기 라운드: 가짜 −4.3%를 잡았다
 
 **상태 한 줄.** 공식 최고 **7.0314** 그대로 (2위, 1위 #663 **7.2164**). 코드 SOTA **`V273_submit` `331104b`** 그대로.
 V273 draw 누적 7회, 최고 6.7103 — 기록을 못 넘었다. 이번 라운드에 채택된 변경은 없다.
