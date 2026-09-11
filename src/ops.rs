@@ -348,3 +348,39 @@ pub fn final_norm_and_logits(
 
     capped.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
+
+/// V323 probe: production layout, 1920 / 1920 rows, 120-row groups.
+#[device(chip = 1)]
+pub fn probe_attn_load_sym(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 32, m![H % 120, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V323 probe: 2048 / 1792 rows (53.3% on cluster 0), 128-row groups.
+#[device(chip = 1)]
+pub fn probe_attn_load_a53(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H # 4096 / 2048], m![H # 4096 % 2048 / 128, Qs / 256], m![H # 4096 % 128, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H # 4096 / 2048], m![H # 4096 % 2048 / 128, Qs / 256], m![1], m![H # 4096 % 128, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 32, m![H # 4096 % 128, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H # 4096 % 128], m![Qs % 256 = 32]>()
+        .collect::<m![H # 4096 % 128], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V323 probe: 2560 / 1280 rows (66.7% on cluster 0), 160-row groups.
+#[device(chip = 1)]
+pub fn probe_attn_load_a67(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H # 5120 / 2560], m![H # 5120 % 2560 / 160, Qs / 256], m![H # 5120 % 160, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H # 5120 / 2560], m![H # 5120 % 2560 / 160, Qs / 256], m![1], m![H # 5120 % 160, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 32, m![H # 5120 % 160, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H # 5120 % 160], m![Qs % 256 = 32]>()
+        .collect::<m![H # 5120 % 160], m![Qs % 256 = 32]>()
+        .to_trf();
+}
