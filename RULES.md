@@ -456,7 +456,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 **실측으로 확정한 사실 (RESULTS `V284`~`V288`, 메모리 `hardware-span-profiler`)**
 
-1. **0.6.0은 모든 `DmaStore`(scatter 포함) 뒤에 `ExplicitSync`를 넣는다.** PE C 프로그램(`DUMP_PE_PROGRAM=<dir>` → `code_0.c`)에서 이것은
+1. **0.6.0은 store한 HBM을 다시 읽는 로드 앞(과 커널 끝)에 `ExplicitSync`를 넣는다** — V273 세 커널에서는 모든 `DmaStore`(scatter 포함) 뒤에 동기화가 붙어 'store마다 하나'로 보였지만, 다시 읽지 않는 dummy store를 attn 앞쪽에 넣자 store 3개에 동기화 2개였다(같은 날 밤 정정). PE C 프로그램(`DUMP_PE_PROGRAM=<dir>` → `code_0.c`)에서 이것은
    두 클러스터 master PE 간 IPC다: `sync_intra_chip_cluster(n)`이 상대 클러스터 pe4에 코어 인터럽트로 타임스탬프 n을 push하고,
    `wait_sync_intra_chip_cluster(n)`이 상대의 push를 기다린다. 두 호출은 서로 다른 queue block에 흩어져 있고 양 클러스터 프로그램이 대칭이다.
 2. **DMA 명령은 전역 FIFO로 완료된다** — span 로그 8개, 같은 launch 안 DMA 쌍 18,928개 중 나중에 발행된 명령이 먼저 끝난 경우 0건.
