@@ -394,3 +394,26 @@ pub fn probe_load_c01(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Q
         .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
         .to_trf();
 }
+
+/// V295 probe: q_weight rows 0..2559 into cluster 0 only and rows 2560..4095 into cluster 1 only.
+#[device(chip = 1)]
+pub fn probe_load_c53(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    // Cluster 0 alone: the first 5 of 8 row blocks, 16 rows per slice.
+    let w0: DmTensor<f8e4m3, Chip, m![1 # 2], m![Qs / 16], m![Qs % 16, H]> =
+        q_weight.view().tile::<m![Qs / 512], 5, m![Qs / 512 = 5 # 8, Qs % 512, H]>(0).to_dm(&mut ctx.tdma);
+    // Cluster 1 alone: the last 3 blocks (all of them have Qs / 2048 = 1 when blocks0 >= 4, see the split below).
+    let w1: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![Qs % 8, H]> =
+        q_weight.view().tile::<m![Qs / 512], 3, m![Qs / 512 = 3 # 8, Qs % 512, H]>(5).to_dm(&mut ctx.tdma);
+    let _keep0: TrfTensor<f8e4m3, Chip, m![1 # 2], m![Qs / 16], m![1], m![Qs % 16 = 1, H]> = ctx
+        .sub
+        .begin(w0.view().tile::<m![Qs % 16], 1, m![Qs % 16 = 1 # 16, H]>(0))
+        .fetch::<m![Qs % 16 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 16 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+    let _keep1: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(w1.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
