@@ -358,3 +358,39 @@ pub fn final_norm_and_logits(
 
     capped.view().to_hbm_view(&mut ctx.tdma, out.view_mut());
 }
+
+/// V294 probe: q_weight rows 0..2048 loaded into cluster 0 only (production qkv layout), kept alive by a one-row TRF staging.
+#[device(chip = 1)]
+pub fn probe_load_c0(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![Qs % 8, H]> = q_weight.view().tile::<m![Qs / 2048], 1, m![Qs / 2048 = 1 # 2, Qs % 2048, H]>(0).to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V294 probe: q_weight rows 2048..4096 loaded into cluster 1 only (production qkv layout), kept alive by a one-row TRF staging.
+#[device(chip = 1)]
+pub fn probe_load_c1(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![Qs % 8, H]> = q_weight.view().tile::<m![Qs / 2048], 1, m![Qs / 2048 = 1 # 2, Qs % 2048, H]>(1).to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
+
+/// V294 probe: q_weight rows 0..4096 loaded into both clusters (the production split) (production qkv layout), kept alive by a one-row TRF staging.
+#[device(chip = 1)]
+pub fn probe_load_c01(ctx: &mut Context, q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![Qs % 8, H]> = q_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![Qs / 8 % 256], m![1], m![Qs % 8 = 1, H]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 8], 1, m![Qs % 8 = 1 # 8, H]>(0))
+        .fetch::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .collect::<m![Qs % 8 = 1, H / 32], m![H % 32]>()
+        .to_trf();
+}
