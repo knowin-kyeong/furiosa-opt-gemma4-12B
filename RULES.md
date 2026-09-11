@@ -500,6 +500,8 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
   **정적 makespan은 이번 세션 네 번 모두 실물의 부호를 맞췄다**(V305 +5.6k → +14.1k, V306 −1.6k → −4.9k, V307 +76 → +90, V308 +1.7k → +1.9k) — 구조·순서 후보는 컴파일 + `--dump-schedule`로 먼저 거른다.
   도구: `BEAM_SEARCH_TRACE_DUMP_PATH` 경로 추출은 scratchpad `beampath.py`(pod `/root/tk/`), 순서 강제 A/B는 `probe_build.sh <lab> <kernel> <order> <tag>` + `pairs_lab.sh`(첫 잡 뒤 `rngd rerun`).
   캐시에 커널이 있으면 빔 추적이 안 나온다 — `target/furiosa-opt` 아래 그 커널 파일을 지우고 컴파일할 것.
+- **V309(qkv 꼬리 순서 강제) 16짝 중립(−0.3%), 순서 스크린 8종:** 빔 탐색의 ffn 순서는 시험한 대안보다 정적으로 모두 같거나 좋고, qkv는 RoPE 스테이징을 Q 앞에 둘 때만 정적 −623.
+  **소스 생성 순서는 스케줄을 바꾸지 않는다**(RoPE 스테이징을 첫 호출로 떼어도 스케줄 동일) — 강제 순서의 이득은 구조 변경으로만 옮길 수 있다. 순서 조정 계열은 여기서 접는다.
 - 리더보드: `V293_submit` draw **7.2264**(091cfa9f: qkv 90,833 / attn 38,455 / ffn 284,802)로 **공식 최고 경신, 2위**; 1위 #663 7.3097(ffn 268,129). 격차는 ffn.
 
 ### 10.0r 2026-09-11 오후 — 동기화의 정체, 순서를 강제하는 도구, 그리고 네 번의 기각
