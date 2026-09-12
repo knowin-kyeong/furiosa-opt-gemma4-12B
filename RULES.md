@@ -489,8 +489,16 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - 체인은 `vchain.sh <lab> <branch> <TAG> <kernel> <arm>...`(덤프 → 빌드 → 첫 잡 정확도 게이트 → rerun 15).
 
 **다음 후보.**
-- V365 결과에 따라 ffn down 로드 순서 구조화.
-- ffn O1b · T1(§10.0v).
+- ~~V365 결과에 따라 ffn down 로드 순서 구조화~~ → V365 기각(+3.61%, 0/8).
+- T1 채택(V366 → V367_submit).
+- **T1 뒤 ffn 임계 사슬**(V366_r3 t1#1, 266.4k — 이것부터 볼 것):
+  - geglu store 둘(175.9~177.6k) → **ExplicitSync(214) 6.5k**(184.8~191.3k)
+  - inv_s reload 1.0k → LUT 테이블 로드 521(1.9k) → **down1 19.4k** → 테이블 559(2.0k) → **down2 18.6k** → 테이블 585(2.8k) → **down3 13.9k**
+  - pass A(Main 1836) 5.2k → pass B(Main 640) 2.3k
+  - down store 2.1k → sync 1.0k → reload 1.1k
+  - norm 꼬리(ms 1.1k · sqrt 0.4k · rms VRF 0.4k · final 1.0k) → store 0.9k
+  - LUT 테이블 로드는 LUT pass마다 컴파일러가 낸다(타일 수 = 테이블 수, 타일 줄이기는 V314에서 손해).
+  - 남은 후보는 O1b(inv_s store · reload · ring-256 switch 제거, 사슬 위 몫 ≈ −1k)뿐이고 모두 한 자릿수 k다.
 - qkv는 머리 TUC 대기(작은 로드와 x 경로 pass가 PE 순서에서 섞임)를 pass 수를 줄여서만 없앨 수 있다(V353 fc −0.9%는 cq와 비가산).
 
 ### 10.0v 2026-09-12 저녁 — ffn 두 건 채택(V348 · V349 → V350_submit), 세션 이관
