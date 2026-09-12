@@ -400,8 +400,10 @@ const QKV_SWEEP: &[&str] = &[""; 3];
 /// V351: production ("") and the four tail-store arms, each launched 4 times; the shim rotates the start by wall-clock
 /// minute so reruns change which arm launches first.
 const ATTN_SWEEP: &[&str] = &[
-    "c", "", "", "c", "c", "", "", "c",
-    "", "c", "c", "", "", "c", "c", "",
+    "c", "cx", "",
+    "cx", "", "c",
+    "", "c", "cx",
+    "c", "cx", "",
 ];
 
 const PLAN: &[Plan] = &[
@@ -518,6 +520,20 @@ async fn sliding_attention_output(
             "c" => {
                 launch(
                     ops::sliding_attention_output_c,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "cx" => {
+                launch(
+                    ops::sliding_attention_output_cx,
                     (
                         ctx,
                         &x,
