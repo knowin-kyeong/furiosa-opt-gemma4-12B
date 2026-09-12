@@ -456,6 +456,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - 공식: 1위 vinxst 7.4769 · **우리 2위 7.4197**(`a9c7c0d6`, V313_submit draw) · 3위 #663 7.3402(attn 36,768).
 - 코드 SOTA 사슬: V313_submit → V340_submit(attn 비균등 타일, −1.2%) → **V348_submit**(88b0d90; ffn down 타일이 x 조각을 Lane에 두고 pass A 안에서 합침, 16/16 −1.27%, Arena 25/25 ×2) → **V350_submit**(aafc5a8; + geglu hi/lo store 하나).
   - V350 짝비교: fo − 생산 16/16 −2.28%, fo − f1d 16/16 −1.42%.
+  - **V350_submit 첫 공식 제출: `87fcde40`(12:48 UTC) 6.7472** (qkv 95,844 · attn 47,282 · ffn 269,688) — draw 한 번이다(같은 코드의 draw σ≈3.5%, V313/V340 평균 ≈6.85~6.87). 코드 판단에는 쓰지 않는다. 이후 draw 체인이 V350_submit을 계속 뽑는다.
   - **V350_submit 제출 검증 통과**: Arena job 22596 25/25 PASS + `rngd rerun` 25/25 PASS(pod lab2, `/root/tk/v350sub_verify.out`; ffn 첫 launch 269,520 · 271,309로 새 코드 확인).
 - draw:
   - V313_submit 96회(평균 6.872, σ 3.55%, 최고 7.4197) → V340_submit 약 72회(평균 ≈6.85, 최고 7.2491).
