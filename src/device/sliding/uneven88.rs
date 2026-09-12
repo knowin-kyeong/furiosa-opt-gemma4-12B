@@ -128,6 +128,6 @@ pub(crate) fn project_output_88(
     tails
         .view()
         .tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 # 120]>(88)
-        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 128]>(88));
+        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 120 # 128]>(88));
     stored
 }
