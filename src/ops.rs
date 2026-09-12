@@ -261,9 +261,9 @@ pub fn sliding_attention_output_ub(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
-/// V346 harness kernel (arm v6): uneven tiles at R = 88 (cluster 0 carries 63.3%); cluster 0's tail contraction feeds the
-/// contraction store, so tile1 is issued right behind tile0, and a cluster-0 store writes cluster 1's tail rows, so one
-/// full reload feeds the norm (src/device/sliding/uneven88.rs).
+/// V346 harness kernel (arm v6): uneven tiles at R = 88 (cluster 0 carries 63.3%); the contraction store reads the buffer
+/// cluster 0's tail contraction writes, so tile1 is issued right behind tile0, and the tail rows reach the reload buffer
+/// before the store's sync (src/device/sliding/uneven88.rs).
 #[device(chip = 1)]
 pub fn sliding_attention_output_v6(
     ctx: &mut Context,
@@ -274,8 +274,8 @@ pub fn sliding_attention_output_v6(
     residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
 ) {
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
-    let stored = sliding::uneven88::project_output_88(ctx, x, o_weight);
-    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &stored);
+    let (stored, contraction) = sliding::uneven88::project_output_88(ctx, x, o_weight);
+    let x = sliding::uneven88::load_reducing_88::<Cluster>(ctx, &stored, &contraction);
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
     let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
