@@ -410,3 +410,81 @@ pub fn probe_attn_load_stk(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .collect::<m![H % 120], m![Qs % 256 = 32]>()
         .to_trf();
 }
+
+/// V339 probe (reference): production tile structure -- rows 96 + 24 per 120-row group, both tiles on both clusters.
+#[device(chip = 1)]
+pub fn probe_attn_load_pt2(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 96, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 96, m![H / 120, H % 120 = 96 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 24, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 24, m![H / 120, H % 120 = 24 # 120, Qs]>(96)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 96, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 120 = 96, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 96], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 96], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 24, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H % 120 = 24, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 24], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 24], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V339 probe (uneven tiles, cluster 0 60%): tile0 = rows 0..3072 split evenly (96-row groups on both clusters), tile1 = rows
+/// 3072..3840 on cluster 0 only (48-row groups). Cluster 1's slices carry 96 rows, cluster 0's 144 (V321: the cluster-1 lag
+/// goes away only when its per-slice bytes shrink).
+#[device(chip = 1)]
+pub fn probe_attn_load_u60(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![H = 3072 % 96, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H], 3072, m![H = 3072 # 3840, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![H = 768 % 48, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H], 768, m![H = 768 # 3840, Qs]>(3072)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![1], m![H = 3072 % 96, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H = 3072 % 96, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H = 3072 % 96], m![Qs % 256 = 32]>()
+        .collect::<m![H = 3072 % 96], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![1], m![H = 768 % 48, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H = 768 % 48, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H = 768 % 48], m![Qs % 256 = 32]>()
+        .collect::<m![H = 768 % 48], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V339 probe (uneven tiles, cluster 0 53.3%): tile0 = rows 0..3584 split evenly (112-row groups), tile1 = rows 3584..3840 on
+/// cluster 0 only (16-row groups): cluster 0's slices carry 128 rows (exactly one 32 KB DM page), cluster 1's 112.
+#[device(chip = 1)]
+pub fn probe_attn_load_u53(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H = 3584 / 1792], m![H = 3584 % 1792 / 112, Qs / 256], m![H = 3584 % 112, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H], 3584, m![H = 3584 # 3840, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![H = 256 % 16, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H], 256, m![H = 256 # 3840, Qs]>(3584)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H = 3584 / 1792], m![H = 3584 % 1792 / 112, Qs / 256], m![1], m![H = 3584 % 112, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H = 3584 % 112, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H = 3584 % 112], m![Qs % 256 = 32]>()
+        .collect::<m![H = 3584 % 112], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![1], m![H = 256 % 16, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H = 256 % 16, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H = 256 % 16], m![Qs % 256 = 32]>()
+        .collect::<m![H = 256 % 16], m![Qs % 256 = 32]>()
+        .to_trf();
+}
