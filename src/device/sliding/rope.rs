@@ -604,11 +604,11 @@ pub(crate) fn apply_rope_heads_cc<C: M, S: M>(
     (result_q, result_k)
 }
 
-/// V361: `apply_rope_heads_cc` with each output half computed by one Vector Engine pair-mode pass. The pass reads a
-/// half and its partner half interleaved (`begin_interleaved`), unzips them into group 0 (the half) and group 1 (the
-/// partner), multiplies group 0 by that half of cos (Mul0) and group 1 by that half of sin (Mul1; one VRF per node)
-/// and zips them with an add: out_lo = x_lo * cos_lo + x_hi * sin_lo, out_hi = x_hi * cos_hi + x_lo * sin_hi, the
-/// arithmetic of the rotate_half passes. No rotate_half copies, no sin scratch pass, no product VRF staging.
+/// V361: `apply_rope_heads_cc` with each output half computed by one Vector Engine pair-mode pass. The pass reads both
+/// halves of every head alternately (the half axis innermost in Time), unzips them into group 0 (the low half) and
+/// group 1 (the high half), multiplies each group by its half of cos or sin (Mul0 / Mul1, one VRF per node) and zips
+/// them with an add: out_lo = x_lo * cos_lo + x_hi * sin_lo, out_hi = x_lo * sin_hi + x_hi * cos_hi, the arithmetic of
+/// the rotate_half passes. No rotate_half copies, no sin scratch pass, no product VRF staging.
 pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
     ctx: &mut Context,
     q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
@@ -680,15 +680,13 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .collect::<m![Ds / 8 % 16], m![Ds % 8]>()
         .to_vrf();
 
-    // Each fetch step reads one 8-element packet (one f32 flit after the cast) from the half, then one from the
-    // partner half: the grouping axis is innermost in Time.
+    // One fetch input per pass (lir overrides a single fetch base, so interleaving two views of q does not lower):
+    // q is regrouped as [Gs, half, Ds % 128] with the half innermost in Time, so each fetch step reads an 8-element
+    // packet of the low half and then its partner packet of the high half. Group 0 is always the low half.
     let mut result_q: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = DmTensor::new();
 
     ctx.main
-        .begin_interleaved::<Dummy2, _, _, _, _, _>(
-            q.view().tile::<m![Ds / 128], 1, m![Gs, Ds / 128 = 1 # 2, Ds % 128]>(0),
-            q.view().tile::<m![Ds / 128], 1, m![Gs, Ds / 128 = 1 # 2, Ds % 128]>(1),
-        )
+        .begin(unsafe { q.view().reshape::<Chip, C, S, m![Gs, Dummy2, Ds % 128]>() })
         .fetch::<m![Gs, Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .fetch_cast::<f32>()
         .collect::<m![Gs, Ds / 8 % 16, Dummy2], m![Ds % 8]>()
@@ -705,18 +703,15 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .commit_view(result_q.view_mut().tile::<m![Ds / 128], 1, m![Gs, Ds / 128 = 1 #{!} 2, Ds % 128]>(0));
 
     ctx.main
-        .begin_interleaved::<Dummy2, _, _, _, _, _>(
-            q.view().tile::<m![Ds / 128], 1, m![Gs, Ds / 128 = 1 # 2, Ds % 128]>(1),
-            q.view().tile::<m![Ds / 128], 1, m![Gs, Ds / 128 = 1 # 2, Ds % 128]>(0),
-        )
+        .begin(unsafe { q.view().reshape::<Chip, C, S, m![Gs, Dummy2, Ds % 128]>() })
         .fetch::<m![Gs, Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .fetch_cast::<f32>()
         .collect::<m![Gs, Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Gs, Ds / 8 % 16, 1 # 2], m![Gs, Ds / 8 % 16]>()
         .vector_narrow_split::<m![Gs, Ds / 4 % 32], m![Ds % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, ())
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_hi)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &sin_hi, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &cos_hi)
         .vector_widen_concat::<m![Gs, Ds / 8 % 16], m![Ds % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
@@ -727,10 +722,7 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
     let mut result_k: DmTensor<bf16, Chip, C, S, m![Ds]> = DmTensor::new();
 
     ctx.main
-        .begin_interleaved::<Dummy2, _, _, _, _, _>(
-            k.view().tile::<m![Ds / 128], 1, m![Ds / 128 = 1 # 2, Ds % 128]>(0),
-            k.view().tile::<m![Ds / 128], 1, m![Ds / 128 = 1 # 2, Ds % 128]>(1),
-        )
+        .begin(unsafe { k.view().reshape::<Chip, C, S, m![Dummy2, Ds % 128]>() })
         .fetch::<m![Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds / 8 % 16, Dummy2], m![Ds % 8]>()
@@ -747,18 +739,15 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .commit_view(result_k.view_mut().tile::<m![Ds / 128], 1, m![Ds / 128 = 1 #{!} 2, Ds % 128]>(0));
 
     ctx.main
-        .begin_interleaved::<Dummy2, _, _, _, _, _>(
-            k.view().tile::<m![Ds / 128], 1, m![Ds / 128 = 1 # 2, Ds % 128]>(1),
-            k.view().tile::<m![Ds / 128], 1, m![Ds / 128 = 1 # 2, Ds % 128]>(0),
-        )
+        .begin(unsafe { k.view().reshape::<Chip, C, S, m![Dummy2, Ds % 128]>() })
         .fetch::<m![Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .fetch_cast::<f32>()
         .collect::<m![Ds / 8 % 16, Dummy2], m![Ds % 8]>()
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Ds / 8 % 16, 1 # 2], m![Ds / 8 % 16]>()
         .vector_narrow_split::<m![Ds / 4 % 32], m![Ds % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, ())
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_hi)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &sin_hi, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &cos_hi)
         .vector_widen_concat::<m![Ds / 8 % 16], m![Ds % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
