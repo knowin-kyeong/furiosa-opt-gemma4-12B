@@ -450,7 +450,46 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0v 2026-09-12 저녁 — ffn 두 건 채택(V348 · V349 → V350_submit), 세션 이관 (가장 최신, 여기서 시작할 것)
+### 10.0w 2026-09-13 새벽 — qkv 꼬리 · 머리 구조 넷 기각(V361~V364), ffn 동기화 창 탐침(V365) 진행, 세션 이관 (가장 최신, 여기서 시작할 것)
+
+**상태.**
+- 공식: 1위 vinxst 7.4769 · **우리 2위 7.4197**(`a9c7c0d6`, V313_submit draw) 그대로.
+- 코드 SOTA: **`V360_submit`**(28f8091 = V350_submit + qkv head norm · RoPE의 `commit_cast`, V355 cq 25/32 −1.6%, Arena 25/25 ×2).
+- draw: V350_submit 12회(최고 7.1187, 평균 ≈6.86) 뒤 **16:04(pod 시각)부터 V360_submit**(`drawchain_follow.sh V360_submit 1 8`). 첫 draw 6.9998(91,576 · 44,480 · 268,714). 점수 수집은 `bash /root/tk/v360scores.sh` → `/root/tk/v360_scores.txt`.
+
+**이번 라운드 — 전부 기각, 코드 SOTA 변화 없음.**
+- **V352y**: attn c(최종 pass `commit_cast`) 세 번째 배치 6/16 +0.17% → 합산 24/48, 기각.
+- **V361 pair-mode RoPE**: 0/16 +5.52%. 컴파일 한계 넷 확보(메모리 `vector-pair-mode-compile-limits`): pair 노드당 VRF 하나, resize 축은 fetch에서 못 쪼갬, 런타임 DM 입력 둘 interleave는 lir 불가(뷰 reshape + `Dummy2` 최내측으로 우회), i32 commit 최소 8 B.
+- **V362 `dma_gather_unscaled`**: 정확하지만 호출마다 인덱스 store + sync + scaled gather로 lowering → 11/32 ≈ +0.5%.
+- **V363 공유 HBM 인덱스 + scaled gather 둘**: 정확(인덱스에 head 축이 있으면 head마다 복제된다) · 6/16 +0.89%. **RoPE staging 대안은 닫는다** — 생산(gather 둘 + store 둘 + 로드 하나)이 국소 최적이고, 스케줄러는 무엇이 앞에 오든 gather를 V 로드 뒤에 둔다.
+- **V364 x 경로를 Q weight에 의존시켜 Q 로드를 맨 앞으로**(항등 `FmaF(gate, 0, x)`): 정적 순서는 의도대로 바뀌었지만 5/16 +0.63%. TUC 대기가 사라지지 않고 K 쪽 로드 앞으로 옮겨 가며, x 로드는 Q 로드와 겹쳐 대역폭을 나눈다.
+- 정적 makespan 부호가 이번 네 건 모두 실물과 같았다(V361 +821, V362 −204, V363 +856, V364 +1,057).
+
+**qkv 실물 임계 경로(warm, V355b_r3 cq#1 88.6k).** DMA FIFO 72k(weight 55k + 작은 명령 ~20k) + rope sync 3.4k + rope TU 꼬리 ~6.6k. V 경로는 v scatter 81.2k에 끝나 rope/k 경로가 7k 앞선다. ternary `FmaF`는 VRF 둘을 못 받는다(`(&Vrf, f32)` · `(Stash, f32)` · `(f32, f32)`만).
+
+**진행 중: V365 ffn 탐침(순서 강제).** 실물(V356_r3 ccf#1 273.2k)에서 **geglu store 뒤 ExplicitSync 15.7k 동안 DMA가 13.6k 논다**. 이미 발행된 DMA는 sync 중에도 도는데, down1~3 로드가 정적으로 sync 뒤에 있다.
+- 빔 이름(V360 ffn, `/root/tk/beam360_ffn_path.txt`): **T212** = geglu x2 store(`Dma.StoD`), T213 sync, T224 x2 reload, **T75 · T79 · T83** = down1 · down2 · down3 로드, T70 = down0.
+- 순서 파일 `T75 -> T212`(d1) · `+T79`(d12) · `+T83`(d123)의 정적 스크린: `/root/tk/screen_ffn_down.sh`(lab = V360_submit). 주의: 빔 이름은 스케줄 JSON의 tensor id와 **다르다**(첫 스크린이 틀린 이름으로 돌았다).
+- 실물 짝(두 바이너리 교대):
+  - `build_ordered.sh <lab> <branch> tmp_V365 <order> lab6` — lab6 = 순서 없는 A, 빌드 끝남.
+  - `pairab.sh lab6 <labB> V365 7`.
+  - 하네스 = `tmp_V365`(ffn 전용, 생산 arm만).
+- 이득이 크면 소스에서 같은 순서를 만드는 구조(down0 · down1 한 버퍼 등)를 찾는다.
+
+**pod 상태.**
+- lab = V360_submit(정적 스크린용)
+- lab2 = V362 · lab4 = V364 · lab5 = V363(모두 끝남)
+- lab6 = V365_A(빌드 완료)
+- lab3 = 건드리지 말 것
+- 새 브랜치는 GitHub에 push한 뒤 lab에서 `git fetch https://github.com/knowin-kyeong/furiosa-opt-gemma4-12B.git +tmp_X:tmp_X`로 받는다(lab4의 origin은 /root/lab3라 fetch하면 안 된다).
+- 체인은 `vchain.sh <lab> <branch> <TAG> <kernel> <arm>...`(덤프 → 빌드 → 첫 잡 정확도 게이트 → rerun 15).
+
+**다음 후보.**
+- V365 결과에 따라 ffn down 로드 순서 구조화.
+- ffn O1b · T1(§10.0v).
+- qkv는 머리 TUC 대기(작은 로드와 x 경로 pass가 PE 순서에서 섞임)를 pass 수를 줄여서만 없앨 수 있다(V353 fc −0.9%는 cq와 비가산).
+
+### 10.0v 2026-09-12 저녁 — ffn 두 건 채택(V348 · V349 → V350_submit), 세션 이관
 
 **상태 (12:40 UTC).**
 - 공식: 1위 vinxst 7.4769 · **우리 2위 7.4197**(`a9c7c0d6`, V313_submit draw) · 3위 #663 7.3402(attn 36,768).

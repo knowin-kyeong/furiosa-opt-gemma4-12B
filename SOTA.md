@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (1):** 코드 SOTA **`V360_submit`** 그대로. 이번 라운드 V361(pair-mode RoPE +5.5%) · V362(unscaled gather 중립) · V363(공유 HBM 인덱스 +0.9%) · V364(x 경로를 Q 로드 뒤로 +0.6%) · V352y(attn c 합산 24/48) 모두 기각. draw 체인은 V350_submit 12회(최고 7.1187) 뒤 **V360_submit으로 넘어갔다**(첫 draw 6.9998). 공식 최고 7.4197 그대로(2위). ffn geglu 동기화 창을 down 로드로 채우는 순서 강제 탐침 V365 진행 중. 세션 이관 RULES §10.0w.
+
 > **2026-09-12 (9):** 코드 SOTA → **`V360_submit`** (28f8091 = V350_submit + qkv head norm 셋과 RoPE 결과 pass 둘의 f32→bf16을 `commit_cast`로). V355 짝비교 cq − 생산 11/16 −1.62% · 확인 배치 V355b 14/16 −1.61%(p ≈ 0.004) → 합산 25/32 ≈ −1.6%(qkv). **Arena 25/25 PASS ×2**(job 23020 + rerun; 첫 launch qkv 90,429 · attn 42,792 · ffn 266,892). draw 체인 → V360_submit(돌던 V350 배치 뒤). 공식 최고 7.4197 그대로(2위).
 
 > **2026-09-12 (8):** 코드 SOTA → **`V350_submit`** (aafc5a8 = V348_submit + ffn geglu hi/lo store 하나). V350 짝비교 생산 대비 **16/16 −2.28%**, V348 f1d 대비 16/16 −1.42%. **Arena 25/25 PASS ×2**(job 22596 + rerun; ffn 첫 launch 269,520 · 271,309). draw 체인 → V350_submit(돌던 V340 배치 뒤). 공식 최고 7.4197 그대로(2위). 세션 이관 메모 RULES §10.0v.
