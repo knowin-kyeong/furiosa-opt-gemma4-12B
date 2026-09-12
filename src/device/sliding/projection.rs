@@ -417,3 +417,84 @@ pub(crate) fn project_key_value_hi(
 
     (k, v)
 }
+
+// ---------------------------------------------------------------------------------------------
+// V358: the K and V weights loaded into one DM buffer (two `Gs` tiles), so the two loads sit back to back in the DMA
+// queue. On hardware (jb_r1, production #1) three small DMAs -- the q_rms_weight load (1.4k), the cos gather (1.9k)
+// and the cos store (0.7k) -- sat between the K load (ends 50.8k) and the V load (issued 55.2k). V325 showed that one
+// buffer makes its two loads adjacent in the static order. Rows and contraction are unchanged (`project_one_kv_matrix_hi`).
+// ---------------------------------------------------------------------------------------------
+
+/// K (tile `Gs` = 0) and V (tile `Gs` = 1) weights side by side, 4 rows per slice each, rows interleaved within the head.
+pub(crate) type KvPairWeightH = DmTensor<f8e4m3, Chip, KvClusters, KvRowsH, m![Gs, Ps / 64 % 4, H]>;
+
+pub(crate) fn load_kv_pair_weight_hi(
+    ctx: &mut Context,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+) -> KvPairWeightH {
+    let mut kv: KvPairWeightH = DmTensor::new();
+    k_weight
+        .view()
+        .to_dm_view(&mut ctx.tdma, kv.view_mut().tile::<m![Gs], 1, m![Gs = 1 #{!} 2, Ps / 64 % 4, H]>(0));
+    v_weight
+        .view()
+        .to_dm_view(&mut ctx.tdma, kv.view_mut().tile::<m![Gs], 1, m![Gs = 1 #{!} 2, Ps / 64 % 4, H]>(1));
+    kv
+}
+
+fn project_one_kv_tile_hi(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH, m![1], m![Dummy2, H]>,
+    weight_f8: &KvPairWeightH,
+    tile: usize,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+    let contraction: DmTensor<bf16, Chip, KvClusters, KvRowsH, m![Ps / 64 % 4]> = ctx
+        .main
+        .begin(weight_f8.view().tile::<m![Gs], 1, m![Gs = 1 # 2, Ps / 64 % 4, H]>(tile))
+        .fetch::<m![Ps / 64 % 4, H / 64, Dummy2], m![H % 64]>()
+        .collect::<m![Ps / 64 % 4, H / 64, Dummy2, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps / 64 % 4, H / 64, Dummy2], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ps / 64 % 4]>()
+        .contract_lane::<m![Ps / 64 % 4], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![1], m![Ps / 64 % 4 # 16]>()
+        .commit_trim::<m![Ps / 64 % 4]>()
+        .commit();
+
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds % 64], m![Ds / 64]> =
+        unsafe { contraction.view().reshape() };
+    let gathered: DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds / 64, Ds % 64 / 4, Ds % 4]> = ctx
+        .main
+        .begin(scaled)
+        .fetch::<m![Ds / 64], m![1 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Ds / 64, Ds % 64]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Ds / 64, Ds % 64], m![1 # 16]>()
+        .transpose::<m![Ds / 64, Ds % 64 / 4], m![Ds % 4 # 16]>()
+        .commit_trim::<m![Ds % 4]>()
+        .commit();
+    unsafe { gathered.reshape() }
+}
+
+pub(crate) fn project_key_value_pair_hi(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![Dummy2, H]>,
+    kv_weight: &KvPairWeightH,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRowsH, m![Dummy2, H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH, m![1], m![Dummy2, H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![Dummy2, H / 32], m![H % 32]>()
+        .collect::<m![Dummy2, H / 32], m![H % 32]>()
+        .to_trf();
+
+    let k = project_one_kv_tile_hi(ctx, &x_trf, kv_weight, 0);
+    let v = project_one_kv_tile_hi(ctx, &x_trf, kv_weight, 1);
+
+    (k, v)
+}

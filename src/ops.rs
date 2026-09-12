@@ -228,6 +228,85 @@ pub fn sliding_project_qkv_fc(
     v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
 }
 
+/// V358 harness kernel (arm kv): production qkv with the K and V weights loaded into one DM buffer (two tiles), so the
+/// two loads sit back to back in the DMA queue.
+#[device(chip = 1)]
+pub fn sliding_project_qkv_kv(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H]>,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    q_weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+    k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    input_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    q_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    k_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    kv_offset: &HbmTensor<i32, Chip, m![1]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    k_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+) {
+    let q_weight = sliding::projection::load_query_weight_hi(ctx, q_weight);
+    let x = shared::xsw::load_blocks(ctx, x);
+    let x = shared::xsw::normalize_blocks_f32(ctx, &x, input_rms_weight);
+    let x2 = shared::xsw::stage_x_hi_lo_blocks(ctx, &x);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = shared::xsw::replicate_blocks(ctx, &x2);
+    let kv_weight = sliding::projection::load_kv_pair_weight_hi(ctx, k_weight, v_weight);
+    let q = sliding::projection::project_query_hi(ctx, &x, &q_weight);
+    let (k, v) = sliding::projection::project_key_value_pair_hi(ctx, &x, &kv_weight);
+    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &q, q_weight_scale, q_rms_weight);
+    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &k, k_weight_scale, k_rms_weight);
+    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &v, v_weight_scale);
+    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &q, &k, rope_offset, cos, sin);
+    q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
+    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
+    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+}
+
+/// V358 harness kernel (arm kvf): kv on top of V353 fc (fused bf16-committing input norm, no cast pass before the split).
+#[device(chip = 1)]
+pub fn sliding_project_qkv_kvf(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H]>,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    q_weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+    k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    input_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    q_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    k_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    kv_offset: &HbmTensor<i32, Chip, m![1]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    k_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+) {
+    let q_weight = sliding::projection::load_query_weight_hi(ctx, q_weight);
+    let x = shared::xsw::load_blocks(ctx, x);
+    let x = shared::xsw::normalize_blocks_bf16_fused(ctx, &x, input_rms_weight);
+    let x2 = shared::xsw::stage_x_hi_lo_blocks_bf16(ctx, &x);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = shared::xsw::replicate_blocks(ctx, &x2);
+    let kv_weight = sliding::projection::load_kv_pair_weight_hi(ctx, k_weight, v_weight);
+    let q = sliding::projection::project_query_hi(ctx, &x, &q_weight);
+    let (k, v) = sliding::projection::project_key_value_pair_hi(ctx, &x, &kv_weight);
+    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &q, q_weight_scale, q_rms_weight);
+    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &k, k_weight_scale, k_rms_weight);
+    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &v, v_weight_scale);
+    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(ctx, &q, &k, rope_offset, cos, sin);
+    q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
+    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
+    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+}
+
 #[device(chip = 1)]
 pub fn full_project_qkv(
     ctx: &mut Context,
