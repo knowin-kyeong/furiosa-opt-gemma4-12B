@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-12 (9):** 코드 SOTA → **`V360_submit`** (28f8091 = V350_submit + qkv head norm 셋과 RoPE 결과 pass 둘의 f32→bf16을 `commit_cast`로). V355 짝비교 cq − 생산 11/16 −1.62% · 확인 배치 V355b 14/16 −1.61%(p ≈ 0.004) → 합산 25/32 ≈ −1.6%(qkv). **Arena 25/25 PASS ×2**(job 23020 + rerun; 첫 launch qkv 90,429 · attn 42,792 · ffn 266,892). draw 체인 → V360_submit(돌던 V350 배치 뒤). 공식 최고 7.4197 그대로(2위).
+
 > **2026-09-12 (8):** 코드 SOTA → **`V350_submit`** (aafc5a8 = V348_submit + ffn geglu hi/lo store 하나). V350 짝비교 생산 대비 **16/16 −2.28%**, V348 f1d 대비 16/16 −1.42%. **Arena 25/25 PASS ×2**(job 22596 + rerun; ffn 첫 launch 269,520 · 271,309). draw 체인 → V350_submit(돌던 V340 배치 뒤). 공식 최고 7.4197 그대로(2위). 세션 이관 메모 RULES §10.0v.
 
 > **2026-09-12 (7):** 코드 SOTA → **`V348_submit`** (V340_submit + ffn down x 조각을 Lane에 두고 pass A 안에서 합침, 짝비교 16/16 −1.27%; Arena 25/25 PASS ×2, 88b0d90). V340_submit draw 60회 평균 ≈6.85 · 최고 7.2491 — 공식 최고 7.4197 그대로(2위; 1위 vinxst 7.4769, 3위 #663 7.3402). draw 체인 → V348_submit. 다음 후보 V349(geglu store 하나, −0.43% 13/16)의 합산을 V350에서 짝비교 중.
