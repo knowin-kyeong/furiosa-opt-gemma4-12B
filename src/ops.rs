@@ -223,6 +223,44 @@ pub fn sliding_attention_output_ut(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V342 harness kernel (arm ua): three uneven tiles -- rows 0..72 and 72..96 on both clusters (cluster 1 keeps the
+/// production two-tile rhythm), rows 96..120 of all groups on cluster 0 alone; tail rows overwritten after the reload.
+#[device(chip = 1)]
+pub fn sliding_attention_output_ua(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let (stored, tails) = sliding::uneven3::project_output_u3(ctx, x, o_weight);
+    let x = sliding::uneven3::load_reducing_tails_after::<Cluster>(ctx, &stored, &tails);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V342 harness kernel (arm ub): as ua, but the tail rows are written into the reload buffer first and the reload after
+/// the store's sync carries only rows 0..96 of every group.
+#[device(chip = 1)]
+pub fn sliding_attention_output_ub(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let (stored, tails) = sliding::uneven3::project_output_u3(ctx, x, o_weight);
+    let x = sliding::uneven3::load_reducing_tails_first::<Cluster>(ctx, &stored, &tails);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn full_attention_first_page(
     ctx: &mut Context,
