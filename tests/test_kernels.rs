@@ -396,10 +396,10 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[
-    "ug", "",
-    "", "ug",
-    "ug", "",
-    "", "ug",
+    "ix", "ug", "",
+    "ug", "", "ix",
+    "", "ix", "ug",
+    "ix", "ug", "",
 ];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
@@ -524,6 +524,32 @@ async fn sliding_project_qkv(
             "" => {
                 launch(
                     ops::sliding_project_qkv,
+                    (
+                        ctx,
+                        &x,
+                        &q_weight,
+                        &k_weight,
+                        &v_weight,
+                        &q_weight_scale,
+                        &k_weight_scale,
+                        &v_weight_scale,
+                        &input_rms_weight,
+                        &q_rms_weight,
+                        &k_rms_weight,
+                        &kv_offset,
+                        &rope_offset,
+                        &cos,
+                        &sin,
+                        &mut k_cache,
+                        &mut v_cache,
+                        &mut q_out,
+                    ),
+                )
+                .await;
+            }
+            "ix" => {
+                launch(
+                    ops::sliding_project_qkv_ix,
                     (
                         ctx,
                         &x,
