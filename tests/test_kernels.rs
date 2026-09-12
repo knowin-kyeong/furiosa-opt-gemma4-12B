@@ -397,7 +397,7 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &["", "sym", "a53", "a67", "a67", "a53", "sym", "a53", "sym", "a67", "sym", "a67", "a53", ""];
+const ATTN_SWEEP: &[&str] = &["", "sym", "ctl", "stk", "stk", "ctl", "sym", "ctl", "sym", "stk", "sym", "stk", "ctl", ""];
 
 const PLAN: &[Plan] = &[
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
@@ -503,11 +503,11 @@ async fn sliding_attention_output(
             "sym" => {
                 launch(ops::probe_attn_load_sym, (ctx, &o_weight)).await;
             }
-            "a53" => {
-                launch(ops::probe_attn_load_a53, (ctx, &o_weight)).await;
+            "ctl" => {
+                launch(ops::probe_attn_load_ctl, (ctx, &o_weight)).await;
             }
-            "a67" => {
-                launch(ops::probe_attn_load_a67, (ctx, &o_weight)).await;
+            "stk" => {
+                launch(ops::probe_attn_load_stk, (ctx, &o_weight)).await;
             }
             other => panic!("no variant `{other}` for sliding_attention_output"),
         }

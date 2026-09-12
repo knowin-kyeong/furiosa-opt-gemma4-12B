@@ -384,3 +384,29 @@ pub fn probe_attn_load_a67(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .collect::<m![H # 5120 % 160], m![Qs % 256 = 32]>()
         .to_trf();
 }
+
+/// V335 probe (control): clusters split by column halves (Qs / 2048), 32 row groups x 8 column chunks per cluster.
+/// Same per-slice runs as `stk`, but each cluster still reads both HBM stacks (alternating 256-column chunks).
+#[device(chip = 1)]
+pub fn probe_attn_load_ctl(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 2048], m![H / 120, Qs / 256 % 8], m![H % 120, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 2048], m![H / 120, Qs / 256 % 8], m![1], m![H % 120, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 32, m![H % 120, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V335 probe (stack split): clusters split by 256-column chunk parity (Qs / 256 % 2). Chunk c of row r starts at
+/// r * 4096 + c * 256, so its HBM stack bit (address bit 8) is c & 1 on a 512-aligned base: each cluster reads one stack.
+#[device(chip = 1)]
+pub fn probe_attn_load_stk(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![Qs / 256 % 2], m![H / 120, Qs / 512], m![H % 120, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![Qs / 256 % 2], m![H / 120, Qs / 512], m![1], m![H % 120, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 32, m![H % 120, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120], m![Qs % 256 = 32]>()
+        .to_trf();
+}
