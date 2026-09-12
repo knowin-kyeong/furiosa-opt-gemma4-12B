@@ -3,6 +3,8 @@ use furiosa_opt_std::prelude::*;
 
 use crate::Chip;
 use crate::axes::{Ds, Dummy2, Gs, H, Ns, Ps, Qs};
+use crate::axes::Dummy8;
+use crate::device::shared::xsw::{XBlocks, XCl};
 use crate::hi_lo_trunc_fns;
 use crate::device::layout::{BothClusters, Cluster, HeadClusters, HeadSlicesPerCluster, Replicated, Slice};
 
@@ -416,4 +418,23 @@ pub(crate) fn project_key_value_hi(
     let v = project_one_kv_matrix_hi(ctx, &x_trf, v_weight);
 
     (k, v)
+}
+
+/// V364: one row of f32 values per x block slice, staged from the loaded query weight. The x path's first pass adds
+/// `gate * 0` to x (exact: the f8 codes are finite), so the whole x path depends on the query weight load and the head
+/// loads are issued back to back instead of each waiting for an x-path pass (V319: the PE issues a load only after the
+/// TU passes before it in the static order, and source order cannot break that tie).
+pub(crate) fn stage_query_weight_gate(ctx: &mut Context, weight_f8: &QueryWeightH) -> VrfTensor<f32, Chip, XCl, XBlocks, m![H % 480]> {
+    let weight: DmTensorView<'_, f8e4m3, Chip, XCl, XBlocks, m![Qs / 64 % 8, Dummy8, H % 480]> =
+        unsafe { weight_f8.view().reshape() };
+    ctx.sub
+        .begin(
+            weight
+                .tile::<m![Qs / 64 % 8], 1, m![Qs / 64 % 8 = 1 # 8, Dummy8, H % 480]>(0)
+                .tile::<m![Dummy8], 1, m![Qs / 64 % 8 = 1 # 8, Dummy8 = 1 # 8, H % 480]>(0),
+        )
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .to_vrf()
 }

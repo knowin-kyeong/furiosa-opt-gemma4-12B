@@ -109,6 +109,81 @@ pub fn sliding_project_qkv(
     v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
 }
 
+/// V364 arm gq: production with the x path gated on the loaded query weight.
+#[device(chip = 1)]
+pub fn sliding_project_qkv_gq(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![H]>,
+    q_weight: &HbmTensor<f8e4m3, Chip, m![Qs, H]>,
+    k_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    v_weight: &HbmTensor<f8e4m3, Chip, m![Ps, H]>,
+    q_weight_scale: &HbmTensor<bf16, Chip, m![Qs]>,
+    k_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    v_weight_scale: &HbmTensor<bf16, Chip, m![Ps]>,
+    input_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    q_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    k_rms_weight: &HbmTensor<bf16, Chip, m![Ds]>,
+    kv_offset: &HbmTensor<i32, Chip, m![1]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    k_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    v_cache: &mut HbmTensor<bf16, Chip, m![Ts, Ns, Ds]>,
+    q_out: &mut HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+) {
+    // V299: every weight row is its own HBM read (rows interleaved within each head's 64 slices), -8.8% on hardware.
+    let q_weight = sliding::projection::load_query_weight_hi(ctx, q_weight);
+    let gate = sliding::projection::stage_query_weight_gate(ctx, &q_weight);
+
+    // V292: x is staged on both clusters (8 copies x 8 chunks in every 32-slice sub-ring) and replicated on
+    // chip by one ring-32 all-gather: no HBM hop, so no ExplicitSync idles the DMA queue (7/8 jobs, -1.3%).
+    let x = shared::xsw::load_blocks(ctx, x);
+    let x = shared::xsw::normalize_blocks_f32_gated(ctx, &x, input_rms_weight, &gate);
+    let x2 = shared::xsw::stage_x_hi_lo_blocks(ctx, &x);
+    let x: DmTensor<f8e4m3, Chip, layout::BothClusters, Replicated, m![Dummy2, H]> = shared::xsw::replicate_blocks(ctx, &x2);
+    let k_weight = sliding::projection::load_kv_weight_hi(ctx, k_weight);
+    let v_weight = sliding::projection::load_kv_weight_hi(ctx, v_weight);
+
+    // q, k and v come back one head per slice; the head-wise RMSNorms and RoPE stay in that
+    // layout (no transposes in or broadcasts out) and the outputs are written from it.
+    let q = sliding::projection::project_query_hi(ctx, &x, &q_weight);
+    let (k, v) = sliding::projection::project_key_value_hi(ctx, &x, &k_weight, &v_weight);
+
+    // V355: the head norms and RoPE commit bf16 through the Commit Adapter (commit_cast), 25/32 paired jobs, -1.6%.
+    // The projections' per-channel weight scales are folded into the head RMSNorms (their
+    // loads are eight descriptors in the head layout instead of 512 in the projection layout).
+    let q = sliding::rmsnorm::normalize_query_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &q,
+        q_weight_scale,
+        q_rms_weight,
+    );
+    let k = sliding::rmsnorm::normalize_key_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &k,
+        k_weight_scale,
+        k_rms_weight,
+    );
+    let v = sliding::rmsnorm::normalize_value_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &v,
+        v_weight_scale,
+    );
+
+    let (q, k) = sliding::rope::apply_rope_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+        ctx,
+        &q,
+        &k,
+        rope_offset,
+        cos,
+        sin,
+    );
+
+    q.view().to_hbm_view(&mut ctx.tdma, q_out.view_mut());
+    k.dma_scatter::<m![1], _, _>(kv_offset, k_cache);
+    v.dma_scatter::<m![1], _, _>(kv_offset, v_cache);
+}
+
 #[device(chip = 1)]
 pub fn full_project_qkv(
     ctx: &mut Context,
