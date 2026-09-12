@@ -400,6 +400,8 @@ const QKV_SWEEP: &[&str] = &[
     "fq", "", "cq",
     "", "cq", "fq",
     "cq", "fq", "",
+    "fq", "", "cq",
+    "", "cq", "fq",
 ];
 
 const ATTN_SWEEP: &[&str] = &[""; 3];
