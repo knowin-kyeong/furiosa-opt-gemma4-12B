@@ -1,17 +1,16 @@
-//! V346: the attention output projection with uneven tiles at R = 88 (cluster 0 carries 63.3% of the bytes), a contraction
-//! store that reads the buffer cluster 0's tail contraction writes, and the tail rows moved into the reload buffer before
-//! the store's sync instead of after the reload.
+//! V347: the attention output projection with uneven tiles at R = 88 (cluster 0 carries 63.3% of the bytes) and a
+//! contraction store that reads the buffer cluster 0's tail contraction writes.
 //!
-//! V340 (R = 96) left two costs on cluster 0's chain. Its tile1 contraction committed to a buffer the contraction store
-//! did not read, so the scheduler issued tile1 only after contraction0, two small loads and the store (24.3k instead of
-//! 20.9k on hardware), and that contraction then ran partly behind the store's sync (4.7k; production's 24-row tile takes
-//! 1.5k). Its tail rows also reached the norm by a DM-to-DM move after the reload (1.9k). Here both clusters' tile0
-//! contractions and cluster 0's tile1 contraction commit into one padded buffer (`H % 120 # 240`): cluster 0's own tail
-//! rows land in its real rows, cluster 1's tail rows in cluster 0's padding. The store takes rows 0..88 of that buffer into
-//! an HBM tensor of exactly those rows; cluster 0 moves all tail rows into the reload buffer on its own, and the reload
-//! after the sync fills rows 0..88 from the whole tensor. No HBM read or write touches part of a padded layout: the
-//! compiler rejects a tile of `H % 120 # 128` that starts past row 0 (`lir: incorrect buffer size`), and V342's partial
-//! reload failed accuracy. V345 (load only) put cluster 0 at 63-67% about 2k ahead of the V340 split.
+//! V340 (R = 96) committed its tile1 contraction to a buffer the contraction store did not read, so the scheduler issued
+//! tile1 only after contraction0, two small loads and the store (24.3k instead of 20.9k on hardware), and that contraction
+//! then ran partly behind the store's sync (4.7k; production's 24-row tile takes 1.5k). Here both clusters' tile0
+//! contractions and cluster 0's tile1 contraction commit into one padded buffer (`H % 120 # 240`): cluster 0's own tail rows
+//! land in its real rows, cluster 1's tail rows in cluster 0's padding. The store reads that buffer, so tile1 is issued
+//! right behind tile0 (V346's static schedule: 11,979). The merge stays V340's: the store is reloaded whole and the tail
+//! rows are overwritten from cluster 0's DM afterwards. V346 moved the tail rows in first and loaded a store of rows 0..88
+//! into a tile of the reload buffer, and its output was non-finite (V342 ub, the same shape, was wrong); a tile of the
+//! padded HBM layout that starts past row 0 does not compile (`lir: incorrect buffer size`). V345 (load only) put cluster
+//! 0 at 63-67% about 2k ahead of the V340 split.
 //!
 //! Attention-output only: nothing here is shared with full attention, vision, audio, qkv or ffn.
 
@@ -29,8 +28,6 @@ type RowsByColumns = m![H / 120 % 16, Qs / 256];
 /// After the chunk reduce: one live slice per row group.
 type Rows = m![H / 120 % 16, 1 # 16];
 
-/// Rows 0..88 of every group, each group's 176 B at a 256 B boundary.
-pub(crate) type HeadStore88 = HbmTensor<bf16, Chip, m![H / 120, H % 120 = 88 # 128]>;
 /// Real rows 0..120: each cluster's own groups. Cluster 0's padding rows 120..240: cluster 1's groups' tail rows.
 pub(crate) type Contraction88 = DmTensor<bf16, Chip, TwoClusters, Rows, m![H % 120 # 240]>;
 
@@ -38,7 +35,7 @@ pub(crate) fn project_output_88(
     ctx: &mut Context,
     x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-) -> (HeadStore88, Contraction88) {
+) -> (Store88, Contraction88) {
     let tile0: DmTensor<f8e4m3, Chip, TwoClusters, RowsByColumns, m![H % 120 = 88, Qs % 256]> = weight
         .view()
         .tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 # 120, Qs]>(0)
@@ -123,29 +120,29 @@ pub(crate) fn project_output_88(
         .commit_view(tails.view_mut().tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 #{!} 120]>(88));
     let contraction: Contraction88 = unsafe { tails.reshape() };
 
-    // Rows 0..88 of every group (both clusters), read from the buffer the tail contraction also writes.
-    let mut stored: HeadStore88 = HbmTensor::new();
-    contraction
-        .view()
-        .tile::<m![H % 120], 88, m![H % 120 = 88 # 120 # 240]>(0)
-        .to_hbm_view(&mut ctx.tdma, stored.view_mut());
+    // The buffer's real rows (both clusters) into the V340 store layout, read from the buffer the tail contraction also
+    // writes. Cluster 1's rows 88..120 are not computed on cluster 1 and go out unwritten; they are overwritten after the
+    // reload.
+    let mut stored: Store88 = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
     (stored, contraction)
 }
 
-/// The tail rows moved into the RMSNorm reducing layout by cluster 0 first (no need to wait for the other cluster), then
-/// rows 0..88 of every group loaded from the whole head store once its sync clears.
+/// The V340 store layout: each group's 240 B at a 256 B boundary.
+pub(crate) type Store88 = HbmTensor<bf16, Chip, m![H / 120, H % 120 # 128]>;
+
+/// The whole store loaded into the RMSNorm reducing layout, then rows 88..120 of every group overwritten from cluster 0's
+/// tail contraction (a DM-to-DM move on cluster 0), in V340's order: V342 ub and V346 moved the tail rows in first and
+/// loaded a store into a tile of the buffer, and both failed accuracy.
 pub(crate) fn load_reducing_88<C: M>(
     ctx: &mut Context,
-    stored: &HeadStore88,
+    stored: &Store88,
     contraction: &Contraction88,
 ) -> DmTensor<bf16, Chip, C, ReducingSlices, m![H % 480]> {
-    let mut x: DmTensor<bf16, Chip, C, ReducingSlices, m![H % 480 / 120, H % 120]> = DmTensor::new();
+    let mut x: DmTensor<bf16, Chip, C, ReducingSlices, m![H % 480 / 120, H % 120]> = stored.to_dm(&mut ctx.tdma);
     let tails: DmTensorView<'_, bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]> = unsafe { contraction.view().reshape() };
     tails
         .tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 # 120]>(88)
         .to_dm_view(&mut ctx.tdma, x.view_mut().tile::<m![H % 120], 32, m![H % 480 / 120, H % 120 = 32 #{!} 120]>(88));
-    stored
-        .view()
-        .to_dm_view(&mut ctx.tdma, x.view_mut().tile::<m![H % 120], 88, m![H % 480 / 120, H % 120 = 88 #{!} 120]>(0));
     unsafe { x.reshape() }
 }

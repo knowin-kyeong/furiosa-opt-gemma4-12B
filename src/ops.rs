@@ -261,11 +261,11 @@ pub fn sliding_attention_output_ub(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
-/// V346 harness kernel (arm v6): uneven tiles at R = 88 (cluster 0 carries 63.3%); the contraction store reads the buffer
-/// cluster 0's tail contraction writes, so tile1 is issued right behind tile0, and the tail rows reach the reload buffer
-/// before the store's sync (src/device/sliding/uneven88.rs).
+/// V347 harness kernel (arm v7): uneven tiles at R = 88 (cluster 0 carries 63.3%); the contraction store reads the buffer
+/// cluster 0's tail contraction writes, so tile1 is issued right behind tile0; the store is reloaded whole and the tail
+/// rows overwritten afterwards, as in V340 (src/device/sliding/uneven88.rs).
 #[device(chip = 1)]
-pub fn sliding_attention_output_v6(
+pub fn sliding_attention_output_v7(
     ctx: &mut Context,
     x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
     post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
