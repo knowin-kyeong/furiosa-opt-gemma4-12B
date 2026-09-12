@@ -295,6 +295,49 @@ pub fn decoder_feedforward(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V354 harness kernel (arm cc): production ffn with the fused pre-FF normalize pass committing bf16, so the hi/lo split
+/// starts without a cast pass (V353 fc on the ffn head).
+#[device(chip = 1)]
+pub fn decoder_feedforward_cc(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    let residual_b = shared::xsw::load_blocks(ctx, residual_hbm);
+    let x = shared::xsw::normalize_blocks_bf16_fused(ctx, &residual_b, pre_ff_rms_weight);
+    let (x2, erf_b, out_b) = shared::xsw::stage_x_hi_lo_full_blocks_bf16(ctx, &x, up_global_scale, gate_global_scale);
+    let x_rep = shared::xsw::replicate_blocks(ctx, &x2);
+    let erf_all = shared::xsw::broadcast_scalar_blocks(ctx, erf_b);
+    let out_tail: DmTensor<f32, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![1 # 8]> = unsafe { out_b.reshape() };
+    let x = shared::mlp::feedforward_fo(
+        ctx,
+        x_rep,
+        erf_all,
+        out_tail,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        down_global_scale,
+    );
+    let residual: DmTensor<bf16, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![H % 480]> = unsafe { residual_b.reshape() };
+    let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn final_norm_and_logits(
     ctx: &mut Context,
