@@ -173,12 +173,12 @@ pub fn sliding_attention_output(
     // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
     // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
     let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
-    // V340: uneven tiles -- rows 0..96 of every 120-row group on both clusters, rows 96..120 of all groups on cluster 0
-    // alone, so cluster 1 (the slower of two concurrently loading clusters) carries fewer bytes per slice and stops
-    // lagging; the tail rows reach the norm by a DM-to-DM move on cluster 0 (src/device/sliding/uneven.rs).
-    let (stored, tails) = sliding::uneven::project_output_ut(ctx, x, o_weight);
+    // V368: back to the symmetric 96/24 tiles of V313. V340's uneven tiles (sliding/uneven.rs, kept unused) won 1.2% on
+    // paired medians but cut the lucky tail the leaderboard keeps: attention draws min 38,347 -> 42,620 and p10
+    // 40,405 -> 42,822 at an unchanged median (45,254 vs 45,022).
+    let x_hbm = sliding::projection::project_output(ctx, x, o_weight);
     // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
-    let x = sliding::uneven::load_reducing_with_tails::<Cluster>(ctx, &stored, &tails);
+    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &x_hbm);
     let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
     // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
     let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
