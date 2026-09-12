@@ -392,7 +392,7 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &["l1", "", "l4", "l4", "", "l1", "l1", "l4", "", "", "l4", "l1"];
+const FFN_SWEEP: &[&str] = &["", "iv", "i0", "cm", "cm", "i0", "iv", "", "i0", "cm", "", "iv"];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
@@ -502,7 +502,17 @@ async fn decoder_feedforward(
     // 99.5 MB of packed weights and scales, uploaded once. Only `residual` (7.7 KB) is restored
     // per launch -- without that the second launch compounds the first one's output and FAILs.
     let mut outputs: Vec<(&'static str, Vec<f32>)> = Vec::new();
-    for (i, variant) in plan.order.iter().enumerate() {
+    // Sweep rotated by wall-clock minute: `rngd rerun` repeats of one binary vary which variant launches first
+    // (the process-cold launch, and the clean writer of shared DM/TRF/VRF state -- RULES 10.0p / 10.0t).
+    let rot = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        / 60) as usize
+        % plan.order.len();
+    let order: Vec<&'static str> = (0..plan.order.len()).map(|j| plan.order[(j + rot) % plan.order.len()]).collect();
+    println!("    sweep rotation {rot}: {order:?}");
+    for (i, variant) in order.iter().enumerate() {
         if i > 0 {
             residual = s.bf16(ctx, "residual", UNIT).await;
         }
@@ -530,9 +540,9 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
-            "l4" => {
+            "iv" => {
                 launch(
-                    ops::decoder_feedforward_l4,
+                    ops::decoder_feedforward_iv,
                     (
                         ctx,
                         &mut residual,
@@ -552,9 +562,31 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
-            "l1" => {
+            "i0" => {
                 launch(
-                    ops::decoder_feedforward_l1,
+                    ops::decoder_feedforward_i0,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "cm" => {
+                launch(
+                    ops::decoder_feedforward_cm,
                     (
                         ctx,
                         &mut residual,
@@ -580,7 +612,7 @@ async fn decoder_feedforward(
 
         // Compare the first launch of each distinct variant, not just the first launch overall:
         // a variant that is fast but wrong must not pass unnoticed.
-        if plan.order[..i].iter().all(|seen| seen != variant) {
+        if order[..i].iter().all(|seen| seen != variant) {
             outputs.push(("expected", read_bf16(ctx, &residual).await));
         }
     }
