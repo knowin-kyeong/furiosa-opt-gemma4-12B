@@ -397,7 +397,7 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &["cx", "", "", "cx", "cx", "", "", "cx", "cx", "", "", "cx", "cx", ""];
+const ATTN_SWEEP: &[&str] = &["s1", "s2", "", "", "s2", "s1", "s1", "", "s2", "s2", "", "s1", "s1", "s2", ""];
 
 const PLAN: &[Plan] = &[
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
@@ -500,9 +500,23 @@ async fn sliding_attention_output(
                 )
                 .await;
             }
-            "cx" => {
+            "s1" => {
                 launch(
-                    ops::sliding_attention_output_cx,
+                    ops::sliding_attention_output_s1,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "s2" => {
+                launch(
+                    ops::sliding_attention_output_s2,
                     (
                         ctx,
                         &x,

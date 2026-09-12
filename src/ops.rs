@@ -203,6 +203,53 @@ pub fn sliding_attention_output_cx(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V336 harness kernel (arm s1): clusters split by 256-column chunk parity (one HBM stack each); the two partials
+/// meet in HBM, are added in a pass of their own on cluster 0 and go through the unchanged shared tail.
+#[device(chip = 1)]
+pub fn sliding_attention_output_s1(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let partials = sliding::stack_split::project_output_ss(ctx, x, o_weight);
+    let even = sliding::stack_split::load_partial_ss::<Cluster>(ctx, &partials, 0);
+    let odd = sliding::stack_split::load_partial_ss::<Cluster>(ctx, &partials, 1);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let x = sliding::stack_split::add_partials::<Cluster>(ctx, &even, &odd);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V336 harness kernel (arm s2): as s1, with the add folded into the mean-square and final passes (odd partial as a VRF).
+#[device(chip = 1)]
+pub fn sliding_attention_output_s2(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let partials = sliding::stack_split::project_output_ss(ctx, x, o_weight);
+    let even = sliding::stack_split::load_partial_ss::<Cluster>(ctx, &partials, 0);
+    let odd = sliding::stack_split::load_partial_ss::<Cluster>(ctx, &partials, 1);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = sliding::stack_split::normalize_add_scaled_partials::<Cluster>(
+        ctx,
+        &even,
+        &odd,
+        o_weight_scale,
+        post_attn_rms_weight,
+        &residual,
+    );
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn full_attention_first_page(
     ctx: &mut Context,
