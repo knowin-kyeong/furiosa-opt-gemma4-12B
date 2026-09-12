@@ -455,6 +455,10 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 **상태.**
 - 공식: 1위 vinxst 7.4769 · **우리 2위 7.4197**(`a9c7c0d6`, V313_submit draw) 그대로.
 - 코드 SOTA: **`V360_submit`**(28f8091 = V350_submit + qkv head norm · RoPE의 `commit_cast`, V355 cq 25/32 −1.6%, Arena 25/25 ×2).
+- **(추가) 코드 SOTA → `V367_submit`**(d94d994 = V360_submit + V366 T1: ffn 꼬리 곱을 post-FF norm에 접음, 짝비교 12/16 −0.46%, Arena 25/25 ×2 job 23353).
+  - draw: V360 follow 루프(PID 580551)를 끊고 `/root/drawswitch_v367.sh`를 띄웠다 — 돌던 V360 배치가 끝나면 `drawchain_follow.sh V367_submit 1 8`.
+  - `draw_src`에는 V367_submit ref만 fetch했다(체크아웃은 follow 스크립트가 배치 시작에 한다).
+  - 점수 수집: V367용 수집 스크립트는 `v360scores.sh`를 복사해 로그 이름만 바꾸면 된다.
 - draw: V350_submit 12회(최고 7.1187, 평균 ≈6.86) 뒤 **16:04(pod 시각)부터 V360_submit**(`drawchain_follow.sh V360_submit 1 8`). 첫 draw 6.9998(91,576 · 44,480 · 268,714). 점수 수집은 `bash /root/tk/v360scores.sh` → `/root/tk/v360_scores.txt`.
 
 **이번 라운드 — 전부 기각, 코드 SOTA 변화 없음.**
