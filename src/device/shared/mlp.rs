@@ -2245,3 +2245,74 @@ pub(crate) fn feedforward_fo_t1(
 
     (down, g)
 }
+
+// ---------------------------------------------------------------------------------------------
+// V373: can the down projection read its weight and block scale in 256-byte-aligned pieces? A load probe in the V211 /
+// V310 style: each arm adds one full extra load of down_weight_packed or down_weight_scale to the production kernel and
+// keeps it alive with a one-row consumer, so the arm's cycle increment prices the load layout alone.
+// - c1920 weight: production layout (8 x 1920-column chunks, 60 rows per slice): 960-byte pieces, 6 of 8 misaligned.
+// - c1024 weight: 16 chunk slots x 1024 columns (`L # 16384 / 1024`, slot 15 is padding): 512-byte pieces, all aligned
+//   (a row starts at h * 7680 and a slot at k * 512 inside it, both multiples of 256).
+// - c1920 scale: production layout (60 rows x 120 blocks per slice): 120-byte pieces.
+// - c1024 scale: 16 slots x 64 blocks (`L / 16 # 1024 / 64`): 64-byte pieces.
+// Gate 1 of the aligned-down redesign: go only if (w10 - w19) + (s10 - s19) <= -8k. The padded layouts double as the
+// first lowering check (gate 0): padding equals one whole innermost group, as V323's rule requires, and only the
+// unpadded row axis is tiled.
+// ---------------------------------------------------------------------------------------------
+
+/// 16 row groups x 16 chunk slots per cluster: 120 rows and 1024 columns per slice (slot 15 is padding).
+type DownRowsBySlots = m![H / 120 % 16, L # 16384 / 1024];
+/// 16 row groups x 16 slots of 64 block scales per cluster (slot 15 is padding).
+type DownScaleSlots = m![H / 120 % 16, L / 16 # 1024 / 64];
+
+/// Extra down-weight load in the production layout (V211 q0).
+pub(crate) fn probe_down_weight_c1920(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![H, L]>) {
+    let probe: DmTensor<f4e2m1, Chip, DownClusters, DownRowsByColumns, m![H % 60, L % 1920]> = packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 1, L % 1920]> = ctx
+        .main
+        .begin(probe.view().tile::<m![H % 60], 1, m![H % 60 = 1 # 60, L % 1920]>(0))
+        .fetch::<m![H % 60 = 1, L / 64 % 30], m![L % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![H % 60 = 1, L / 64 % 30, L / 32 % 2], m![L % 32]>()
+        .commit_trim::<m![L % 32]>()
+        .commit();
+}
+
+/// Extra down-weight load in 1024-column slots: 512-byte pieces on 256-byte boundaries.
+pub(crate) fn probe_down_weight_c1024(ctx: &mut Context, packed: &HbmTensor<f4e2m1, Chip, m![H, L]>) {
+    let probe: DmTensor<f4e2m1, Chip, DownClusters, DownRowsBySlots, m![H % 120, L # 16384 % 1024]> =
+        packed.to_dm(&mut ctx.tdma);
+    let _keep: DmTensor<f8e4m3, Chip, DownClusters, DownRowsBySlots, m![H % 120 = 1, L # 16384 % 1024]> = ctx
+        .main
+        .begin(probe.view().tile::<m![H % 120], 1, m![H % 120 = 1 # 120, L # 16384 % 1024]>(0))
+        .fetch::<m![H % 120 = 1, L # 16384 / 64 % 16], m![L # 16384 % 64]>()
+        .fetch_table_lookup::<f8e4m3>()
+        .collect::<m![H % 120 = 1, L # 16384 / 64 % 16, L # 16384 / 32 % 2], m![L # 16384 % 32]>()
+        .commit_trim::<m![L # 16384 % 32]>()
+        .commit();
+}
+
+/// Extra down-scale load in the production layout (V310 s8).
+pub(crate) fn probe_down_scale_c1920(ctx: &mut Context, scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>) {
+    let probe: DmTensor<f8e4m3, Chip, DownClusters, DownRowsByColumns, m![H % 60, L / 16 % 120]> = scale.to_dm(&mut ctx.tdma);
+    let _keep: VrfTensor<f32, Chip, DownClusters, DownRowsByColumns, m![H % 60 = 1, L / 16 % 120]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 60], 1, m![H % 60 = 1 # 60, L / 16 % 120]>(0))
+        .fetch::<m![H % 60 = 1], m![L / 16 % 120]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 60 = 1, L / 128 % 15], m![L / 16 % 8]>()
+        .to_vrf();
+}
+
+/// Extra down-scale load in 64-block slots: 64-byte pieces per row.
+pub(crate) fn probe_down_scale_c1024(ctx: &mut Context, scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>) {
+    let probe: DmTensor<f8e4m3, Chip, DownClusters, DownScaleSlots, m![H % 120, L / 16 # 1024 % 64]> =
+        scale.to_dm(&mut ctx.tdma);
+    let _keep: VrfTensor<f32, Chip, DownClusters, DownScaleSlots, m![H % 120 = 1, L / 16 # 1024 % 64]> = ctx
+        .sub
+        .begin(probe.view().tile::<m![H % 120], 1, m![H % 120 = 1 # 120, L / 16 # 1024 % 64]>(0))
+        .fetch::<m![H % 120 = 1], m![L / 16 # 1024 % 64]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H % 120 = 1, L / 16 # 1024 / 8 % 8], m![L / 16 # 1024 % 8]>()
+        .to_vrf();
+}
