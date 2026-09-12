@@ -2902,6 +2902,9 @@ fn stage_geglu_hi_lo_hbm_one_store(
 
     let inv_s_one: DmTensor<f32, Chip, UpGateClusters, m![1 # 256], m![1 # 8]> = unsafe { inv_s_all.reshape() };
     let mut inv_s_hbm: HbmTensor<f32, Chip, m![L / 7680, 1 # 8]> = HbmTensor::new();
+    inv_s_one.view().to_hbm_view(&mut ctx.tdma, inv_s_hbm.view_mut());
+    (x2_hbm, inv_s_hbm)
+}
 
 /// V350 arm fo: V348 f1d (down x pieces in Lane, summed inside pass A) with the geglu pieces staged by one store (V349).
 pub(crate) fn feedforward_fo(
