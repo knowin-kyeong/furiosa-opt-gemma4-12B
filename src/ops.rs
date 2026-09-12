@@ -276,7 +276,8 @@ pub fn decoder_feedforward(
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
     // V348: the down tiles take x's f8 pieces in Lane and sum them inside pass A (16/16 paired jobs, -1.27%).
     // V349: the geglu hi/lo pieces are staged by one store instead of two (13/16 paired jobs, -0.43%).
-    let x = shared::mlp::feedforward_fo(
+    // V366: the tail multiply (down_global_scale x out_scale) is folded into the post-FF norm; g is made once early.
+    let (x, g) = shared::mlp::feedforward_fo_t1(
         ctx,
         x_rep,
         erf_all,
@@ -292,7 +293,7 @@ pub fn decoder_feedforward(
 
     // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
     let residual: DmTensor<bf16, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![H % 480]> = unsafe { residual_b.reshape() };
-    let residual = shared::rmsnorm::normalize_add_gate_reduced::<Cluster>(ctx, &x, post_ff_rms_weight, &residual, layer_scalar);
+    let residual = shared::rmsnorm::normalize_add_gate_reduced_t1::<Cluster>(ctx, &x, &g, post_ff_rms_weight, &residual, layer_scalar);
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 

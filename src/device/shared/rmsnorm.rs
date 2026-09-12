@@ -557,3 +557,113 @@ pub(crate) fn normalize_add_gate_reduced<Cluster: M>(
         .commit_trim::<m![H % 8]>()
         .commit()
 }
+
+/// V366 (T1): `normalize_add_gate_reduced` of `x * g` without materializing it: the mean square is taken of `x * g`
+/// and the rms pass divides by g, so the final pass `x / rms' * w + residual` is unchanged.
+pub(crate) fn normalize_add_gate_reduced_t1<Cluster: M>(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    g: &DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    residual: &DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) -> DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> {
+
+    let g_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(g.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+
+    let reduced_mean_square: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &g_vrf)
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(H_F32)
+        .vector_widen_pad::<m![1 # 8]>()
+        // V263: the cross-slice sum joins the mean-square pass (Widen -> InterSliceReduce is a legal
+        // transition, furiosa-opt-std-0.6.0 stage/markers.rs:349), saving a pass and a commit. Only
+        // Tag/Filter/Output may follow an inter-slice reduce, so the +EPS moves into the sqrt pass below.
+        .vector_inter_slice_reduce::<m![1 # 32, Dummy8], m![1]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+
+    let rms: DmTensor<f32, Chip, Cluster, m![1 # 32, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(reduced_mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, EPS)
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_fp_div(&g_vrf)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let rms: DmTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = unsafe { rms.reshape() };
+
+    let weight_dm: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![H % 480]> = rms_weight.to_dm(&mut ctx.tdma);
+    let weight_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
+        .sub
+        .begin(weight_dm.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .to_vrf();
+
+    let residual_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![H % 480]> = ctx
+        .sub
+        .begin(residual.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .to_vrf();
+
+    let gate_dm: DmTensor<bf16, Chip, Cluster, ReducingSlices, m![1 # 8]> = layer_scalar.to_dm(&mut ctx.tdma);
+    let gate_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(gate_dm.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+
+    let rms_vrf: VrfTensor<f32, Chip, Cluster, ReducingSlices, m![1 # 8]> = ctx
+        .sub
+        .begin(rms.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::DivF, &rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
+        .vector_fp_binary(FpBinaryOp::AddF, &residual_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &gate_vrf)
+        .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit()
+}
