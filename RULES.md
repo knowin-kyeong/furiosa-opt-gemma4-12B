@@ -494,7 +494,10 @@ ffn 갭 분석 전문과 남은 후보는 `0912_ffn_gap_analysis.md`에 있다.
   - O1b: geglu 출력을 bf16 store 하나로 → down 레이아웃에서 innermost `L/1920` inter-slice Max로 전역 스케일 → hi/lo split. inv_s store · reload · ring-256 switch 두 개가 사라지고, 추정 −2~−6k.
   - down 타일 수 재스윕: Lane으로 pass A가 절반이 됐으니 20/20/20 3타일을 16/16/16/12와 비교.
   - T1: 꼬리 곱 `down_global × out_scale`을 post-FF norm으로(rms pass에서 sqrt(g²·ms + eps)/g), 새 rmsnorm 함수, −0.5~−1.5k.
-- **attn**: 갭 분석 에이전트가 세션 종료로 끊겼다(재개 요청함; 결과가 안 남으면 다시 돌릴 것). 볼 곳은 V340 실물 타임라인의 머리 1.9k(x 로드 → TU pass → tile0 발행), 꼬리 7k(reload · DM→DM · residual 로드가 DM→DM 뒤에 직렬 · VRF 사슬), tile1 앞의 작은 로드 둘이다. ffn에서 통한 두 패턴(store 명령 줄이기, 기존 pass epilogue로 합치기)을 attn에 대 볼 것.
+- **attn**: 갭 분석 완료 — `0912_attn_gap_analysis.md`(미측정, std API 주장은 컴파일로 먼저 확인).
+  1. **A**: 꼬리 행을 클러스터 0이 **패딩 없는** HBM 레이아웃(`m![H/120, H%120]`)에 tile store로 쓰고, reload 한 번으로 norm에 넣는다(DM→DM 제거 + contraction1이 sync 앞에 선다). 추정 −1.0~−1.6k. 첫 관문은 lir buffer-size 결함이 패딩 없는 레이아웃에도 걸리는지.
+  2. **B**: +EPS · sqrt를 rms VRF를 staging하는 sub pass로 접어 Main rms pass를 없앤다. 추정 −0.5k. 관문은 sub `to_vrf` 컴파일과 V274식 hang.
+  3. **C**: `commit_cast`(최종 pass). 0~−0.5k, 정적 모델에 안 보이니 짝비교로.
 - **qkv**: §10.0u ① — Q weight 로드가 9.5k에야 발행된다. 최대 −8k.
 
 ### 10.0u 2026-09-12 오후 — vinxst에 1위를 내줬다(attn 33,437), 클러스터 로드 모델 확정, V340 채택
