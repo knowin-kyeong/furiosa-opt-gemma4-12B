@@ -397,7 +397,9 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-const ATTN_SWEEP: &[&str] = &["", "pt2", "u60", "u53", "sym", "u53", "u60", "pt2", "sym", "u60", "pt2", "sym", "u53", ""];
+const ATTN_SWEEP: &[&str] = &[
+    "", "c512", "c1024", "r53i", "r15i", "sym", "r15i", "r53i", "c1024", "c512", "sym", "r53i", "sym", "c512", "r15i", "c1024", "",
+];
 
 const PLAN: &[Plan] = &[
     Plan { name: "sliding_attention_output", atol: 0.05, rtol: RTOL, order: ATTN_SWEEP },
@@ -503,14 +505,17 @@ async fn sliding_attention_output(
             "sym" => {
                 launch(ops::probe_attn_load_sym, (ctx, &o_weight)).await;
             }
-            "pt2" => {
-                launch(ops::probe_attn_load_pt2, (ctx, &o_weight)).await;
+            "c512" => {
+                launch(ops::probe_attn_load_c512, (ctx, &o_weight)).await;
             }
-            "u60" => {
-                launch(ops::probe_attn_load_u60, (ctx, &o_weight)).await;
+            "c1024" => {
+                launch(ops::probe_attn_load_c1024, (ctx, &o_weight)).await;
             }
-            "u53" => {
-                launch(ops::probe_attn_load_u53, (ctx, &o_weight)).await;
+            "r53i" => {
+                launch(ops::probe_attn_load_r53i, (ctx, &o_weight)).await;
+            }
+            "r15i" => {
+                launch(ops::probe_attn_load_r15i, (ctx, &o_weight)).await;
             }
             other => panic!("no variant `{other}` for sliding_attention_output"),
         }

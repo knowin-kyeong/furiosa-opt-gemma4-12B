@@ -488,3 +488,53 @@ pub fn probe_attn_load_u53(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .collect::<m![H % 16], m![Qs % 256 = 32]>()
         .to_trf();
 }
+
+/// V341 probe: 512-column chunks (each read = 2 aligned granules, both HBM stacks), 32 row groups x 8 chunks, 60 rows per slice.
+#[device(chip = 1)]
+pub fn probe_attn_load_c512(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 60 % 32, Qs / 512], m![H % 60, Qs % 512]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 60 % 32, Qs / 512], m![1], m![H % 60, Qs % 512 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 512], 32, m![H % 60, Qs % 512 = 32 # 512]>(0))
+        .fetch::<m![H % 60], m![Qs % 512 = 32]>()
+        .collect::<m![H % 60], m![Qs % 512 = 32]>()
+        .to_trf();
+}
+
+/// V341 probe: 1024-column chunks (each read = 4 granules), 64 row groups x 4 chunks, 30 rows per slice.
+#[device(chip = 1)]
+pub fn probe_attn_load_c1024(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 30 % 64, Qs / 1024], m![H % 30, Qs % 1024]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 30 % 64, Qs / 1024], m![1], m![H % 30, Qs % 1024 = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 1024], 32, m![H % 30, Qs % 1024 = 32 # 1024]>(0))
+        .fetch::<m![H % 30], m![Qs % 1024 = 32]>()
+        .collect::<m![H % 30], m![Qs % 1024 = 32]>()
+        .to_trf();
+}
+
+/// V341 probe: whole-row reads interleaved within each cluster (V299/V321 form: slice = row % 256, element = row / 256), one read =
+/// one 4,096 B row; `H # 4096 / 2048` gives cluster 0 eight rows per slice and cluster 1 seven (per-slice asymmetry, V321 qa9-like).
+#[device(chip = 1)]
+pub fn probe_attn_load_r53i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H # 4096 / 2048], m![H # 4096 % 2048 % 256], m![H # 4096 % 2048 / 256, Qs]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H # 4096 / 2048], m![H # 4096 % 2048 % 256], m![1], m![H # 4096 % 2048 / 256, Qs = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs], 32, m![H # 4096 % 2048 / 256, Qs = 32 # 4096]>(0))
+        .fetch::<m![H # 4096 % 2048 / 256], m![Qs = 32]>()
+        .collect::<m![H # 4096 % 2048 / 256], m![Qs = 32]>()
+        .to_trf();
+}
+
+/// V341 probe: whole-row reads interleaved within each cluster on 128 live slices (slice = row % 128, element = row / 128 = 15 rows),
+/// symmetric 1920 / 1920 -- the V286 direction (fewer live slices) combined with one-row reads.
+#[device(chip = 1)]
+pub fn probe_attn_load_r15i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H % 128, 1 # 2], m![H % 1920 / 128, Qs]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H % 128, 1 # 2], m![1], m![H % 1920 / 128, Qs = 32]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs], 32, m![H % 1920 / 128, Qs = 32 # 4096]>(0))
+        .fetch::<m![H % 1920 / 128], m![Qs = 32]>()
+        .collect::<m![H % 1920 / 128], m![Qs = 32]>()
+        .to_trf();
+}
