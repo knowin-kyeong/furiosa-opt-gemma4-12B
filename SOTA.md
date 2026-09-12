@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-12 (7):** 코드 SOTA → **`V348_submit`** (V340_submit + ffn down x 조각을 Lane에 두고 pass A 안에서 합침, 짝비교 16/16 −1.27%; Arena 25/25 PASS ×2, 88b0d90). V340_submit draw 60회 평균 ≈6.85 · 최고 7.2491 — 공식 최고 7.4197 그대로(2위; 1위 vinxst 7.4769, 3위 #663 7.3402). draw 체인 → V348_submit. 다음 후보 V349(geglu store 하나, −0.43% 13/16)의 합산을 V350에서 짝비교 중.
+
 > **2026-09-12 (6):** 코드 SOTA → **`V340_submit`** (V313_submit + attn_out 비균등 타일: tile0 두 클러스터 대칭 · tile1 클러스터 0 전용 · 꼬리 행 DM→DM; 짝비교 32잡 24/32 −1.2%, p≈0.007; Arena 25/25 PASS ×2, fd9eeda). 공식: **1위 vinxst 7.4769** (`97bbe09c` — 89,174 / **33,437** / 301,213) · **우리 2위 7.4197** (`a9c7c0d6`, V313_submit draw — 90,189 / 38,347 / 265,737) · 3위 #663 7.3097. vinxst의 attn은 우리 draw 137회 최저보다 13% 아래라 구조 차이다(RULES §10.0u).
 
 > **2026-09-12 (5):** 코드 SOTA → **`V313_submit`** (V306_submit + ffn down 출력 단일 store, 짝비교 12/12 −1.04%; Arena 25/25 PASS ×2, 8a38b1b). V306_submit draw 최고 7.2047 — 공식 최고 7.2264 그대로 (2위).
