@@ -606,7 +606,7 @@ pub(crate) fn apply_rope_heads_cc<C: M, S: M>(
 
 /// V361: `apply_rope_heads_cc` with each output half computed by one Vector Engine pair-mode pass. The pass reads a
 /// half and its partner half interleaved (`begin_interleaved`), unzips them into group 0 (the half) and group 1 (the
-/// partner), multiplies group 0 by that half of cos and group 1 by that half of sin (one Mul0 shared by the groups)
+/// partner), multiplies group 0 by that half of cos (Mul0) and group 1 by that half of sin (Mul1; one VRF per node)
 /// and zips them with an add: out_lo = x_lo * cos_lo + x_hi * sin_lo, out_hi = x_hi * cos_hi + x_lo * sin_hi, the
 /// arithmetic of the rotate_half passes. No rotate_half copies, no sin scratch pass, no product VRF staging.
 pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
@@ -695,7 +695,8 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Gs, Ds = 128 / 8, 1 # 2], m![Gs, Ds = 128 / 8]>()
         .vector_narrow_split::<m![Gs, Ds = 128 / 4], m![Ds = 128 % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_lo, &sin_lo)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_lo, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_lo)
         .vector_widen_concat::<m![Gs, Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
@@ -714,7 +715,8 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Gs, Ds = 128 / 8, 1 # 2], m![Gs, Ds = 128 / 8]>()
         .vector_narrow_split::<m![Gs, Ds = 128 / 4], m![Ds = 128 % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, &sin_hi)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_hi)
         .vector_widen_concat::<m![Gs, Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
@@ -735,7 +737,8 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Ds = 128 / 8, 1 # 2], m![Ds = 128 / 8]>()
         .vector_narrow_split::<m![Ds = 128 / 4], m![Ds = 128 % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_lo, &sin_lo)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_lo, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_lo)
         .vector_widen_concat::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
@@ -754,7 +757,8 @@ pub(crate) fn apply_rope_heads_pair<C: M, S: M>(
         .vector_init()
         .vector_intra_slice_unzip::<Dummy2, m![Ds = 128 / 8, 1 # 2], m![Ds = 128 / 8]>()
         .vector_narrow_split::<m![Ds = 128 / 4], m![Ds = 128 % 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, &sin_hi)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_hi, ())
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), (), &sin_hi)
         .vector_widen_concat::<m![Ds = 128 / 8], m![Ds = 128 % 8]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_final()
