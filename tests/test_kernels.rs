@@ -393,8 +393,10 @@ const BASE: &[&str] = &[""; REPS];
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
 const FFN_SWEEP: &[&str] = &[
-    "cc", "", "", "cc", "cc", "", "", "cc",
-    "cc", "", "", "cc",
+    "cf", "ccf", "",
+    "ccf", "", "cf",
+    "", "cf", "ccf",
+    "cf", "ccf", "",
 ];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
@@ -543,9 +545,31 @@ async fn decoder_feedforward(
                 )
                 .await;
             }
-            "cc" => {
+            "cf" => {
                 launch(
-                    ops::decoder_feedforward_cc,
+                    ops::decoder_feedforward_cf,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "ccf" => {
+                launch(
+                    ops::decoder_feedforward_ccf,
                     (
                         ctx,
                         &mut residual,
