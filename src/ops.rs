@@ -184,6 +184,61 @@ pub fn sliding_attention_output(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V351 harness kernel (arm th): V340 uneven tiles; cluster 0's tail rows go to HBM as a second tile of one unpadded store,
+/// so the reload waits on tile1's contraction and no DM-to-DM move follows it (src/device/sliding/uneven_hbm.rs).
+#[device(chip = 1)]
+pub fn sliding_attention_output_th(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let stored = sliding::uneven_hbm::project_output_th(ctx, x, o_weight);
+    let x = sliding::uneven_hbm::load_reducing_flat::<Cluster>(ctx, &stored);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V351 harness kernel (arm tb): as th, but production's aligned store stays and the tail rows get their own HBM tensor.
+#[device(chip = 1)]
+pub fn sliding_attention_output_tb(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let (stored, tail_store) = sliding::uneven_hbm::project_output_tb(ctx, x, o_weight);
+    let x = sliding::uneven_hbm::load_reducing_tb::<Cluster>(ctx, &stored, &tail_store);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V351 harness kernel (arm t8): th at R = 88 (cluster 0 carries 63.3% of the bytes, V345's load-only optimum).
+#[device(chip = 1)]
+pub fn sliding_attention_output_t8(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let stored = sliding::uneven_hbm::project_output_t8(ctx, x, o_weight);
+    let x = sliding::uneven_hbm::load_reducing_flat::<Cluster>(ctx, &stored);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn full_attention_first_page(
     ctx: &mut Context,
