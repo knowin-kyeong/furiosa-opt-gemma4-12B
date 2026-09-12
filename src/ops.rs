@@ -273,7 +273,8 @@ pub fn decoder_feedforward(
     let out_tail: DmTensor<f32, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![1 # 8]> = unsafe { out_b.reshape() };
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
-    let x = shared::mlp::feedforward_vtp(
+    // V348: the down tiles take x's f8 pieces in Lane and sum them inside pass A (16/16 paired jobs, -1.27%).
+    let x = shared::mlp::feedforward_f1d(
         ctx,
         x_rep,
         erf_all,
