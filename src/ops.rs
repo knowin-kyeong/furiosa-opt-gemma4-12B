@@ -274,7 +274,8 @@ pub fn decoder_feedforward(
     // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
     // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
     // V348: the down tiles take x's f8 pieces in Lane and sum them inside pass A (16/16 paired jobs, -1.27%).
-    let x = shared::mlp::feedforward_f1d(
+    // V349: the geglu hi/lo pieces are staged by one store instead of two (13/16 paired jobs, -0.43%).
+    let x = shared::mlp::feedforward_fo(
         ctx,
         x_rep,
         erf_all,
