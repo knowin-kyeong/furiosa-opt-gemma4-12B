@@ -98,9 +98,9 @@ pub(crate) fn project_output_88(
         .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 240]>(0));
 
     // Cluster 0: rows 88..120 of all 32 groups. Seen as [H / 1920, H % 120], the padded buffer puts cluster 0's own groups
-    // in its real rows and cluster 1's groups in its padding.
-    let tails: DmTensorViewMut<'_, bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]> =
-        unsafe { contraction.view_mut().reshape() };
+    // in its real rows and cluster 1's groups in its padding. (The compiler follows an owned reshape, not a reshaped
+    // mutable view.)
+    let mut tails: DmTensor<bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]> = unsafe { contraction.reshape() };
     ctx.main
         .begin(tile1.view())
         .fetch::<m![H / 1920, H % 120 = 32, Qs / 64 % 4], m![Qs % 64]>()
@@ -115,7 +115,8 @@ pub(crate) fn project_output_88(
         .cast::<bf16, m![1 # 16]>()
         .transpose::<m![H / 1920, H % 120 = 32 / 4], m![H % 120 = 32 % 4 # 16]>()
         .commit_trim::<m![H % 120 = 32 % 4]>()
-        .commit_view(tails.tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 #{!} 120]>(88));
+        .commit_view(tails.view_mut().tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 #{!} 120]>(88));
+    let contraction: DmTensor<bf16, Chip, TwoClusters, Rows, m![H % 120 # 240]> = unsafe { tails.reshape() };
 
     // V271 layout: each slice writes its 240 B at a 256 B boundary. Cluster 1's rows 88..120 are not computed on cluster 1
     // and go out unwritten; the store below overwrites them.
@@ -123,8 +124,9 @@ pub(crate) fn project_output_88(
     contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
 
     // Cluster 0 alone: rows 88..120 of all 32 groups (its own groups again, with the values the store above wrote).
-    let tails: DmTensorView<'_, bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]> = unsafe { contraction.view().reshape() };
+    let tails: DmTensor<bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]> = unsafe { contraction.reshape() };
     tails
+        .view()
         .tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 # 120]>(88)
         .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 128]>(88));
     stored
