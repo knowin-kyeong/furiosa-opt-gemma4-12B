@@ -455,7 +455,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 **상태.** 공식 1위 vinxst **7.4769**(`97bbe09c`, 01:07 UTC — 89,174 / **33,437** / 301,213; 한 시간 전 제출은 attn 44,761 · ffn 261,627). 우리 최고 **7.4197**(`a9c7c0d6`, V313_submit draw — 90,189 / 38,347 / 265,737) **2위**, 3위 #663 7.3097.
 V313_submit draw 배치 1~8: **n=96 평균 6.872, σ 3.55%, 최고 7.4197(+2.25σ), 7.3 이상 4회.**
 코드 SOTA **`V340_submit`**(fd9eeda = V313_submit + attn 비균등 타일; attn −1.2%, 기하평균 +0.4%; Arena 25/25 PASS ×2).
-**draw 체인은 아직 V313_submit이다.** 전환(현 follow를 끝낸 뒤 `drawchain_follow.sh V340_submit 1 8`)은 자동 권한 분류기에 막혀 사용자 확인 대기다. `/root/draw_src`에는 `V340_submit` ref만 fetch 해 뒀다(작업 트리는 V313_submit 그대로).
+**draw 체인 → V340_submit (06:06 UTC, 사용자 지시 "리더보드 draw 추가").** V313 follow를 끝냈고, `/root/drawswitch_v340.sh`가 돌던 V313 배치(→ `batch11.log`)가 끝나면 `drawchain_follow.sh V340_submit 1 8`(12회 × 8배치)을 돈다. 로그는 `/root/drawloop_V340_submit*.log`.
 
 **vinxst의 attn은 운이 아니다.** 우리 attn 공식 draw 137회(`/root/tk/draw_cycles.tsv`)는 최저 38,347 · p5 40.0k · 중앙값 45.3k다. 33,437은 최저보다 13% 아래다.
 같은 제출의 ffn +15%도 우리 draw 범위(265~281k) 밖이다. 공유 코드를 바꾼 구조 변경일 가능성이 높다.
