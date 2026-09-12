@@ -450,7 +450,54 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0u 2026-09-12 오후 — vinxst에 1위를 내줬다(attn 33,437), 클러스터 로드 모델 확정, V340 채택 (가장 최신, 여기서 시작할 것)
+### 10.0v 2026-09-12 저녁 — ffn 두 건 채택(V348 · V349 → V350_submit), 세션 이관 (가장 최신, 여기서 시작할 것)
+
+**상태 (12:40 UTC).**
+- 공식: 1위 vinxst 7.4769 · **우리 2위 7.4197**(`a9c7c0d6`, V313_submit draw) · 3위 #663 7.3402(attn 36,768).
+- 코드 SOTA 사슬: V313_submit → V340_submit(attn 비균등 타일, −1.2%) → **V348_submit**(88b0d90; ffn down 타일이 x 조각을 Lane에 두고 pass A 안에서 합침, 16/16 −1.27%, Arena 25/25 ×2) → **V350_submit**(aafc5a8; + geglu hi/lo store 하나).
+  - V350 짝비교: fo − 생산 16/16 −2.28%, fo − f1d 16/16 −1.42%.
+  - **V350_submit 제출 검증 통과**: Arena job 22596 25/25 PASS + `rngd rerun` 25/25 PASS(pod lab2, `/root/tk/v350sub_verify.out`; ffn 첫 launch 269,520 · 271,309로 새 코드 확인).
+- draw:
+  - V313_submit 96회(평균 6.872, σ 3.55%, 최고 7.4197) → V340_submit 약 72회(평균 ≈6.85, 최고 7.2491).
+  - `/root/drawswitch_v348.sh`가 돌던 V340 배치가 끝나면 `drawchain_follow.sh V348_submit 1 8`을 돈다.
+  - **V350_submit 검증이 통과하면 같은 방식으로 넘긴다**:
+    1. `cd /root/draw_src && git fetch -q /root/lab2 V350_submit:V350_submit`
+    2. V348 follow 프로세스를 끝낸다.
+    3. "돌던 drawloop2가 끝나면 로그를 보관하고 `drawchain_follow.sh V350_submit 1 8`"을 하는 switch 스크립트를 setsid로 띄운다(`/root/drawswitch_v348.sh`가 틀).
+  - draw는 사용자 지시(리더보드 draw 추가)로 계속 돈다.
+
+**pod 상태.**
+- lab = V350_ffn_f1d_plus_one_store(ffn 하네스, 유휴)
+- lab2 = V350_submit(검증)
+- lab3 = V313_submit(옛 draw 소스, 건드리지 말 것)
+- draw_src = draw 체인 전용
+
+체인 스크립트는 `/root/tk/v34[4-9]_chain.sh` · `v350_chain.sh` · `v348sub_verify.sh` · `v350sub_verify.sh`이다. 같은 바이너리 반복은 `rerun_n.sh <job> <tag> 15 <kernel>`로 한다. 새 브랜치는 로컬에서 `git push ssh://root@213.192.2.99:41008/root/<lab> <branch>`로 넣는다(체크아웃된 브랜치는 임시 ref로 push 후 `merge --ff-only`).
+
+**측정 도구.**
+- 짝비교: `scripts/dev/paired_medians.py` — `ssh pod 'python3 - v350 decoder_feedforward prod f1d fo' < scripts/dev/paired_medians.py`. 옛 pairstats는 attn 로그만 읽는다.
+- span: `scripts/dev/span/spanlist.py`(launch 하나의 클러스터 0 타임라인), `armspans.py`(arm별 창 · 로드 span · 끝 동기화 중앙값), `schedorder.py`(정적 스케줄 JSON을 시작 순서로; pod `/root/tk/schedorder.py`에도 있다).
+- 정적 덤프: `cargo furiosa-opt compile ops::<fn> --dump-schedule <json>`.
+
+**이번 라운드 (V344~V350).**
+- V344 기각(live 슬라이스 수 무관, DMN 수가 처리율을 정한다)
+- V345 진단(분할 최적 63%, 바닥 33.9k)
+- V346 · V347 기각(패딩 DM 버퍼 + cluster reshape 오계산)
+- **V348 f1d 채택**(f1u +0.77% 기각)
+- **V349 −0.43%**
+- **V350 합산 −2.28%**(가산 기대보다 크다)
+
+ffn 갭 분석 전문과 남은 후보는 `0912_ffn_gap_analysis.md`에 있다.
+
+**다음 후보.**
+- **ffn**
+  - O1b: geglu 출력을 bf16 store 하나로 → down 레이아웃에서 innermost `L/1920` inter-slice Max로 전역 스케일 → hi/lo split. inv_s store · reload · ring-256 switch 두 개가 사라지고, 추정 −2~−6k.
+  - down 타일 수 재스윕: Lane으로 pass A가 절반이 됐으니 20/20/20 3타일을 16/16/16/12와 비교.
+  - T1: 꼬리 곱 `down_global × out_scale`을 post-FF norm으로(rms pass에서 sqrt(g²·ms + eps)/g), 새 rmsnorm 함수, −0.5~−1.5k.
+- **attn**: 갭 분석 에이전트가 세션 종료로 끊겼다(재개 요청함; 결과가 안 남으면 다시 돌릴 것). 볼 곳은 V340 실물 타임라인의 머리 1.9k(x 로드 → TU pass → tile0 발행), 꼬리 7k(reload · DM→DM · residual 로드가 DM→DM 뒤에 직렬 · VRF 사슬), tile1 앞의 작은 로드 둘이다. ffn에서 통한 두 패턴(store 명령 줄이기, 기존 pass epilogue로 합치기)을 attn에 대 볼 것.
+- **qkv**: §10.0u ① — Q weight 로드가 9.5k에야 발행된다. 최대 −8k.
+
+### 10.0u 2026-09-12 오후 — vinxst에 1위를 내줬다(attn 33,437), 클러스터 로드 모델 확정, V340 채택
 
 **상태.** 공식 1위 vinxst **7.4769**(`97bbe09c`, 01:07 UTC — 89,174 / **33,437** / 301,213; 한 시간 전 제출은 attn 44,761 · ffn 261,627). 우리 최고 **7.4197**(`a9c7c0d6`, V313_submit draw — 90,189 / 38,347 / 265,737) **2위**, 3위 #663 7.3097.
 V313_submit draw 배치 1~8: **n=96 평균 6.872, σ 3.55%, 최고 7.4197(+2.25σ), 7.3 이상 4회.**
