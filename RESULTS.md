@@ -377,7 +377,15 @@ V38이 qkv만 깨지고 attn_out·ffn은 PASS인 것이 이 표의 직접적인 
 
 ## 현재 SOTA
 
-**공식 리더보드 기준: `V165_qkv_broadcast_attnout_two_tiles` (`0704eda`) — 5.7576** (qkv 105,544 / attn_out 53,374 / ffn 349,160, 2026-09-09 17:15 UTC, moa-submitter `d0239b5b`). 그 전 공식은 V82 5.0860. 아래 문단은 2026-09-09 낮 시점의 기록이다.
+**2026-09-13 기준.**
+- 공식 리더보드 최고: **7.4197**(`a9c7c0d6`, V313_submit draw — qkv 90,189 / attn 38,347 / ffn 265,737, 2위; 1위 vinxst 7.4769).
+- 코드 SOTA: **`V367_submit`**(d94d994 = V360_submit + V366 T1, ffn 꼬리 곱을 post-FF norm에 접음).
+  - 사슬: V313_submit → V340 → V348 → V350 → V360 → V367.
+  - 제출 검증: Arena 25/25 ×2(job 23353).
+- draw 체인은 V367_submit으로 넘어가는 중(RULES §10.0w).
+- 아래 두 문단은 2026-09-09 시점의 옛 기록이다.
+
+(옛 기록) **공식 리더보드 기준: `V165_qkv_broadcast_attnout_two_tiles` (`0704eda`) — 5.7576** (qkv 105,544 / attn_out 53,374 / ffn 349,160, 2026-09-09 17:15 UTC, moa-submitter `d0239b5b`). 그 전 공식은 V82 5.0860. 아래 문단은 2026-09-09 낮 시점의 기록이다.
 
 실측(RNGD) 기준(2026-09-09 낮): **`V50_drop_false_replication` — 기하평균 4.972×** (149,244 / 56,522 / 354,825,
 3/3 PASS, job 15360). V38에서 "소스에 없는 축이 DMA write를 복제한다"는 잘못된 전제에 기댄 두 곳
