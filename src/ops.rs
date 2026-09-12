@@ -441,25 +441,25 @@ pub fn probe_attn_load_pt2(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
 /// goes away only when its per-slice bytes shrink).
 #[device(chip = 1)]
 pub fn probe_attn_load_u60(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
-    let t0: DmTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![H = 3072 % 96, Qs % 256]> = o_weight
+    let t0: DmTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![H % 96, Qs % 256]> = o_weight
         .view()
         .tile::<m![H], 3072, m![H = 3072 # 3840, Qs]>(0)
         .to_dm(&mut ctx.tdma);
-    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![H = 768 % 48, Qs % 256]> = o_weight
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![H % 48, Qs % 256]> = o_weight
         .view()
         .tile::<m![H], 768, m![H = 768 # 3840, Qs]>(3072)
         .to_dm(&mut ctx.tdma);
-    let _k0: TrfTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![1], m![H = 3072 % 96, Qs % 256 = 32]> = ctx
+    let _k0: TrfTensor<f8e4m3, Chip, m![H = 3072 / 1536], m![H = 3072 % 1536 / 96, Qs / 256], m![1], m![H % 96, Qs % 256 = 32]> = ctx
         .sub
-        .begin(t0.view().tile::<m![Qs % 256], 32, m![H = 3072 % 96, Qs % 256 = 32 # 256]>(0))
-        .fetch::<m![H = 3072 % 96], m![Qs % 256 = 32]>()
-        .collect::<m![H = 3072 % 96], m![Qs % 256 = 32]>()
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 96, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 96], m![Qs % 256 = 32]>()
+        .collect::<m![H % 96], m![Qs % 256 = 32]>()
         .to_trf();
-    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![1], m![H = 768 % 48, Qs % 256 = 32]> = ctx
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 768 / 48, Qs / 256], m![1], m![H % 48, Qs % 256 = 32]> = ctx
         .sub
-        .begin(t1.view().tile::<m![Qs % 256], 32, m![H = 768 % 48, Qs % 256 = 32 # 256]>(0))
-        .fetch::<m![H = 768 % 48], m![Qs % 256 = 32]>()
-        .collect::<m![H = 768 % 48], m![Qs % 256 = 32]>()
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H % 48, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 48], m![Qs % 256 = 32]>()
+        .collect::<m![H % 48], m![Qs % 256 = 32]>()
         .to_trf();
 }
 
@@ -471,7 +471,7 @@ pub fn probe_attn_load_u53(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .view()
         .tile::<m![H], 3584, m![H = 3584 # 3840, Qs]>(0)
         .to_dm(&mut ctx.tdma);
-    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![H = 256 % 16, Qs % 256]> = o_weight
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![H % 16, Qs % 256]> = o_weight
         .view()
         .tile::<m![H], 256, m![H = 256 # 3840, Qs]>(3584)
         .to_dm(&mut ctx.tdma);
@@ -481,10 +481,10 @@ pub fn probe_attn_load_u53(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .fetch::<m![H = 3584 % 112], m![Qs % 256 = 32]>()
         .collect::<m![H = 3584 % 112], m![Qs % 256 = 32]>()
         .to_trf();
-    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![1], m![H = 256 % 16, Qs % 256 = 32]> = ctx
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H = 256 / 16, Qs / 256], m![1], m![H % 16, Qs % 256 = 32]> = ctx
         .sub
-        .begin(t1.view().tile::<m![Qs % 256], 32, m![H = 256 % 16, Qs % 256 = 32 # 256]>(0))
-        .fetch::<m![H = 256 % 16], m![Qs % 256 = 32]>()
-        .collect::<m![H = 256 % 16], m![Qs % 256 = 32]>()
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H % 16, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 16], m![Qs % 256 = 32]>()
+        .collect::<m![H % 16], m![Qs % 256 = 32]>()
         .to_trf();
 }
