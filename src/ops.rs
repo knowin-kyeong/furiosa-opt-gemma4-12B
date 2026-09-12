@@ -538,3 +538,55 @@ pub fn probe_attn_load_r15i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip
         .collect::<m![H % 1920 / 128], m![Qs = 32]>()
         .to_trf();
 }
+
+// V344 probes: the production 256 B column chunks on fewer live slices per cluster (V286: halving qkv's live slices
+// made its row loads ~20% faster). Every keep-alive stages 3,840 elements per slice, as `probe_attn_load_sym` does,
+// so the sub-context staging costs the same in every arm.
+
+/// V344 probe: 128 live slices per cluster, 240 rows each, padding innermost (even slices live).
+#[device(chip = 1)]
+pub fn probe_attn_load_h2i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 240 % 8, Qs / 256, 1 # 2], m![H % 240, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 240 % 8, Qs / 256, 1 # 2], m![1], m![H % 240, Qs % 256 = 16]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 16, m![H % 240, Qs % 256 = 16 # 256]>(0))
+        .fetch::<m![H % 240], m![Qs % 256 = 16]>()
+        .collect::<m![H % 240], m![Qs % 256 = 16]>()
+        .to_trf();
+}
+
+/// V344 probe: 128 live slices per cluster, 240 rows each, padding outermost (slices 0..128 live).
+#[device(chip = 1)]
+pub fn probe_attn_load_h2o(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![1 # 2, H / 240 % 8, Qs / 256], m![H % 240, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![1 # 2, H / 240 % 8, Qs / 256], m![1], m![H % 240, Qs % 256 = 16]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 16, m![H % 240, Qs % 256 = 16 # 256]>(0))
+        .fetch::<m![H % 240], m![Qs % 256 = 16]>()
+        .collect::<m![H % 240], m![Qs % 256 = 16]>()
+        .to_trf();
+}
+
+/// V344 probe: 128 live slices per cluster, 240 rows each, padding in the middle (blocks of 16 live slices alternate).
+#[device(chip = 1)]
+pub fn probe_attn_load_h2c(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 240 % 8, 1 # 2, Qs / 256], m![H % 240, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 240 % 8, 1 # 2, Qs / 256], m![1], m![H % 240, Qs % 256 = 16]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 16, m![H % 240, Qs % 256 = 16 # 256]>(0))
+        .fetch::<m![H % 240], m![Qs % 256 = 16]>()
+        .collect::<m![H % 240], m![Qs % 256 = 16]>()
+        .to_trf();
+}
+
+/// V344 probe: 64 live slices per cluster, 480 rows each, padding innermost.
+#[device(chip = 1)]
+pub fn probe_attn_load_h4i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let w: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 480 % 4, Qs / 256, 1 # 4], m![H % 480, Qs % 256]> = o_weight.to_dm(&mut ctx.tdma);
+    let _keep: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 480 % 4, Qs / 256, 1 # 4], m![1], m![H % 480, Qs % 256 = 8]> = ctx
+        .sub
+        .begin(w.view().tile::<m![Qs % 256], 8, m![H % 480, Qs % 256 = 8 # 256]>(0))
+        .fetch::<m![H % 480], m![Qs % 256 = 8]>()
+        .collect::<m![H % 480], m![Qs % 256 = 8]>()
+        .to_trf();
+}

@@ -398,7 +398,7 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 const QKV_SWEEP: &[&str] = &[""; 3];
 
 const ATTN_SWEEP: &[&str] = &[
-    "", "c512", "c1024", "r53i", "r15i", "sym", "r15i", "r53i", "c1024", "c512", "sym", "r53i", "sym", "c512", "r15i", "c1024", "",
+    "", "h2i", "h2o", "h4i", "h2c", "sym", "h2c", "h4i", "h2o", "h2i", "sym", "h4i", "sym", "h2o", "h2c", "h2i", "",
 ];
 
 const PLAN: &[Plan] = &[
@@ -516,6 +516,18 @@ async fn sliding_attention_output(
             }
             "r15i" => {
                 launch(ops::probe_attn_load_r15i, (ctx, &o_weight)).await;
+            }
+            "h2i" => {
+                launch(ops::probe_attn_load_h2i, (ctx, &o_weight)).await;
+            }
+            "h2o" => {
+                launch(ops::probe_attn_load_h2o, (ctx, &o_weight)).await;
+            }
+            "h2c" => {
+                launch(ops::probe_attn_load_h2c, (ctx, &o_weight)).await;
+            }
+            "h4i" => {
+                launch(ops::probe_attn_load_h4i, (ctx, &o_weight)).await;
             }
             other => panic!("no variant `{other}` for sliding_attention_output"),
         }
