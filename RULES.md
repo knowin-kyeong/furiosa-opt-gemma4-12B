@@ -460,7 +460,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - draw:
   - V313_submit 96회(평균 6.872, σ 3.55%, 최고 7.4197) → V340_submit 약 72회(평균 ≈6.85, 최고 7.2491).
   - `/root/drawswitch_v348.sh`가 돌던 V340 배치가 끝나면 `drawchain_follow.sh V348_submit 1 8`을 돈다.
-  - **V350_submit 검증이 통과하면 같은 방식으로 넘긴다**:
+  - **V350_submit으로 넘겼다(12:43 UTC)**: `/root/drawswitch_v350.sh`가 돌던 V340 배치가 끝나면 `drawchain_follow.sh V350_submit 1 8`을 돈다(V348 switch는 취소). 다음에 또 넘길 때의 순서(주의: `pkill -f <스크립트 이름>`은 그 이름이 든 ssh 원격 셸 자체를 죽인다 — PID로 끊을 것):
     1. `cd /root/draw_src && git fetch -q /root/lab2 V350_submit:V350_submit`
     2. V348 follow 프로세스를 끝낸다.
     3. "돌던 drawloop2가 끝나면 로그를 보관하고 `drawchain_follow.sh V350_submit 1 8`"을 하는 switch 스크립트를 setsid로 띄운다(`/root/drawswitch_v348.sh`가 틀).
