@@ -392,7 +392,7 @@ const BASE: &[&str] = &[""; REPS];
 /// transition (V225's Latin square). One job is one paired sample; the decision is a sign test
 /// over jobs, because between-job machine drift is what made the official draws disagree with the
 /// in-job A/B in the first place.
-const FFN_SWEEP: &[&str] = &["", "iv", "i0", "cm", "cm", "i0", "iv", "", "i0", "cm", "", "iv"];
+const FFN_SWEEP: &[&str] = &["f1ud", "f1u", "f1d", "", "", "f1d", "f1u", "f1ud", "f1u", "", "f1ud", "f1d"];
 
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
@@ -587,6 +587,72 @@ async fn decoder_feedforward(
             "cm" => {
                 launch(
                     ops::decoder_feedforward_cm,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "f1u" => {
+                launch(
+                    ops::decoder_feedforward_f1u,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "f1d" => {
+                launch(
+                    ops::decoder_feedforward_f1d,
+                    (
+                        ctx,
+                        &mut residual,
+                        &pre_ff_rms_weight,
+                        &up_weight_packed,
+                        &gate_weight_packed,
+                        &down_weight_packed,
+                        &up_weight_scale,
+                        &gate_weight_scale,
+                        &down_weight_scale,
+                        &up_global_scale,
+                        &gate_global_scale,
+                        &down_global_scale,
+                        &post_ff_rms_weight,
+                        &layer_scalar,
+                    ),
+                )
+                .await;
+            }
+            "f1ud" => {
+                launch(
+                    ops::decoder_feedforward_f1ud,
                     (
                         ctx,
                         &mut residual,
