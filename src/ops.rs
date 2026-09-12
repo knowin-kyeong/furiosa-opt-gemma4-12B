@@ -591,3 +591,108 @@ pub fn probe_attn_load_h4i(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip,
         .collect::<m![H % 480 / 4], m![H % 4, Qs % 256 = 8]>()
         .to_trf();
 }
+
+// V345 probes: the V340 kernel's uneven tiles at four splits. tile0 holds rows 0..R of every 120-row group on both
+// clusters; tile1 holds rows R..120 of all 32 groups on cluster 0 alone (both clusters' groups side by side in each
+// slice's element), so cluster 0 carries (240 - R) / 240 of the bytes. The V341 load model has both clusters finishing
+// together near 66%.
+
+/// V345 probe: R = 96, cluster 0 60% (the V340 kernel's split).
+#[device(chip = 1)]
+pub fn probe_attn_load_k60(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 96, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 96, m![H / 120, H % 120 = 96 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![H / 1920, H % 120 = 24, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 24, m![H / 120, H % 120 = 24 # 120, Qs]>(96)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 96, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 120 = 96, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 96], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 96], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![1], m![H / 1920, H % 120 = 24, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H / 1920, H % 120 = 24, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H / 1920, H % 120 = 24], m![Qs % 256 = 32]>()
+        .collect::<m![H / 1920, H % 120 = 24], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V345 probe: R = 88, cluster 0 63.3%.
+#[device(chip = 1)]
+pub fn probe_attn_load_k63(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 88, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![H / 1920, H % 120 = 32, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 # 120, Qs]>(88)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 88, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 120 = 88, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 88], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 88], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![1], m![H / 1920, H % 120 = 32, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H / 1920, H % 120 = 32, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H / 1920, H % 120 = 32], m![Qs % 256 = 32]>()
+        .collect::<m![H / 1920, H % 120 = 32], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V345 probe: R = 80, cluster 0 66.7%.
+#[device(chip = 1)]
+pub fn probe_attn_load_k67(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 80, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 80, m![H / 120, H % 120 = 80 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![H / 1920, H % 120 = 40, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 40, m![H / 120, H % 120 = 40 # 120, Qs]>(80)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 80, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 120 = 80, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 80], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 80], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![1], m![H / 1920, H % 120 = 40, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H / 1920, H % 120 = 40, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H / 1920, H % 120 = 40], m![Qs % 256 = 32]>()
+        .collect::<m![H / 1920, H % 120 = 40], m![Qs % 256 = 32]>()
+        .to_trf();
+}
+
+/// V345 probe: R = 72, cluster 0 70%.
+#[device(chip = 1)]
+pub fn probe_attn_load_k70(ctx: &mut Context, o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>) {
+    let t0: DmTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![H % 120 = 72, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 72, m![H / 120, H % 120 = 72 # 120, Qs]>(0)
+        .to_dm(&mut ctx.tdma);
+    let t1: DmTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![H / 1920, H % 120 = 48, Qs % 256]> = o_weight
+        .view()
+        .tile::<m![H % 120], 48, m![H / 120, H % 120 = 48 # 120, Qs]>(72)
+        .to_dm(&mut ctx.tdma);
+    let _k0: TrfTensor<f8e4m3, Chip, m![H / 1920], m![H / 120 % 16, Qs / 256], m![1], m![H % 120 = 72, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t0.view().tile::<m![Qs % 256], 32, m![H % 120 = 72, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H % 120 = 72], m![Qs % 256 = 32]>()
+        .collect::<m![H % 120 = 72], m![Qs % 256 = 32]>()
+        .to_trf();
+    let _k1: TrfTensor<f8e4m3, Chip, m![1 # 2], m![H / 120 % 16, Qs / 256], m![1], m![H / 1920, H % 120 = 48, Qs % 256 = 32]> = ctx
+        .sub
+        .begin(t1.view().tile::<m![Qs % 256], 32, m![H / 1920, H % 120 = 48, Qs % 256 = 32 # 256]>(0))
+        .fetch::<m![H / 1920, H % 120 = 48], m![Qs % 256 = 32]>()
+        .collect::<m![H / 1920, H % 120 = 48], m![Qs % 256 = 32]>()
+        .to_trf();
+}
