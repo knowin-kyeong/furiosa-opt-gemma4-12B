@@ -375,3 +375,79 @@ pub(crate) fn broadcast_scalar_blocks(
         .commit();
     unsafe { all.reshape() }
 }
+
+// ---------------------------------------------------------------------------------------------
+// V369: the qkv input norm without its scalar. q, k and v each pass through a head RMSNorm (q_norm, k_norm, v_norm)
+// before anything reads them, so the input norm's division by rms cancels in all three outputs (the error is about
+// eps / (2 ms), with per-head projection mean squares >= 4.85 on the fixture): only the element-wise weight multiply
+// is kept. This takes the mean-square pass, the cross-slice sum/+EPS pass, the sqrt pass and the rms VRF staging out of
+// the TU queue in front of the Q weight load, and the normalize pass commits bf16 itself (no separate cast pass).
+// New functions only; the functions above (shared with ffn) are unchanged.
+// ---------------------------------------------------------------------------------------------
+
+/// x * rms_weight, committed as bf16.
+pub(crate) fn weight_blocks_bf16(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> {
+    let weight_dm: DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> = rms_weight.to_dm(&mut ctx.tdma);
+    let weight_vrf: VrfTensor<f32, Chip, XCl, XBlocks, m![H % 480]> = ctx
+        .sub
+        .begin(weight_dm.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
+        .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit()
+}
+
+/// `stage_x_hi_lo_blocks` for an input already committed as bf16 (no leading cast pass; ported from V353).
+pub(crate) fn stage_x_hi_lo_blocks_bf16(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+) -> DmTensor<f8e4m3, Chip, XCl, XBlocks, m![Dummy2, H % 480]> {
+    let m_local = max_square_blocks(ctx, x);
+    let m_all: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![Ns, 1 # 4, Dummy8], m![1]>(InterSliceReduceOpF32::Max)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = unsafe { m_all.reshape() };
+    let (s, _inv_s) = pow2_scale_blocks(ctx, &m_all);
+    let s_vrf = stage_packet_blocks(ctx, &s);
+
+    let (x_hi, x_lo) = hi_lo_blocks(ctx, x, &s_vrf);
+    let mut x2: DmTensor<f8e4m3, Chip, XCl, XBlocks, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
+    x2
+}
