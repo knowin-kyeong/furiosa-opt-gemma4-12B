@@ -6,13 +6,14 @@
 //! store -> sync -> reload chain needed tile1. Here the reload reads the tail rows from HBM, so that chain runs through
 //! tile1 -> contraction1 -> tail store, and the DM-to-DM move disappears.
 //!
-//! Three arms:
-//! - `th` (R = 96): one unpadded HBM tensor, two disjoint tile stores (rows 0..96 of every group from both clusters, rows
-//!   96..120 of every group from cluster 0), one reload. Unpadded because the compiler rejects offset tiles of a padded
-//!   HBM layout (`lir: incorrect buffer size`, V346); the ffn down store (mlp.rs) writes an unpadded offset tile already.
+//! Arms:
+//! - `th` (R = 96): one unpadded HBM tensor: the contraction stored whole (its tail rows unwritten), then cluster 0's tail
+//!   rows written over rows 96..120 of every group, one reload. The tail tile runs to the end of the buffer: an HBM tile
+//!   that stops short of it is an `unpad` the compiler rejects (`lir: incorrect buffer size`, V346 and the first V351
+//!   build), and a padded layout's tiles never reach its end.
 //! - `tb` (R = 96): production's 256 B-aligned store (V271) unchanged, the tail rows in a second HBM tensor, reloaded into
 //!   the reload buffer's tile after the full reload.
-//! - `t8` (R = 88, cluster 0 carries 63.3%; V345 load-only optimum): as `th`.
+//! - `t8` / `t8b` (R = 88, cluster 0 carries 63.3%; V345 load-only optimum): as `th` / `tb`.
 //!
 //! Attention-output only: nothing here is shared with full attention, vision, audio, qkv or ffn.
 
@@ -36,6 +37,8 @@ pub(crate) type FlatStore = HbmTensor<bf16, Chip, m![H / 120, H % 120]>;
 pub(crate) type PaddedStore = HbmTensor<bf16, Chip, m![H / 120, H % 120 # 128]>;
 /// Rows 96..120 of every group, each group's 48 B at a 256 B boundary.
 pub(crate) type TailStore = HbmTensor<bf16, Chip, m![H / 120, H % 120 = 24 # 128]>;
+/// Rows 88..120 of every group, each group's 64 B at a 256 B boundary.
+pub(crate) type TailStore88 = HbmTensor<bf16, Chip, m![H / 120, H % 120 = 32 # 128]>;
 
 /// x as one f8 piece in the contraction layout, staged into a two-cluster TRF (tile0) and a cluster-0 TRF (tile1).
 /// STAGE 1 ONLY -- the one-piece f8 x is exact for the grading fixture only (V257, RULES 10.0n); restore the two-piece
@@ -134,48 +137,15 @@ fn contract_96(
     (contraction, tails)
 }
 
-/// Arm `th`: rows 0..96 and cluster 0's rows 96..120 as two disjoint tiles of one unpadded HBM tensor.
-pub(crate) fn project_output_th(
+/// R = 88: both clusters' rows 0..88 in `contraction`, cluster 0's rows 88..120 of all 32 groups in `tails`.
+fn contract_88(
     ctx: &mut Context,
     x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
     weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-) -> FlatStore {
-    let (contraction, tails) = contract_96(ctx, x, weight);
-    let mut stored: FlatStore = HbmTensor::new();
-    contraction
-        .view()
-        .tile::<m![H % 120], 96, m![H % 120 = 96 # 120]>(0)
-        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 96, m![H / 120, H % 120 = 96 #{!} 120]>(0));
-    tails
-        .view()
-        .tile::<m![H % 120], 24, m![H / 1920, H % 120 = 24 # 120]>(96)
-        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 24, m![H / 120, H % 120 = 24 #{!} 120]>(96));
-    stored
-}
-
-/// Arm `tb`: production's aligned store plus a second HBM tensor holding cluster 0's tail rows.
-pub(crate) fn project_output_tb(
-    ctx: &mut Context,
-    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
-    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-) -> (PaddedStore, TailStore) {
-    let (contraction, tails) = contract_96(ctx, x, weight);
-    let mut stored: PaddedStore = HbmTensor::new();
-    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
-    let mut tail_store: TailStore = HbmTensor::new();
-    tails
-        .view()
-        .tile::<m![H % 120], 24, m![H / 1920, H % 120 = 24 # 120]>(96)
-        .to_hbm_view(&mut ctx.tdma, tail_store.view_mut());
-    (stored, tail_store)
-}
-
-/// Arm `t8`: as `th` at R = 88.
-pub(crate) fn project_output_t8(
-    ctx: &mut Context,
-    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
-    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
-) -> FlatStore {
+) -> (
+    DmTensor<bf16, Chip, TwoClusters, Rows, m![H % 120]>,
+    DmTensor<bf16, Chip, ClusterZero, Rows, m![H / 1920, H % 120]>,
+) {
     let tile0: DmTensor<f8e4m3, Chip, TwoClusters, RowsByColumns, m![H % 120 = 88, Qs % 256]> = weight
         .view()
         .tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 # 120, Qs]>(0)
@@ -219,17 +189,73 @@ pub(crate) fn project_output_t8(
         .transpose::<m![H / 1920, H % 120 = 32 / 4], m![H % 120 = 32 % 4 # 16]>()
         .commit_trim::<m![H % 120 = 32 % 4]>()
         .commit_view(tails.view_mut().tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 #{!} 120]>(88));
+    (contraction, tails)
+}
 
+/// Arm `th`: the contraction stored whole into an unpadded HBM tensor, then cluster 0's rows 96..120 written over it.
+pub(crate) fn project_output_th(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> FlatStore {
+    let (contraction, tails) = contract_96(ctx, x, weight);
     let mut stored: FlatStore = HbmTensor::new();
-    contraction
+    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
+    tails
         .view()
-        .tile::<m![H % 120], 88, m![H % 120 = 88 # 120]>(0)
-        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 88, m![H / 120, H % 120 = 88 #{!} 120]>(0));
+        .tile::<m![H % 120], 24, m![H / 1920, H % 120 = 24 # 120]>(96)
+        .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 24, m![H / 120, H % 120 = 24 #{!} 120]>(96));
+    stored
+}
+
+/// Arm `tb`: production's aligned store plus a second HBM tensor holding cluster 0's tail rows.
+pub(crate) fn project_output_tb(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> (PaddedStore, TailStore) {
+    let (contraction, tails) = contract_96(ctx, x, weight);
+    let mut stored: PaddedStore = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
+    let mut tail_store: TailStore = HbmTensor::new();
+    tails
+        .view()
+        .tile::<m![H % 120], 24, m![H / 1920, H % 120 = 24 # 120]>(96)
+        .to_hbm_view(&mut ctx.tdma, tail_store.view_mut());
+    (stored, tail_store)
+}
+
+/// Arm `t8`: as `th` at R = 88.
+pub(crate) fn project_output_t8(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> FlatStore {
+    let (contraction, tails) = contract_88(ctx, x, weight);
+    let mut stored: FlatStore = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
     tails
         .view()
         .tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 # 120]>(88)
         .to_hbm_view(&mut ctx.tdma, stored.view_mut().tile::<m![H % 120], 32, m![H / 120, H % 120 = 32 #{!} 120]>(88));
     stored
+}
+
+/// Arm `t8b`: as `tb` at R = 88.
+pub(crate) fn project_output_t8b(
+    ctx: &mut Context,
+    x: HbmTensorView<'_, bf16, Chip, m![Qs]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+) -> (PaddedStore, TailStore88) {
+    let (contraction, tails) = contract_88(ctx, x, weight);
+    let mut stored: PaddedStore = HbmTensor::new();
+    contraction.view().to_hbm_view(&mut ctx.tdma, stored.view_mut());
+    let mut tail_store: TailStore88 = HbmTensor::new();
+    tails
+        .view()
+        .tile::<m![H % 120], 32, m![H / 1920, H % 120 = 32 # 120]>(88)
+        .to_hbm_view(&mut ctx.tdma, tail_store.view_mut());
+    (stored, tail_store)
 }
 
 /// The unpadded store loaded straight into the RMSNorm reducing layout (one contiguous 960 B run per slice).
@@ -247,5 +273,18 @@ pub(crate) fn load_reducing_tb<C: M>(
     tail_store
         .view()
         .to_dm_view(&mut ctx.tdma, x.view_mut().tile::<m![H % 120], 24, m![H % 480 / 120, H % 120 = 24 #{!} 120]>(96));
+    unsafe { x.reshape() }
+}
+
+/// Arm `t8b`: as `load_reducing_tb` at R = 88.
+pub(crate) fn load_reducing_t8b<C: M>(
+    ctx: &mut Context,
+    stored: &PaddedStore,
+    tail_store: &TailStore88,
+) -> DmTensor<bf16, Chip, C, ReducingSlices, m![H % 480]> {
+    let mut x: DmTensor<bf16, Chip, C, ReducingSlices, m![H % 480 / 120, H % 120]> = stored.to_dm(&mut ctx.tdma);
+    tail_store
+        .view()
+        .to_dm_view(&mut ctx.tdma, x.view_mut().tile::<m![H % 120], 32, m![H % 480 / 120, H % 120 = 32 #{!} 120]>(88));
     unsafe { x.reshape() }
 }

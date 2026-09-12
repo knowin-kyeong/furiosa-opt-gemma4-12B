@@ -397,14 +397,13 @@ const FFN_SWEEP: &[&str] = &[""; 3];
 /// Just enough launches of the other two kernels to keep the accuracy guardrail honest.
 const QKV_SWEEP: &[&str] = &[""; 3];
 
-/// V351: production ("") and the three tail-store arms, each launched 5 times; the shim rotates the start by wall-clock
+/// V351: production ("") and the four tail-store arms, each launched 4 times; the shim rotates the start by wall-clock
 /// minute so reruns change which arm launches first.
 const ATTN_SWEEP: &[&str] = &[
-    "th", "tb", "t8", "",
-    "tb", "t8", "", "th",
-    "t8", "", "th", "tb",
-    "", "th", "tb", "t8",
-    "th", "tb", "t8", "",
+    "th", "tb", "t8", "t8b", "",
+    "tb", "t8", "t8b", "", "th",
+    "t8", "t8b", "", "th", "tb",
+    "t8b", "", "th", "tb", "t8",
 ];
 
 const PLAN: &[Plan] = &[
@@ -549,6 +548,20 @@ async fn sliding_attention_output(
             "t8" => {
                 launch(
                     ops::sliding_attention_output_t8,
+                    (
+                        ctx,
+                        &x,
+                        &post_attn_rms_weight,
+                        &o_weight,
+                        &o_weight_scale,
+                        &mut residual,
+                    ),
+                )
+                .await;
+            }
+            "t8b" => {
+                launch(
+                    ops::sliding_attention_output_t8b,
                     (
                         ctx,
                         &x,
