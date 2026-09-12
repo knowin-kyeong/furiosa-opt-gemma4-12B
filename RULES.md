@@ -445,6 +445,11 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 새 세션이 이 저장소에서 작업을 시작하면:
 
+0. **`0913_handoff.md`(2026-09-13 이관 문서)를 먼저 읽는다.** 이 문서에 다음이 한곳에 모여 있다.
+   - 현재 상태 · 코드 SOTA · draw 상태
+   - 이번 세션 실험 · 새로 확인한 사실 · 커널별 임계 경로
+   - 인프라 · 절차 · 재개 체크리스트
+   - 스크립트 사본: `scripts/dev/tk/`
 1. `RULES.md`(이 문서) → `RESULTS.md` → `SOTA.md` 순서로 읽는다.
 2. `git branch -a`로 현재까지의 실험 목록을 본다.
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.

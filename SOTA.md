@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (3):** draw — V360_submit 12회(UTC 09-12 16:04~17:53) 평균 6.894 · 최고 **7.1385**(`e3540caa`: 87,932 · 42,746 · 274,556). V367_submit 배치 1 시작(UTC 17:53): 7.1182 · 6.8743. 공식 최고 7.4197 그대로(2위 / 21팀; 1위 vinxst 7.4769, 3위 #663 7.3402). 세션 이관 문서 **`0913_handoff.md`**, 스크립트 사본 `scripts/dev/tk/`.
+
 > **2026-09-13 (2):** 코드 SOTA → **`V367_submit`** (d94d994 = V360_submit + ffn 꼬리 곱 `down_global × out_scale`을 post-FF norm에 접음 — V366 T1: g를 앞쪽 작은 pass에서 한 번 만들고 mean-square는 `x·g`로, rms는 g로 나눠 final pass는 그대로). V366 짝비교 t1 − 생산 **12/16 −1,234 (−0.46%), 중앙값 −1,645**(t1이 첫 launch인 잡 8개 모두 PASS, 정적 −401과 부호 일치). **Arena 25/25 PASS ×2**(job 23353 + rerun; 첫 launch qkv 97,018 · attn 44,934 · ffn 270,373). draw 체인 → V367_submit(돌던 V360 배치 뒤, `/root/drawswitch_v367.sh`). V360_submit draw 6.9998 · 6.7698 · 6.8900. 공식 최고 7.4197 그대로(2위).
 
 > **2026-09-13 (1):** 코드 SOTA **`V360_submit`** 그대로. 이번 라운드 V361(pair-mode RoPE +5.5%) · V362(unscaled gather 중립) · V363(공유 HBM 인덱스 +0.9%) · V364(x 경로를 Q 로드 뒤로 +0.6%) · V352y(attn c 합산 24/48) 모두 기각. draw 체인은 V350_submit 12회(최고 7.1187) 뒤 **V360_submit으로 넘어갔다**(첫 draw 6.9998). 공식 최고 7.4197 그대로(2위). ffn geglu 동기화 창을 down 로드로 채우는 순서 강제 탐침 V365 진행 중. 세션 이관 RULES §10.0w.
