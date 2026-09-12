@@ -74,27 +74,28 @@ pub fn sliding_project_qkv(
     let q = sliding::projection::project_query_hi(ctx, &x, &q_weight);
     let (k, v) = sliding::projection::project_key_value_hi(ctx, &x, &k_weight, &v_weight);
 
+    // V355: the head norms and RoPE commit bf16 through the Commit Adapter (commit_cast), 25/32 paired jobs, -1.6%.
     // The projections' per-channel weight scales are folded into the head RMSNorms (their
     // loads are eight descriptors in the head layout instead of 512 in the projection layout).
-    let q = sliding::rmsnorm::normalize_query_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let q = sliding::rmsnorm::normalize_query_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
         &q,
         q_weight_scale,
         q_rms_weight,
     );
-    let k = sliding::rmsnorm::normalize_key_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let k = sliding::rmsnorm::normalize_key_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
         &k,
         k_weight_scale,
         k_rms_weight,
     );
-    let v = sliding::rmsnorm::normalize_value_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let v = sliding::rmsnorm::normalize_value_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
         &v,
         v_weight_scale,
     );
 
-    let (q, k) = sliding::rope::apply_rope_heads::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    let (q, k) = sliding::rope::apply_rope_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
         &q,
         &k,
