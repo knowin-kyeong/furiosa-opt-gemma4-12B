@@ -95,7 +95,7 @@ pub(crate) fn project_output_88(
         .cast::<bf16, m![1 # 16]>()
         .transpose::<m![H % 120 = 88 / 4], m![H % 120 = 88 % 4 # 16]>()
         .commit_trim::<m![H % 120 = 88 % 4]>()
-        .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 240]>(0));
+        .commit_view(contraction.view_mut().tile::<m![H % 120], 88, m![H % 120 = 88 #{!} 120 # 240]>(0));
 
     // Cluster 0: rows 88..120 of all 32 groups. Seen as [H / 1920, H % 120], the padded buffer puts cluster 0's own groups
     // in its real rows and cluster 1's groups in its padding. (The compiler follows an owned reshape, not a reshaped
