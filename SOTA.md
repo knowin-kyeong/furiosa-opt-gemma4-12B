@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (4):** draw 대상 → **`V368_submit`** (a679b8c = V367_submit + attn 본문만 V313 대칭 96/24 경로). 근거: V340 비균등 타일은 짝비교 중앙값에서 −1.2%였지만 draw의 하위 꼬리를 잘랐다 — draw attn 최저 38,347 → 42,620 · p10 40,405 → 42,822(중앙값 동일), Arena v340 로그 pooled p10 +1,620(+3.45%, 90% job-bootstrap [+38, +2,436]). 96회 기대 최고값 부트스트랩 7.160 → 7.335. 제출 검증 Arena job 24443 25/25 + rerun 25/25. 돌던 V367 배치 뒤 전환(`/root/drawswitch_v368.sh`). V367_submit draw 42회 최고 7.1798. 재설계 계획(V368~V376 등록): 판정 기준에 draw 꼬리(p10 · 최저 · 기대 최고값)를 추가.
+
 > **2026-09-13 (3):** draw — V360_submit 12회(UTC 09-12 16:04~17:53) 평균 6.894 · 최고 **7.1385**(`e3540caa`: 87,932 · 42,746 · 274,556). V367_submit 배치 1 시작(UTC 17:53): 7.1182 · 6.8743. 공식 최고 7.4197 그대로(2위 / 21팀; 1위 vinxst 7.4769, 3위 #663 7.3402). 세션 이관 문서 **`0913_handoff.md`**, 스크립트 사본 `scripts/dev/tk/`.
 
 > **2026-09-13 (2):** 코드 SOTA → **`V367_submit`** (d94d994 = V360_submit + ffn 꼬리 곱 `down_global × out_scale`을 post-FF norm에 접음 — V366 T1: g를 앞쪽 작은 pass에서 한 번 만들고 mean-square는 `x·g`로, rms는 g로 나눠 final pass는 그대로). V366 짝비교 t1 − 생산 **12/16 −1,234 (−0.46%), 중앙값 −1,645**(t1이 첫 launch인 잡 8개 모두 PASS, 정적 −401과 부호 일치). **Arena 25/25 PASS ×2**(job 23353 + rerun; 첫 launch qkv 97,018 · attn 44,934 · ffn 270,373). draw 체인 → V367_submit(돌던 V360 배치 뒤, `/root/drawswitch_v367.sh`). V360_submit draw 6.9998 · 6.7698 · 6.8900. 공식 최고 7.4197 그대로(2위).
