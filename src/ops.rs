@@ -338,50 +338,153 @@ fn decoder_feedforward_v373_body(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
-macro_rules! v373_arm {
-    ($name:ident, $probe:ident, $probed:ident) => {
-        /// V373 load-probe arm: production ffn plus one extra load (see `shared::mlp::$probe`).
-        #[device(chip = 1)]
-        pub fn $name(
-            ctx: &mut Context,
-            residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
-            pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
-            up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
-            gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
-            down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
-            up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
-            gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
-            down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
-            up_global_scale: &HbmTensor<f32, Chip, m![1]>,
-            gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
-            down_global_scale: &HbmTensor<f32, Chip, m![1]>,
-            post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
-            layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
-        ) {
-            shared::mlp::$probe(ctx, $probed);
-            decoder_feedforward_v373_body(
-                ctx,
-                residual_hbm,
-                pre_ff_rms_weight,
-                up_weight_packed,
-                gate_weight_packed,
-                down_weight_packed,
-                up_weight_scale,
-                gate_weight_scale,
-                down_weight_scale,
-                up_global_scale,
-                gate_global_scale,
-                down_global_scale,
-                post_ff_rms_weight,
-                layer_scalar,
-            );
-        }
-    };
+/// V373 load-probe arm: production ffn plus one extra load (down weight, production 8 x 1920 chunks, `shared::mlp::probe_down_weight_c1920`).
+#[device(chip = 1)]
+pub fn decoder_feedforward_w19(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    shared::mlp::probe_down_weight_c1920(ctx, down_weight_packed);
+    decoder_feedforward_v373_body(
+        ctx,
+        residual_hbm,
+        pre_ff_rms_weight,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        up_global_scale,
+        gate_global_scale,
+        down_global_scale,
+        post_ff_rms_weight,
+        layer_scalar,
+    );
 }
-v373_arm!(decoder_feedforward_w19, probe_down_weight_c1920, down_weight_packed);
-v373_arm!(decoder_feedforward_w10, probe_down_weight_c1024, down_weight_packed);
-v373_arm!(decoder_feedforward_s19, probe_down_scale_c1920, down_weight_scale);
-v373_arm!(decoder_feedforward_s10, probe_down_scale_c1024, down_weight_scale);
+
+/// V373 load-probe arm: production ffn plus one extra load (down weight, 16 x 1024-column slots, `shared::mlp::probe_down_weight_c1024`).
+#[device(chip = 1)]
+pub fn decoder_feedforward_w10(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    shared::mlp::probe_down_weight_c1024(ctx, down_weight_packed);
+    decoder_feedforward_v373_body(
+        ctx,
+        residual_hbm,
+        pre_ff_rms_weight,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        up_global_scale,
+        gate_global_scale,
+        down_global_scale,
+        post_ff_rms_weight,
+        layer_scalar,
+    );
+}
+
+/// V373 load-probe arm: production ffn plus one extra load (down block scale, production layout, `shared::mlp::probe_down_scale_c1920`).
+#[device(chip = 1)]
+pub fn decoder_feedforward_s19(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    shared::mlp::probe_down_scale_c1920(ctx, down_weight_scale);
+    decoder_feedforward_v373_body(
+        ctx,
+        residual_hbm,
+        pre_ff_rms_weight,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        up_global_scale,
+        gate_global_scale,
+        down_global_scale,
+        post_ff_rms_weight,
+        layer_scalar,
+    );
+}
+
+/// V373 load-probe arm: production ffn plus one extra load (down block scale, 64-block slots, `shared::mlp::probe_down_scale_c1024`).
+#[device(chip = 1)]
+pub fn decoder_feedforward_s10(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    shared::mlp::probe_down_scale_c1024(ctx, down_weight_scale);
+    decoder_feedforward_v373_body(
+        ctx,
+        residual_hbm,
+        pre_ff_rms_weight,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        up_global_scale,
+        gate_global_scale,
+        down_global_scale,
+        post_ff_rms_weight,
+        layer_scalar,
+    );
+}
 
 #[device(chip = 1)]
 pub fn final_norm_and_logits(
