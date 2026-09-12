@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-12 (6):** 코드 SOTA → **`V340_submit`** (V313_submit + attn_out 비균등 타일: tile0 두 클러스터 대칭 · tile1 클러스터 0 전용 · 꼬리 행 DM→DM; 짝비교 32잡 24/32 −1.2%, p≈0.007; Arena 25/25 PASS ×2, fd9eeda). 공식: **1위 vinxst 7.4769** (`97bbe09c` — 89,174 / **33,437** / 301,213) · **우리 2위 7.4197** (`a9c7c0d6`, V313_submit draw — 90,189 / 38,347 / 265,737) · 3위 #663 7.3097. vinxst의 attn은 우리 draw 137회 최저보다 13% 아래라 구조 차이다(RULES §10.0u).
+
 > **2026-09-12 (5):** 코드 SOTA → **`V313_submit`** (V306_submit + ffn down 출력 단일 store, 짝비교 12/12 −1.04%; Arena 25/25 PASS ×2, 8a38b1b). V306_submit draw 최고 7.2047 — 공식 최고 7.2264 그대로 (2위).
 
 > **2026-09-12 (4):** 코드 SOTA → **`V306_submit`** (V301_submit + ffn out_scale을 꼬리 곱으로, 짝비교 12/12 −1.76%; Arena 25/25 PASS ×2, a589eed). V301_submit draw 6.82 / 6.34 / 7.03 / 6.69 / 6.90 / 6.45 — 공식 최고 7.2264 그대로 (2위).
