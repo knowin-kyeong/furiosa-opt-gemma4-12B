@@ -375,3 +375,180 @@ pub(crate) fn broadcast_scalar_blocks(
         .commit();
     unsafe { all.reshape() }
 }
+
+// ---------------------------------------------------------------------------------------------
+// V353: qkv head pass trims. On hardware (jb_r1, production qkv #1) the Q weight load is issued only at 9.5k: the PE
+// walks the static order and every x-path TU pass in front of the load has to start first. Each helper below takes a
+// pass out of that queue: the fused norm (V263's cross-slice sum inside the mean-square pass) and a normalize pass that
+// commits bf16 itself, so `stage_x_hi_lo_blocks_bf16` has no leading cast pass. New functions only; the functions above
+// (shared with ffn) are unchanged.
+// ---------------------------------------------------------------------------------------------
+
+/// `normalize_blocks_f32` (three-pass norm) with the normalize pass committing bf16.
+pub(crate) fn normalize_blocks_bf16(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> {
+    let mean_square: DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(H_F32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let reduced_mean_square: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![Ns, 1 # 4, Dummy8], m![1]>(InterSliceReduceOpF32::Add)
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_clip(ClipBinaryOpF32::Add, EPS)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let rms: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(reduced_mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let rms: DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = unsafe { rms.reshape() };
+    normalize_blocks_final_bf16(ctx, x, &rms, rms_weight)
+}
+
+/// `normalize_blocks_f32_fused` (two-pass norm) with the normalize pass committing bf16.
+pub(crate) fn normalize_blocks_bf16_fused(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> {
+    let reduced_mean_square: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_stash()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), Stash)
+        .vector_intra_slice_reduce::<H, m![1], m![1 # 4]>(IntraSliceReduceOpF32::Add)
+        .vector_fp_div(H_F32)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_inter_slice_reduce::<m![Ns, 1 # 4, Dummy8], m![1]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let rms: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .main
+        .begin(reduced_mean_square.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![1 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, EPS)
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_pad::<m![1 # 8]>()
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let rms: DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = unsafe { rms.reshape() };
+    normalize_blocks_final_bf16(ctx, x, &rms, rms_weight)
+}
+
+/// The weight and rms stagings and the normalize pass, committing bf16 (the cast `stage_x_hi_lo_blocks` starts with).
+fn normalize_blocks_final_bf16(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+    rms: &DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]>,
+    rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+) -> DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> {
+    let weight_dm: DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]> = rms_weight.to_dm(&mut ctx.tdma);
+    let weight_vrf: VrfTensor<f32, Chip, XCl, XBlocks, m![H % 480]> = ctx
+        .sub
+        .begin(weight_dm.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .to_vrf();
+    let rms_vrf: VrfTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = ctx
+        .sub
+        .begin(rms.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(x.view())
+        .fetch::<m![H / 16 % 30], m![H % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![H / 8 % 60], m![H % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H / 4 % 120], m![H % 4]>()
+        .vector_fp_binary(FpBinaryOp::DivF, &rms_vrf)
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
+        .vector_widen_concat::<m![H / 8 % 60], m![H % 8]>()
+        .vector_final()
+        .cast::<bf16, m![H % 8 # 16]>()
+        .commit_trim::<m![H % 8]>()
+        .commit()
+}
+
+/// `stage_x_hi_lo_blocks` for an input the normalize pass already committed as bf16 (no leading cast pass).
+pub(crate) fn stage_x_hi_lo_blocks_bf16(
+    ctx: &mut Context,
+    x: &DmTensor<bf16, Chip, XCl, XBlocks, m![H % 480]>,
+) -> DmTensor<f8e4m3, Chip, XCl, XBlocks, m![Dummy2, H % 480]> {
+    let m_local = max_square_blocks(ctx, x);
+    let m_all: DmTensor<f32, Chip, XCl, m![Ns, 1 # 4, Dummy8], m![1 # 8]> = ctx
+        .sub
+        .begin(m_local.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![Ns, 1 # 4, Dummy8], m![1]>(InterSliceReduceOpF32::Max)
+        .vector_final()
+        .commit_trim::<m![1 # 8]>()
+        .commit();
+    let m_all: DmTensor<f32, Chip, XCl, XBlocks, m![1 # 8]> = unsafe { m_all.reshape() };
+    let (s, _inv_s) = pow2_scale_blocks(ctx, &m_all);
+    let s_vrf = stage_packet_blocks(ctx, &s);
+
+    let (x_hi, x_lo) = hi_lo_blocks(ctx, x, &s_vrf);
+    let mut x2: DmTensor<f8e4m3, Chip, XCl, XBlocks, m![Dummy2, H % 480]> = DmTensor::new();
+    ctx.main
+        .begin(x_hi.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(0));
+    ctx.main
+        .begin(x_lo.view())
+        .fetch::<m![H / 32 % 15], m![H % 32]>()
+        .collect::<m![H / 32 % 15], m![H % 32]>()
+        .commit_trim::<m![H % 32]>()
+        .commit_view(x2.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, H % 480]>(1));
+    x2
+}
