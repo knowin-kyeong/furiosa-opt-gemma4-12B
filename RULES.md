@@ -512,8 +512,18 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
   - 다만 태그는 pipeline당 `vector_intra_slice_tag` 하나다(AxisToggle = 축 하나 = 비트 하나). 128칸 램프에 7 pass가 든다.
   - RoPE 동기화 둘을 모두 없애는 유일한 경로라 V382 결과로 가치가 올랐다.
 
+**2라운드 (UTC 03~06시, 사용자 부재 중 · 리더보드 서버는 02:11부터 불통).** 전부 RESULTS V384~V390.
+- **V384 기각:** ffn 1/s store를 256 B 정렬 블록으로 — 3/16 +0.49%. 그 6.6k는 RMW가 아니다.
+- **V385 기각(정확하지만 느림):** 칩 위 RoPE. `AxisToggle`은 lowering 안 됨 → w=[0,1] replay-fetch 배가로 인덱스 램프(pass당 1비트), 하드웨어 Sin/Cos는 큰 인자에서 NaN → [−π, π] 축소 필수. 정확도는 생산과 비트 동일. v3 0/32 +12.6%(긴 사슬이 weight 로드 앞으로 당겨짐), v4 0/32 +7.5%(정적 최적이어도 Main 16 · sub 10 pass가 V 로드 발행을 늦춤). 메모리 `on-chip-rope-and-scheduler-priority`.
+- **V387 · V389 · V389b 기각(0/32, +4.0 · +4.7 · +9.3%):** RoPE staging(store · sync · reload)을 K 뒤 · V 뒤 · K+V 뒤로. **교훈: 임계 경로는 클러스터 1의 사슬이고, 꼬리의 pass · store · reload는 전액 청구되며 weight 스트림 아래의 TU pass는 두 클러스터 모두 공짜다. V383이 국소 최적 — RoPE staging 줄은 닫는다.**
+- **V390 중립(8/16 −0.08%) · V390b c2 중립(8/16 −0.23%, p05 −0.88% 유의):** ffn down 단계를 열 절반으로 — 1/s store와 geglu 두 번째 sync가 사라져 geglu 구간 −4.7k(설계대로)인데, 부분합 두 개의 store(15 KB · 128 세그먼트)가 +2.9k, 꼬리 +1.2k로 되갚는다. `cluster_tile`은 어떤 축으로도 lowering되지 않아 한 클러스터만 store할 수 없다(c3 · c4). c2 32잡 판정 대기.
+- **컴파일러 사실(메모리 `furiosa-opt-mapping-constraints`):** `cluster_tile` 불가, `AxisToggle` 불가, 다른 레이아웃의 VRF 피연산자는 허용, `to_dm_view` 클러스터 재배치 허용, `narrow_trim`은 live 레인을 못 자름.
+
 **다음 후보.**
-- **Q2' 칩 위 RoPE.** custom 축 7 pass 램프 → `vector_fxp_to_fp` → Exp · Cos · Sin.
+- **ffn 부분합 store 쪼개기(c5):** down 타일 0~2의 행(80%)을 별도 HBM 텐서로 먼저 store해 타일 3 contraction 아래에 숨기고, 타일 3의 행만 마지막에 store → 마지막 fence가 짧아진다(≤ 2k). "한 HBM 텐서에 store 둘"(V351 +7%)을 피하려면 텐서 둘 + reload 둘.
+- **qkv 헤드 비대칭 분할(5/3):** 클러스터 1의 weight 바이트를 줄인다(attn의 c0 63%와 같은 원리). 큰 재설계.
+- ~~Q2' 칩 위 RoPE~~ → V385로 종결.
+- ~~**Q2' 칩 위 RoPE.** custom 축 7 pass 램프 → `vector_fxp_to_fp` → Exp · Cos · Sin.~~
   - rope_offset 로드와 `LogicRightShift 9`는 V362 코드(`apply_rope_heads_cc_ug`)를 재사용한다.
   - fixture: POS = 137이고, 테이블에는 POS 행만 채워져 있다. θ_i = 10000^(−2i/256), i = d mod 128이고 sin은 아래 절반이 음수다. 칩에서 계산해도 정확한 산술이라 fixture 의존이 아니다.
 - **attn · ffn 동기화 점검.** ExplicitSync의 개수 · 위치를 점검한다(호스트 대기 노출). 판정은 공식 조건(첫 launch · draw)을 기준으로 한다.
