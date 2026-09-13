@@ -790,3 +790,249 @@ pub(crate) fn apply_rope_heads_cc_1s<C: M, S: M>(
 
     (result_q, result_k)
 }
+
+/// V389b: `apply_rope_heads_cc_1s` with the staging copy passes dependent on both raw K and V projection outputs.
+pub(crate) fn apply_rope_heads_cc_lkv<C: M, S: M>(
+    ctx: &mut Context,
+    q: &DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    dep_k: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    dep_v: &DmTensor<bf16, Chip, C, S, m![Ds]>,
+    rope_offset: &HbmTensor<i32, Chip, m![1]>,
+    cos: &HbmTensor<bf16, Chip, m![E, Ds]>,
+    sin: &HbmTensor<bf16, Chip, m![E, Ds]>,
+) -> (
+    DmTensor<bf16, Chip, C, S, m![Gs, Ds]>,
+    DmTensor<bf16, Chip, C, S, m![Ds]>,
+) {
+    // The gathered rows land on one cluster; stage them through HBM so both clusters can
+    // load them into the head layout (a DM-to-DM DMA cannot change the cluster mapping).
+    // V30 gathered straight into the head layout on the premise that a cluster or slice axis
+    // absent from the table replicates. It does not (V50): the slices that were not written
+    // read uninitialised HBM, and q and k came out non-finite from d = 129 on while v, which
+    // takes no RoPE, stayed correct.
+    // The two gathered rows share one staging buffer, so the head layout is filled by a single
+    // load instead of two. V189 priced each trip through HBM at 2.2k real cycles and the pair of
+    // gathers at 1.8k; dropping one load was worth 3.4k warm and 8.5k cold.
+    let cos_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = cos.dma_gather_scaled(rope_offset);
+    let sin_row: DmTensor<bf16, Chip, Cluster, Slice, m![Ds]> = sin.dma_gather_scaled(rope_offset);
+    // V383: both rows are copied on chip into one cluster-0 staging buffer and stored by ONE HBM store, so a single
+    // ExplicitSync (instead of one per row) stands in front of the head-layout reload. The first-launch penalty and
+    // the random cross-cluster wait land on those syncs (V371/V371cold/V382 spans).
+    let mut cs_dm: DmTensor<bf16, Chip, Cluster, Slice, m![Dummy2, Ds]> = DmTensor::new();
+    // V389b: the copy passes depend on both raw projection outputs (a zero packet from dep_k, added to a zero packet
+    // from dep_v, OR-ed into the rows: an identity), so they -- and the table gathers placed just before them -- come
+    // after whichever weight load the scheduler streams last: gathers, store, sync (a DMA fence plus a barrier on
+    // hardware) and reload all run in the tail under the last contraction and the head norms.
+    let kz: DmTensor<f32, Chip, C, S, m![Ds = 8]> = ctx
+        .main
+        .begin(dep_k.view().tile::<m![Ds], 8, m![Ds = 8 # 256]>(0))
+        .fetch::<m![1], m![Ds = 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![Ds = 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0.0f32)
+        .vector_final()
+        .commit_trim::<m![Ds = 8]>()
+        .commit();
+    let kz: DmTensor<f32, Chip, C, S, m![1 # 8]> = unsafe { kz.reshape() };
+    let kz_vrf: VrfTensor<f32, Chip, C, S, m![1 # 8]> = ctx
+        .sub
+        .begin(kz.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+    let dz: DmTensor<f32, Chip, C, S, m![Ds = 8]> = ctx
+        .main
+        .begin(dep_v.view().tile::<m![Ds], 8, m![Ds = 8 # 256]>(0))
+        .fetch::<m![1], m![Ds = 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![Ds = 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_logic(LogicBinaryOpF32::BitAnd, 0.0f32)
+        .vector_narrow_split::<m![Ds = 8 / 4], m![Ds = 8 % 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, &kz_vrf)
+        .vector_widen_concat::<m![1], m![Ds = 8]>()
+        .vector_final()
+        .commit_trim::<m![Ds = 8]>()
+        .commit();
+    let dz: DmTensor<f32, Chip, C, S, m![1 # 8]> = unsafe { dz.reshape() };
+    let dz_vrf: VrfTensor<f32, Chip, C, S, m![1 # 8]> = ctx
+        .sub
+        .begin(dz.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .to_vrf();
+    ctx.main
+        .begin(cos_row.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_logic(LogicBinaryOpF32::BitOr, &dz_vrf)
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit_cast::<bf16>()
+        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(0));
+    ctx.main
+        .begin(sin_row.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_logic(LogicBinaryOpF32::BitOr, &dz_vrf)
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit_cast::<bf16>()
+        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(1));
+    let cs_hbm: HbmTensor<bf16, Chip, m![Dummy2, Ds]> = cs_dm.to_hbm(&mut ctx.tdma);
+    let cs: DmTensor<bf16, Chip, C, S, m![Dummy2, Ds]> = cs_hbm.to_dm(&mut ctx.tdma);
+
+    let cos_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
+        .sub
+        .begin(cs.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(0))
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    let sin_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
+        .sub
+        .begin(cs.view().tile::<m![Dummy2], 1, m![Dummy2 = 1 # 2, Ds]>(1))
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    let first_half_q = q.view().tile::<m![Ds], 128, m![Gs, Ds = 128 # 256]>(0);
+    let second_half_q = q.view().tile::<m![Ds], 128, m![Gs, Ds = 128 # 256]>(128);
+
+    let mut rotate_half_q: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = DmTensor::new();
+
+    ctx.main
+        .begin(first_half_q)
+        .fetch::<m![Gs], m![Ds = 128]>()
+        .collect::<m![Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .commit_trim::<m![Ds = 128 % 16]>()
+        .commit_view(
+            rotate_half_q
+                .view_mut()
+                .tile::<m![Ds], 128, m![Gs, Ds = 128 #{!} 256]>(128),
+        );
+
+    ctx.main
+        .begin(second_half_q)
+        .fetch::<m![Gs], m![Ds = 128]>()
+        .collect::<m![Gs, Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .commit_trim::<m![Ds = 128 % 16]>()
+        .commit_view(
+            rotate_half_q
+                .view_mut()
+                .tile::<m![Ds], 128, m![Gs, Ds = 128 #{!} 256]>(0),
+        );
+
+    let first_half_k = k.view().tile::<m![Ds], 128, m![Ds = 128 # 256]>(0);
+    let second_half_k = k.view().tile::<m![Ds], 128, m![Ds = 128 # 256]>(128);
+
+    let mut rotate_half_k: DmTensor<bf16, Chip, C, S, m![Ds]> = DmTensor::new();
+
+    ctx.main
+        .begin(first_half_k)
+        .fetch::<m![1], m![Ds = 128]>()
+        .collect::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .commit_trim::<m![Ds = 128 % 16]>()
+        .commit_view(rotate_half_k.view_mut().tile::<m![Ds], 128, m![Ds = 128 #{!} 256]>(128));
+
+    ctx.main
+        .begin(second_half_k)
+        .fetch::<m![1], m![Ds = 128]>()
+        .collect::<m![Ds = 128 / 16], m![Ds = 128 % 16]>()
+        .commit_trim::<m![Ds = 128 % 16]>()
+        .commit_view(rotate_half_k.view_mut().tile::<m![Ds], 128, m![Ds = 128 #{!} 256]>(0));
+
+    let q_sin: DmTensor<f32, Chip, C, S, m![Gs, Ds]> = ctx
+        .main
+        .begin(rotate_half_q.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &sin_vrf)
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit();
+
+    let q_sin_vrf: VrfTensor<f32, Chip, C, S, m![Gs, Ds]> = ctx
+        .sub
+        .begin(q_sin.view())
+        .fetch::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    // The cos multiply and the sin add share one chain, so the f32 scratch pass is gone.
+    let result_q: DmTensor<bf16, Chip, C, S, m![Gs, Ds]> = ctx
+        .main
+        .begin(q.view())
+        .fetch::<m![Gs, Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Gs, Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_vrf)
+        .vector_widen_concat::<m![Gs, Ds / 8], m![Ds % 8]>()
+        .vector_clip(ClipBinaryOpF32::Add, &q_sin_vrf)
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit_cast::<bf16>()
+        .commit();
+
+    let k_sin: DmTensor<f32, Chip, C, S, m![Ds]> = ctx
+        .main
+        .begin(rotate_half_k.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &sin_vrf)
+        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit();
+
+    let k_sin_vrf: VrfTensor<f32, Chip, C, S, m![Ds]> = ctx
+        .sub
+        .begin(k_sin.view())
+        .fetch::<m![Ds / 8], m![Ds % 8]>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .to_vrf();
+
+    // Same fusion on the key side.
+    let result_k: DmTensor<bf16, Chip, C, S, m![Ds]> = ctx
+        .main
+        .begin(k.view())
+        .fetch::<m![Ds / 16], m![Ds % 16]>()
+        .fetch_cast::<f32>()
+        .collect::<m![Ds / 8], m![Ds % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![Ds / 4], m![Ds % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &cos_vrf)
+        .vector_widen_concat::<m![Ds / 8], m![Ds % 8]>()
+        .vector_clip(ClipBinaryOpF32::Add, &k_sin_vrf)
+        .vector_final()
+        .commit_trim::<m![Ds % 8]>()
+        .commit_cast::<bf16>()
+        .commit();
+
+    (result_q, result_k)
+}
