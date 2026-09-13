@@ -305,6 +305,66 @@ pub fn decoder_feedforward(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V390 arm c: production ffn with the down stage split by column halves.
+#[device(chip = 1)]
+pub fn decoder_feedforward_c(
+    ctx: &mut Context,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+    pre_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    up_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    gate_weight_packed: &HbmTensor<f4e2m1, Chip, m![L, H]>,
+    down_weight_packed: &HbmTensor<f4e2m1, Chip, m![H, L]>,
+    up_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    gate_weight_scale: &HbmTensor<f8e4m3, Chip, m![L, H / 16]>,
+    down_weight_scale: &HbmTensor<f8e4m3, Chip, m![H, L / 16]>,
+    up_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    gate_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    down_global_scale: &HbmTensor<f32, Chip, m![1]>,
+    post_ff_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    layer_scalar: &HbmTensor<bf16, Chip, m![1 # 8]>,
+) {
+    // The residual is loaded once, straight into the RMSNorm reducing layout, and serves both
+    // the pre-FF normalization and the final residual add.
+    // V293: the pre-FF norm, the hi/lo split and the geglu scalars run on both clusters (8 copies x 8 chunks in
+    // every 32-slice sub-ring) and x is replicated on chip: no x2 HBM hop, so no ExplicitSync idles the DMA queue
+    // (13/16 Arena jobs, -1.8k). The post-FF tail keeps cluster 0's block 0, which is exactly ReducingSlices.
+    let residual_b = shared::xsw::load_blocks(ctx, residual_hbm);
+    let x = shared::xsw::normalize_blocks_f32_fused(ctx, &residual_b, pre_ff_rms_weight);
+
+    // Replicate x to every slice by way of HBM: a DM-to-DM scatter runs at ~70 B/cycle
+    // (54k cycles), an HBM-to-DM replicated load at ~3x that. x goes as two f8 pieces (their
+    // sum is bf16 x exactly) so the projections can run f8 x f8 contractions on the raw f4 lookup.
+    let (x2, erf_b, out_b) = shared::xsw::stage_x_hi_lo_full_blocks(ctx, &x, up_global_scale, gate_global_scale);
+    let x_rep = shared::xsw::replicate_blocks(ctx, &x2);
+    let erf_all = shared::xsw::broadcast_scalar_blocks(ctx, erf_b);
+    // V306: out_scale stays on cluster 0 block 0 (= ReducingSlices) and is applied in the tail multiply.
+    let out_tail: DmTensor<f32, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![1 # 8]> = unsafe { out_b.reshape() };
+    // The up/gate stage runs on whole rows (V181): each slice's f4 rows and block scales are one
+    // contiguous HBM segment each; a segmented load costs twice per byte on hardware (V174).
+    // V348: the down tiles take x's f8 pieces in Lane and sum them inside pass A (16/16 paired jobs, -1.27%).
+    // V349: the geglu hi/lo pieces are staged by one store instead of two (13/16 paired jobs, -0.43%).
+    // V366: the tail multiply (down_global_scale x out_scale) is folded into the post-FF norm; g is made once early.
+    // V390: the down stage is split by column halves; the two partial rows are summed by the post-FF norm.
+    let (x, g) = shared::mlp::feedforward_fo_t1_c(
+        ctx,
+        x_rep,
+        erf_all,
+        out_tail,
+        up_weight_packed,
+        gate_weight_packed,
+        down_weight_packed,
+        up_weight_scale,
+        gate_weight_scale,
+        down_weight_scale,
+        down_global_scale,
+    );
+
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual: DmTensor<bf16, Chip, Cluster, shared::rmsnorm::ReducingSlices, m![H % 480]> = unsafe { residual_b.reshape() };
+    let residual = shared::rmsnorm::normalize_add_gate_reduced_t1_two::<Cluster>(ctx, &x, &g, post_ff_rms_weight, &residual, layer_scalar);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn final_norm_and_logits(
     ctx: &mut Context,
