@@ -496,7 +496,11 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - Q2: RoPE 표를 칩에서 계산(Sin/Cos). 컴파일 탐침부터, 위험 높음.
 - A3: attn 타일 비율을 꼬리 기준으로 다시 스윕(상수만, 기대 낮음).
 - cold 첫 launch 비용: V372가 첫 launch만 −5.2%였던 방향을 따로 볼지 판단한다.
-- **사용자 확인 필요:** draw 간격 단축(240 s → 60 s). 채점 서버 부하를 늘리는 외부 영향 변경이다.
+- ~~사용자 확인 필요: draw 간격 단축~~ → **사용자 결정(2026-09-13)으로 60 s 적용.**
+  - `/root/drawchain_follow.sh`가 `drawloop2.sh <branch> 12 60`을 부른다(저장소 사본 `scripts/dev/tk/drawchain_follow.sh`도 같다).
+  - 돌던 V377 배치는 draw 9 뒤 `sleep 240` 중에 PID로 끊었다(제출 진행 중 아님, 로그 `drawloop_V377_submit.batch_last.log`).
+  - V378 배치 1이 UTC 00:39:25에 gap 60으로 시작했다.
+  - 실제 간격은 `busy` 확인 때문에 max(60 s, 앞 제출의 채점 시간)이다.
 
 ### 10.0w 2026-09-13 새벽 — qkv 꼬리 · 머리 구조 넷 기각(V361~V364), ffn 동기화 창 탐침(V365) 진행, 세션 이관
 
