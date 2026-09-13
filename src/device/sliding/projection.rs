@@ -417,3 +417,109 @@ pub(crate) fn project_key_value_hi(
 
     (k, v)
 }
+
+// ---------------------------------------------------------------------------------------------
+// V371 -- STAGE 1 ONLY: the Q/K/V contractions on one f8 piece of x (see the V371 note in shared/xsw.rs). With no
+// `Dummy2` replay in Time every weight packet is fetched once. Restore `project_query_hi` / `project_key_value_hi`
+// before Stage 2.
+// ---------------------------------------------------------------------------------------------
+
+/// STAGE 1 ONLY: `project_query_hi` on one f8 piece of x.
+pub(crate) fn project_query_one(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![H]>,
+    weight_f8: &QueryWeightH,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds]> {
+    let x: DmTensorView<'_, f8e4m3, Chip, QueryClusters, QueryRowsH, m![H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, QueryClusters, QueryRowsH, m![1], m![H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![H / 32], m![H % 32]>()
+        .collect::<m![H / 32], m![H % 32]>()
+        .to_trf();
+
+    let contraction: DmTensor<bf16, Chip, QueryClusters, QueryRowsH, m![Qs / 64 % 8]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Qs / 64 % 8, H / 64], m![H % 64]>()
+        .collect::<m![Qs / 64 % 8, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Qs / 64 % 8, H / 64], m![H % 64], _, _, _>(&x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Qs / 64 % 8]>()
+        .contract_lane::<m![Qs / 64 % 8], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![Qs / 256 % 2], m![Qs / 64 % 4 # 16]>()
+        .commit_trim::<m![Qs / 64 % 4]>()
+        .commit();
+
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds % 64], m![Gs, Ds / 64]> =
+        unsafe { contraction.view().reshape() };
+    let gathered: DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Gs, Ds / 64, Ds % 64 / 4, Ds % 4]> = ctx
+        .main
+        .begin(scaled)
+        .fetch::<m![Gs, Ds / 64], m![1 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Gs, Ds / 64, Ds % 64]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Gs, Ds / 64, Ds % 64], m![1 # 16]>()
+        .transpose::<m![Gs, Ds / 64, Ds % 64 / 4], m![Ds % 4 # 16]>()
+        .commit_trim::<m![Ds % 4]>()
+        .commit();
+    unsafe { gathered.reshape() }
+}
+
+/// STAGE 1 ONLY: `project_one_kv_matrix_hi` on one f8 piece of x.
+fn project_one_kv_matrix_one(
+    ctx: &mut Context,
+    x_trf: &TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH, m![1], m![H]>,
+    weight_f8: &KvWeightH,
+) -> DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]> {
+    let contraction: DmTensor<bf16, Chip, KvClusters, KvRowsH, m![Ps / 64 % 4]> = ctx
+        .main
+        .begin(weight_f8.view())
+        .fetch::<m![Ps / 64 % 4, H / 64], m![H % 64]>()
+        .collect::<m![Ps / 64 % 4, H / 64, H / 32 % 2], m![H % 32]>()
+        .contract_outer::<m![Ps / 64 % 4, H / 64], m![H % 64], _, _, _>(x_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![Ps / 64 % 4]>()
+        .contract_lane::<m![Ps / 64 % 4], m![1 # 8]>(LaneMode::Interleaved)
+        .cast::<bf16, m![1 # 16]>()
+        .transpose::<m![1], m![Ps / 64 % 4 # 16]>()
+        .commit_trim::<m![Ps / 64 % 4]>()
+        .commit();
+
+    let scaled: DmTensorView<'_, bf16, Chip, HeadClusters, m![Ns % 4, Ds % 64], m![Ds / 64]> =
+        unsafe { contraction.view().reshape() };
+    let gathered: DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds / 64, Ds % 64 / 4, Ds % 4]> = ctx
+        .main
+        .begin(scaled)
+        .fetch::<m![Ds / 64], m![1 # 16]>()
+        .switch::<HeadSlicesPerCluster, m![Ds / 64, Ds % 64]>(SwitchConfig::Broadcast1 { slice1: 64, slice0: 1 })
+        .collect::<m![Ds / 64, Ds % 64], m![1 # 16]>()
+        .transpose::<m![Ds / 64, Ds % 64 / 4], m![Ds % 4 # 16]>()
+        .commit_trim::<m![Ds % 4]>()
+        .commit();
+    unsafe { gathered.reshape() }
+}
+
+/// STAGE 1 ONLY: `project_key_value_hi` on one f8 piece of x.
+pub(crate) fn project_key_value_one(
+    ctx: &mut Context,
+    x: &DmTensor<f8e4m3, Chip, BothClusters, Replicated, m![H]>,
+    k_weight: &KvWeightH,
+    v_weight: &KvWeightH,
+) -> (
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+    DmTensor<bf16, Chip, HeadClusters, HeadSlicesPerCluster, m![Ds]>,
+) {
+    let x: DmTensorView<'_, f8e4m3, Chip, KvClusters, KvRowsH, m![H]> = unsafe { x.view().reshape() };
+    let x_trf: TrfTensor<f8e4m3, Chip, KvClusters, KvRowsH, m![1], m![H]> = ctx
+        .sub
+        .begin(x)
+        .fetch::<m![H / 32], m![H % 32]>()
+        .collect::<m![H / 32], m![H % 32]>()
+        .to_trf();
+
+    let k = project_one_kv_matrix_one(ctx, &x_trf, k_weight);
+    let v = project_one_kv_matrix_one(ctx, &x_trf, v_weight);
+
+    (k, v)
+}
