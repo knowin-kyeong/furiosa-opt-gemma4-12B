@@ -1,5 +1,10 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (8):** 코드 SOTA · draw 대상 → **`V391_submit`** (c8e726a = V383_submit + V390/V390b c2: ffn down 단계를 **열 절반**으로 — 클러스터마다 자기 geglu 청크만 쓰므로 1/s가 칩에 남고(HBM store · 두 번째 geglu ExplicitSync 삭제), 클러스터 0의 부분합은 DM→DM, 클러스터 1의 부분합만 HBM 왕복, 합은 post-FF norm에 융합; 정확한 변경).
+> - c2 32잡: 22/32 −0.36%(중앙값 −1,128), 잡별 최저 25/32 −0.49%, pooled p10 −0.42% [−2,380, −644] · p05 −0.80% [−2,760, −780].
+> - 제출 검증 Arena 25/25 ×2(job 25674).
+> - 같은 라운드에서 닫힌 것: 칩 위 RoPE(V385, 정확하지만 pass 수로 +7.5%), RoPE staging 위치 이동(V387/V389/V389b, 전부 손해 — 임계 경로는 클러스터 1의 사슬), 정렬 1/s store(V384), `cluster_tile`(lowering 불가), 부분합 store 쪼개기(V390d, 컴파일러 크래시). RULES §10.0y.
+
 > **2026-09-13 (7):** 코드 SOTA · draw 대상 → **`V383_submit`** (13e8880 = V378_submit + V383: qkv RoPE cos · sin 행을 칩 안에서 한 스테이징 버퍼로 모아 **HBM store 하나 · ExplicitSync 하나**로, 정적 ExplicitSync 3 → 2, 정확한 변경).
 > - V383 32잡: warm −3.04%(30/32, 잡별 중앙값 32/32), 프로세스 첫 launch 중앙값 −5,395(90,750 대 96,145), pooled p10 −1.75% [−2,426, −1,055].
 > - 제출 검증 Arena 25/25 + rerun 25/25(UTC 01:46).

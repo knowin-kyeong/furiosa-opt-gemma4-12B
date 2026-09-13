@@ -516,7 +516,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 - **V384 기각:** ffn 1/s store를 256 B 정렬 블록으로 — 3/16 +0.49%. 그 6.6k는 RMW가 아니다.
 - **V385 기각(정확하지만 느림):** 칩 위 RoPE. `AxisToggle`은 lowering 안 됨 → w=[0,1] replay-fetch 배가로 인덱스 램프(pass당 1비트), 하드웨어 Sin/Cos는 큰 인자에서 NaN → [−π, π] 축소 필수. 정확도는 생산과 비트 동일. v3 0/32 +12.6%(긴 사슬이 weight 로드 앞으로 당겨짐), v4 0/32 +7.5%(정적 최적이어도 Main 16 · sub 10 pass가 V 로드 발행을 늦춤). 메모리 `on-chip-rope-and-scheduler-priority`.
 - **V387 · V389 · V389b 기각(0/32, +4.0 · +4.7 · +9.3%):** RoPE staging(store · sync · reload)을 K 뒤 · V 뒤 · K+V 뒤로. **교훈: 임계 경로는 클러스터 1의 사슬이고, 꼬리의 pass · store · reload는 전액 청구되며 weight 스트림 아래의 TU pass는 두 클러스터 모두 공짜다. V383이 국소 최적 — RoPE staging 줄은 닫는다.**
-- **V390 중립(8/16 −0.08%) · V390b c2 중립(8/16 −0.23%, p05 −0.88% 유의):** ffn down 단계를 열 절반으로 — 1/s store와 geglu 두 번째 sync가 사라져 geglu 구간 −4.7k(설계대로)인데, 부분합 두 개의 store(15 KB · 128 세그먼트)가 +2.9k, 꼬리 +1.2k로 되갚는다. `cluster_tile`은 어떤 축으로도 lowering되지 않아 한 클러스터만 store할 수 없다(c3 · c4). c2 32잡 판정 대기.
+- **V390 중립(8/16 −0.08%) → V390b c2 채택(32잡 22/32 −0.36%, p10 −0.42% · p05 −0.80% 유의) → `V391_submit`(c8e726a, Arena 25/25 ×2, UTC 05:40 draw 대상):** ffn down 단계를 열 절반으로 — 1/s store와 geglu 두 번째 sync가 사라져 geglu 구간 −4.7k(설계대로)인데, 부분합 store(15 KB · 128 세그먼트)가 +2.9k로 대부분 되갚는다. `cluster_tile`은 어떤 축으로도 lowering되지 않아 한 클러스터만 store할 수 없고(c3 · c4), store를 쪼개는 c5는 컴파일러 SIGABRT. 남는 이득은 중앙값 −0.4%와 꼬리.
 - **컴파일러 사실(메모리 `furiosa-opt-mapping-constraints`):** `cluster_tile` 불가, `AxisToggle` 불가, 다른 레이아웃의 VRF 피연산자는 허용, `to_dm_view` 클러스터 재배치 허용, `narrow_trim`은 live 레인을 못 자름.
 
 **다음 후보.**

@@ -3,9 +3,11 @@
 > **세션 인계 (2026-09-13 UTC 02:00 · KST 11:00): 새 세션은 RULES §10.0y부터 읽는다.**
 > 이 문서 §1~§2의 상태는 지났고, §3~§8은 배경으로만 쓴다.
 >
+> **추가 (UTC 05:40):** 코드 SOTA · draw 대상 → **`V391_submit`**(c8e726a = V383 + ffn down 열 절반, V390/V390b c2: 22/32 −0.36%, p05 −0.80%, Arena 25/25 ×2). 2라운드(V384~V390d) 요약은 RULES §10.0y "2라운드". 리더보드 서버는 UTC 02:11부터 불통(health 000) — drawkeeper가 15:38까지 배치를 돌리며 복구되면 자동으로 이어진다; `/root/tk/draw_target` = V391_submit.
+>
 > **현재 상태**
 > - 공식 순위: **우리 2위 7.4364**(V377 draw) · 1위 vinxst 7.4769 · 3위 #663 7.3402.
-> - **코드 SOTA · draw 대상 `V383_submit`**(13e8880) = V378_submit + V383. V383은 qkv RoPE 두 행을 store 하나 · ExplicitSync 하나로 staging한다.
+> - **코드 SOTA · draw 대상 `V383_submit`**(13e8880) = V378_submit + V383. V383은 qkv RoPE 두 행을 store 하나 · ExplicitSync 하나로 staging한다. (→ 05:40부터 `V391_submit`)
 >   - V383 32잡: warm −3.04%(30/32), 프로세스 첫 launch −5.4k, p10 −1.75%.
 >   - 제출 검증: Arena 25/25 ×2.
 >   - V378_submit은 draw 20회에서 최고 7.3668이었다.
