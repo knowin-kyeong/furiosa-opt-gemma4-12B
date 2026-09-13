@@ -1,5 +1,7 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (6):** draw 대상 → **`V378_submit`** (ea270d1 = V377_submit + V371, **Stage 1 전용**: qkv x를 f8 한 조각으로 — fixture에서 `x⊙w`가 ±1 근처라 전 원소가 f8 128로 반올림되고 head norm이 스케일을 흡수한다). V371 짝비교 15/16 −3.07% · pooled p10 −4.13% [−4,453, −2,049], 96/96 PASS. 제출 검증 Arena job 24526 25/25 + rerun 25/25. 돌던 V377 배치 1 뒤 전환(`/root/drawswitch_v378.sh`). Stage 2 전에 V377의 V369 경로로 되돌린다. 같은 날 닫힌 것: ffn down 정렬 청크(V373, 패딩 슬롯 로드에서 visa ICE).
+
 > **2026-09-13 (5):** draw 대상 → **`V377_submit`** (eb38766 = V368_submit + V369: qkv 입력 norm의 rms 스칼라 제거 — q/k/v head norm이 상쇄하므로 정확). V369 짝비교 12/16 −0.86% · 잡별 최저 15/16 −1.38% · pooled p10 −0.93% [−1,477, −379], 96/96 PASS. 제출 검증 Arena job 24476 25/25 + rerun 25/25. V368 전환은 첫 배치 전에 V377로 교체(`/root/drawswitch_v377.sh`, 돌던 V367 배치 뒤).
 
 > **2026-09-13 (4):** draw 대상 → **`V368_submit`** (a679b8c = V367_submit + attn 본문만 V313 대칭 96/24 경로). 근거: V340 비균등 타일은 짝비교 중앙값에서 −1.2%였지만 draw의 하위 꼬리를 잘랐다 — draw attn 최저 38,347 → 42,620 · p10 40,405 → 42,822(중앙값 동일), Arena v340 로그 pooled p10 +1,620(+3.45%, 90% job-bootstrap [+38, +2,436]). 96회 기대 최고값 부트스트랩 7.160 → 7.335. 제출 검증 Arena job 24443 25/25 + rerun 25/25. 돌던 V367 배치 뒤 전환(`/root/drawswitch_v368.sh`). V367_submit draw 42회 최고 7.1798. 재설계 계획(V368~V376 등록): 판정 기준에 draw 꼬리(p10 · 최저 · 기대 최고값)를 추가.
