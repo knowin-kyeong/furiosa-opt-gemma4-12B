@@ -455,7 +455,61 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 3. 현재 SOTA 브랜치를 기준으로 다음 가설을 세운다.
 4. 절대 `main`에 커밋하지 않는다.
 
-### 10.0x 2026-09-13 오전 — LB 8 재설계 1라운드: 판정 기준에 draw 꼬리, draw 대상 V378 (가장 최신, 여기서 시작할 것)
+### 10.0y 2026-09-13 UTC 01~02시 — cold 조건 재측정, qkv 첫 동기화 벌점, 사용자 부재 12 h 무인 체인 (가장 최신, 여기서 시작할 것)
+
+**상태 (UTC 01:45).**
+- 공식 순위: 1위 vinxst 7.4769 · **우리 2위 7.4364**(V377 draw) · 3위 #663 7.3402.
+- draw 대상은 `V378_submit`이다. 13회까지 최고 7.3668이고, qkv 84,014가 나온 draw도 있다.
+
+**무인 체인 (사용자 부재, UTC 01:38 ~ 15:38). 복귀하면 여기부터 확인한다.**
+- **`/root/tk/drawkeeper.sh <deadline>`** (draw 유지)
+  - V378 follow 루프(`drawchain_follow.sh V378_submit 1 8`, ~05:10 UTC에 끝남)나 `drawloop2.sh`가 살아 있으면 기다린다.
+  - 둘 다 없으면 `/root/tk/draw_target`에 적힌 branch를 12회 배치(60 s 간격, `/root/draw_src`)로 draw한다. 배치 번호는 branch마다 101부터다.
+  - 배치가 끝날 때마다 `/root/tk/drawscores.sh <branch>`로 `/root/tk/<branch>_scores.txt`를 갱신한다. 로그는 `/root/tk/drawkeeper.log`.
+- **`/root/tk/chain_0913n.sh`** (실험 → 판정 → 전환)
+  1. V382 분석을 `/root/tk/V382_analysis.txt`에 저장한다(완료).
+  2. V383 32잡을 lab6에서 돌리고 사전 판정을 낸다(`/root/tk/v383_verdict.py`, RESULTS V383 행).
+  3. 같은 잡을 rerun 32회 더 돌려 64잡으로 다시 판정한다.
+  4. 처음 WIN이 나오면 lab7에서 `subverify.sh lab7 V383_submit V383s`를 돌린다. 두 검증이 모두 PASS면:
+     - `draw_src`에 V383_submit을 fetch한다.
+     - `draw_target`을 V383_submit으로 바꾼다.
+     - V378 follow 루프를 PID로 끊는다. keeper가 돌던 배치 뒤에 새 대상을 시작한다.
+  - 로그는 `/root/tk/chain_0913n.log`, 판정은 `/root/tk/V383_verdict_32.txt` · `_64.txt`.
+- **복귀 체크리스트**
+  - `cat /root/tk/chain_0913n.log /root/tk/drawkeeper.log`
+  - `bash /root/tk/drawscores.sh V378_submit` (전환됐으면 V383_submit도)
+  - 리더보드 API
+  - 스크립트 사본은 `scripts/dev/tk/`에 있다: `chain_0913n.sh` · `drawkeeper.sh` · `drawscores.sh` · `v383_verdict.py` · `gapcold.py` · `pfirst.py` · `spandiff.py` · `cold_census.py` · `gen_v383.py` · `gen_tile_arms.py` · `mk_idle_harness.py`.
+
+**이번 라운드 결과.**
+- **V380 기각:** attn 타일 88/32 · 104/16 · 72/48 모두 cold 중앙값 · p10에서 96/24보다 못하다.
+- **V381 완료 (attn cold census 32잡):**
+  - prod 중앙값 46,324 · p10 42,884. lr은 +4.27%(11/32)라 V372 기각을 유지한다.
+  - 회전 위치 효과가 ±0.7% 이내다. 프로세스가 데워진 attn에는 program-cold 벌점이 없다.
+  - V372의 "첫 launch −5.2%"는 프로세스 첫 launch가 섞인 착시였다.
+- **qkv 첫 launch 벌점 (공식 qkv = 프로세스 첫 launch).**
+  - V371 · V371cold 64잡의 span 비교(`spandiff.py`): prod +4.3k, s1 +3.5k(중앙값).
+  - 벌점은 전부 **첫 ExplicitSync**(Cluster span 0 = RoPE cos 행 store 뒤의 정적 `ExplicitSync(36)`)에서 생긴다. 뒤 동기화에는 붙지 않는다.
+  - 프로세스 첫 launch 분포(`pfirst.py`): s1 중앙값 95,525 대 warm 91,084. draw qkv 중앙값 94.6k와 맞는다.
+- **V382 유휴 탐침 (16잡).**
+  - 첫 launch +4,344(12/16).
+  - **1 s 이상 쉰 뒤 launch는 첫 ExplicitSync에서 +26k~+49k(중앙값) 멈춘다(최대 +2.0M).** 바로 이어진 launch는 0 근처다.
+  - 결론: ExplicitSync는 호스트 쪽 대기를 그대로 받는다. 커널 중간에 있을수록, 개수가 많을수록 공식 조건에서 불리하다.
+- **V383 (RoPE 두 행을 store 하나 · 동기화 하나로).**
+  - 정적 40,293 → 39,880, 명령 128 → 127.
+  - 첫 잡 PASS(job 24767, 1s가 프로세스 첫 launch였다). 무인 체인이 판정한다.
+- **V379 사유 정정 (칩 위 RoPE).**
+  - `axes!`는 이름마다 단위 struct와 `AxisName` 구현을 만드는 proc macro다. src/device에서 크기 2 축을 새로 선언할 수 있으니 램프가 원리상 가능하다.
+  - 다만 태그는 pipeline당 `vector_intra_slice_tag` 하나다(AxisToggle = 축 하나 = 비트 하나). 128칸 램프에 7 pass가 든다.
+  - RoPE 동기화 둘을 모두 없애는 유일한 경로라 V382 결과로 가치가 올랐다.
+
+**다음 후보.**
+- **Q2' 칩 위 RoPE.** custom 축 7 pass 램프 → `vector_fxp_to_fp` → Exp · Cos · Sin.
+  - rope_offset 로드와 `LogicRightShift 9`는 V362 코드(`apply_rope_heads_cc_ug`)를 재사용한다.
+  - fixture: POS = 137이고, 테이블에는 POS 행만 채워져 있다. θ_i = 10000^(−2i/256), i = d mod 128이고 sin은 아래 절반이 음수다. 칩에서 계산해도 정확한 산술이라 fixture 의존이 아니다.
+- **attn · ffn 동기화 점검.** ExplicitSync의 개수 · 위치를 점검한다(호스트 대기 노출). 판정은 공식 조건(첫 launch · draw)을 기준으로 한다.
+
+### 10.0x 2026-09-13 오전 — LB 8 재설계 1라운드: 판정 기준에 draw 꼬리, draw 대상 V378
 
 **상태.**
 - 공식 순위는 그대로다: 1위 vinxst 7.4769, **우리 2위 7.4197**, 3위 #663 7.3402.
