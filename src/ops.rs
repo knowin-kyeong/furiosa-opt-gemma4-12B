@@ -188,6 +188,24 @@ pub fn sliding_attention_output(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V372 arm `lr` -- STAGE 1 ONLY: the attention output with a per-cluster (local) post-attention RMSNorm, so the
+/// contraction store, its ExplicitSync and the reload disappear (sliding::projection::project_output_local,
+/// shared::rmsnorm::normalize_add_scaled_local).
+#[device(chip = 1)]
+pub fn sliding_attention_output_lr(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    let x = sliding::projection::project_output_local(ctx, x, o_weight);
+    let residual = shared::rmsnorm::normalize_add_scaled_local(ctx, &x, o_weight_scale, post_attn_rms_weight, residual_hbm);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn full_attention_first_page(
     ctx: &mut Context,
