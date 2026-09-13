@@ -102,7 +102,8 @@ pub fn sliding_project_qkv(
         v_weight_scale,
     );
 
-    let (q, k) = sliding::rope::apply_rope_heads_cc::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
+    // V383: the RoPE rows are staged by one HBM store and one ExplicitSync (`apply_rope_heads_cc_1s`).
+    let (q, k) = sliding::rope::apply_rope_heads_cc_1s::<layout::HeadClusters, layout::HeadSlicesPerCluster>(
         ctx,
         &q,
         &k,
