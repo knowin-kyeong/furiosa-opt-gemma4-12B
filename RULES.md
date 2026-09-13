@@ -464,6 +464,7 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
   - 제출 검증 Arena 25/25 ×2(UTC 01:46).
   - 무인 체인이 draw 대상을 바꿨다. 돌던 V378 배치(20회까지 최고 7.3668)가 끝나면 drawkeeper가 V383_submit을 draw한다.
 - Stage 2 전에 되돌릴 목록은 그대로다(V371 한 조각, V257 attn 한 조각). V383 자체는 정확한 변경이다.
+- UTC 02:56: 50 s 간격 rerun으로 다시 판정했고 역시 WIN이다. 64잡 −3.83%(58/64), 96잡 −3.99%(85/96) · 첫 launch −4.3k.
 
 **무인 체인 (사용자 부재, UTC 01:38 ~ 15:38). 복귀하면 여기부터 확인한다.**
 - **`/root/tk/drawkeeper.sh <deadline>`** (draw 유지)
