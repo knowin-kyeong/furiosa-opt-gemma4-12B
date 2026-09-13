@@ -1,5 +1,10 @@
 # 세션 이관 문서 — 2026-09-13 (KST 03:15 · UTC 09-12 18:15 기준)
 
+> **추가 (2026-09-13 UTC 00:20):** 이 문서의 §1~§2 상태는 지났다. **RULES §10.0x부터 읽는다.**
+> - draw 대상: `V378_submit` = V368(V313 대칭 attn) + V369(qkv `÷rms` 제거) + V371(qkv x 한 조각, Stage 1 전용).
+> - 판정 기준: attn · qkv에 draw 꼬리 지표 추가(`scripts/dev/paired_tails.py`).
+> - 새로 닫힌 것: V373(ffn down 정렬 청크, 컴파일러 ICE), V372(attn 로컬 RMS, 꼬리 악화).
+
 새 세션은 **이 문서 → RULES.md §10.0w → RESULTS.md(V361~V367 행) → SOTA.md 첫 항목** 순서로 읽는다.
 문서 최신본은 브랜치 `V236_sweep_attnout_tiles`에 있다(origin push 완료). 이 문서가 담는 것:
 
