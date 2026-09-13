@@ -188,6 +188,81 @@ pub fn sliding_attention_output(
     residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
 }
 
+/// V380 arm t88: the attention output with O-weight tiles 88/32.
+#[device(chip = 1)]
+pub fn sliding_attention_output_t88(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    // V368: back to the symmetric 96/24 tiles of V313. V340's uneven tiles (sliding/uneven.rs, kept unused) won 1.2% on
+    // paired medians but cut the lucky tail the leaderboard keeps: attention draws min 38,347 -> 42,620 and p10
+    // 40,405 -> 42,822 at an unchanged median (45,254 vs 45,022).
+    let x_hbm = sliding::projection::project_output_t88(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V380 arm t104: the attention output with O-weight tiles 104/16.
+#[device(chip = 1)]
+pub fn sliding_attention_output_t104(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    // V368: back to the symmetric 96/24 tiles of V313. V340's uneven tiles (sliding/uneven.rs, kept unused) won 1.2% on
+    // paired medians but cut the lucky tail the leaderboard keeps: attention draws min 38,347 -> 42,620 and p10
+    // 40,405 -> 42,822 at an unchanged median (45,254 vs 45,022).
+    let x_hbm = sliding::projection::project_output_t104(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
+/// V380 arm t72: the attention output with O-weight tiles 72/48.
+#[device(chip = 1)]
+pub fn sliding_attention_output_t72(
+    ctx: &mut Context,
+    x: &HbmTensor<bf16, Chip, m![Ns, Gs, Ds]>,
+    post_attn_rms_weight: &HbmTensor<bf16, Chip, m![H]>,
+    o_weight: &HbmTensor<f8e4m3, Chip, m![H, Qs]>,
+    o_weight_scale: &HbmTensor<bf16, Chip, m![H]>,
+    residual_hbm: &mut HbmTensor<bf16, Chip, m![H]>,
+) {
+    // The attention output already lives in HBM as [Ns, Gs, Ds] = [Qs]; project_output loads
+    // each slice's Qs chunk straight from there instead of broadcasting x through the switch.
+    let x: HbmTensorView<'_, bf16, Chip, m![Qs]> = unsafe { x.view().reshape() };
+    // V368: back to the symmetric 96/24 tiles of V313. V340's uneven tiles (sliding/uneven.rs, kept unused) won 1.2% on
+    // paired medians but cut the lucky tail the leaderboard keeps: attention draws min 38,347 -> 42,620 and p10
+    // 40,405 -> 42,822 at an unchanged median (45,254 vs 45,022).
+    let x_hbm = sliding::projection::project_output_t72(ctx, x, o_weight);
+    // Both operands of the post-attention RMSNorm are loaded straight into its reducing layout.
+    let x = shared::rmsnorm::load_reducing_aligned::<Cluster>(ctx, &x_hbm);
+    let residual = shared::rmsnorm::load_reducing::<Cluster>(ctx, residual_hbm);
+    // The result is stored straight from the reducing layout (eight descriptors, no switch pass).
+    let residual = shared::rmsnorm::normalize_add_scaled_reduced::<Cluster>(ctx, &x, o_weight_scale, post_attn_rms_weight, &residual);
+    residual.view().to_hbm_view(&mut ctx.tdma, residual_hbm.view_mut());
+}
+
 /// V372 arm `lr` -- STAGE 1 ONLY: the attention output with a per-cluster (local) post-attention RMSNorm, so the
 /// contraction store, its ExplicitSync and the reload disappear (sliding::projection::project_output_local,
 /// shared::rmsnorm::normalize_add_scaled_local).
