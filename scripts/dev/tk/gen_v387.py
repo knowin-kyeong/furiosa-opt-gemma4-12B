@@ -25,18 +25,18 @@ fn = r[start:end]
 def copy_pass(row, tile):
     return (
         "    ctx.main\n"
-        "        .begin(%s.view())\n"
+        "        .begin(" + row + ".view())\n"
         "        .fetch::<m![Ds / 128], m![Ds % 128]>()\n"
         "        .collect::<m![Ds / 16], m![Ds % 16]>()\n"
         "        .commit_trim::<m![Ds % 16]>()\n"
-        "        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(%d));\n" % (row, tile)
+        "        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(" + str(tile) + "));\n"
     )
 
 
 def dep_pass(row, tile):
     return (
         "    ctx.main\n"
-        "        .begin(%s.view())\n"
+        "        .begin(" + row + ".view())\n"
         "        .fetch::<m![Ds / 16], m![Ds % 16]>()\n"
         "        .fetch_cast::<f32>()\n"
         "        .collect::<m![Ds / 8], m![Ds % 8]>()\n"
@@ -46,7 +46,7 @@ def dep_pass(row, tile):
         "        .vector_final()\n"
         "        .commit_trim::<m![Ds % 8]>()\n"
         "        .commit_cast::<bf16>()\n"
-        "        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(%d));\n" % (row, tile)
+        "        .commit_view(cs_dm.view_mut().tile::<m![Dummy2], 1, m![Dummy2 = 1 #{!} 2, Ds]>(" + str(tile) + "));\n"
     )
 
 
@@ -70,13 +70,11 @@ new = (
     "        .commit_trim::<m![Ds = 8]>()\n"
     "        .commit();\n"
     "    let kz: DmTensor<f32, Chip, C, S, m![1 # 8]> = unsafe { kz.reshape() };\n"
-    "    let kz_vrf: VrfTensor<f32, Chip, m![Ns / 4 = 1 # 2], m![Ns % 4 = 1 # 4, 1 # 64], m![1 # 8]> = ctx\n"
+    "    // The register is staged on the head layout (head 0 lives on cluster 0 / slice 0, the copy passes' slice); a\n"
+    "    // cluster_tile over `Ns / 4` does not lower (visa: cannot find tag Ns_4).\n"
+    "    let kz_vrf: VrfTensor<f32, Chip, C, S, m![1 # 8]> = ctx\n"
     "        .sub\n"
-    "        .begin(\n"
-    "            kz.view()\n"
-    "                .cluster_tile::<m![Ns / 4], 1, m![Ns / 4 = 1 # 2]>(0)\n"
-    "                .slice_tile::<m![Ns % 4], 1, m![Ns % 4 = 1 # 4, 1 # 64]>(0),\n"
-    "        )\n"
+    "        .begin(kz.view())\n"
     "        .fetch::<m![1], m![1 # 8]>()\n"
     "        .collect::<m![1], m![1 # 8]>()\n"
     "        .to_vrf();\n"
