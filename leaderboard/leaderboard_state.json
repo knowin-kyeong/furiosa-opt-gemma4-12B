@@ -1,0 +1,448 @@
+{
+  "teams": {
+    "Participant #663": {
+      "current": {
+        "submission_id": "2026-09-12-10-49-58-168-0acab4e3",
+        "code": "0acab4e3",
+        "cycles": {
+          "ops::sliding_project_qkv": 92560,
+          "ops::sliding_attention_output": 36768,
+          "ops::decoder_feedforward": 278919
+        },
+        "score": 7.3402414120112995,
+        "submitted": "09-12 19:49"
+      },
+      "previous": {
+        "submission_id": "2026-09-11-15-39-51-813-070ef742",
+        "code": "070ef742",
+        "cycles": {
+          "ops::sliding_project_qkv": 91578,
+          "ops::sliding_attention_output": 39144,
+          "ops::decoder_feedforward": 268129
+        },
+        "score": 7.309720632338283,
+        "submitted": "09-12 00:39"
+      }
+    },
+    "Goat Chovy #1557": {
+      "current": {
+        "submission_id": "2026-09-13-00-34-52-952-ae361361",
+        "code": "ae361361",
+        "cycles": {
+          "ops::sliding_project_qkv": 88132,
+          "ops::sliding_attention_output": 39797,
+          "ops::decoder_feedforward": 260271
+        },
+        "score": 7.436425770357798,
+        "submitted": "09-13 09:34"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-01-42-18-335-a9c7c0d6",
+        "code": "a9c7c0d6",
+        "cycles": {
+          "ops::sliding_project_qkv": 90189,
+          "ops::sliding_attention_output": 38347,
+          "ops::decoder_feedforward": 265737
+        },
+        "score": 7.419736747872417,
+        "submitted": "09-12 10:42"
+      }
+    },
+    "Pulbitmaru": {
+      "current": {
+        "submission_id": "2026-09-10-10-31-48-593-131b128d",
+        "code": "131b128d",
+        "cycles": {
+          "ops::sliding_project_qkv": 107376,
+          "ops::sliding_attention_output": 45577,
+          "ops::decoder_feedforward": 289031
+        },
+        "score": 6.426409070875781,
+        "submitted": "09-10 19:31"
+      },
+      "previous": {
+        "submission_id": null,
+        "code": null,
+        "cycles": {
+          "ops::sliding_project_qkv": 131489,
+          "ops::sliding_attention_output": 50617,
+          "ops::decoder_feedforward": 289085
+        },
+        "score": 5.800031699614161,
+        "submitted": "seed"
+      }
+    },
+    "Participant #905": {
+      "current": {
+        "submission_id": "2026-09-13-01-10-31-329-a6fc3210",
+        "code": "a6fc3210",
+        "cycles": {
+          "ops::sliding_project_qkv": 93050,
+          "ops::sliding_attention_output": 42314,
+          "ops::decoder_feedforward": 272315
+        },
+        "score": 7.048177291478006,
+        "submitted": "09-13 10:10"
+      },
+      "previous": {
+        "submission_id": "2026-09-11-21-15-20-269-5ef9a9bf",
+        "code": "5ef9a9bf",
+        "cycles": {
+          "ops::sliding_project_qkv": 100300,
+          "ops::sliding_attention_output": 42348,
+          "ops::decoder_feedforward": 277287
+        },
+        "score": 6.830928070109315,
+        "submitted": "09-12 06:15"
+      }
+    },
+    "monkey": {
+      "current": {
+        "submission_id": "2026-09-11-07-37-14-092-a1ec581f",
+        "code": "a1ec581f",
+        "cycles": {
+          "ops::sliding_project_qkv": 102243,
+          "ops::sliding_attention_output": 40269,
+          "ops::decoder_feedforward": 263908
+        },
+        "score": 7.016951901408868,
+        "submitted": "09-11 16:37"
+      },
+      "previous": {
+        "submission_id": "2026-09-11-04-52-38-267-ae1922f2",
+        "code": "ae1922f2",
+        "cycles": {
+          "ops::sliding_project_qkv": 106109,
+          "ops::sliding_attention_output": 46139,
+          "ops::decoder_feedforward": 265080
+        },
+        "score": 6.613556082682781,
+        "submitted": "09-11 13:52"
+      }
+    },
+    "COSLAB": {
+      "current": {
+        "submission_id": "2026-09-12-23-33-36-680-352925a7",
+        "code": "352925a7",
+        "cycles": {
+          "ops::sliding_project_qkv": 88699,
+          "ops::sliding_attention_output": 40939,
+          "ops::decoder_feedforward": 289098
+        },
+        "score": 7.097964355747199,
+        "submitted": "09-13 08:33"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-18-39-53-922-775f730a",
+        "code": "775f730a",
+        "cycles": {
+          "ops::sliding_project_qkv": 91839,
+          "ops::sliding_attention_output": 43591,
+          "ops::decoder_feedforward": 285304
+        },
+        "score": 6.9011830681348085,
+        "submitted": "09-13 03:39"
+      }
+    },
+    "RTOSLab": {
+      "current": {
+        "submission_id": "2026-09-11-11-41-13-776-6ad1dd21",
+        "code": "6ad1dd21",
+        "cycles": {
+          "ops::sliding_project_qkv": 95177,
+          "ops::sliding_attention_output": 47947,
+          "ops::decoder_feedforward": 300491
+        },
+        "score": 6.49320609858942,
+        "submitted": "09-11 20:41"
+      },
+      "previous": {
+        "submission_id": "2026-09-11-06-34-26-179-3e2a8485",
+        "code": "3e2a8485",
+        "cycles": {
+          "ops::sliding_project_qkv": 106403,
+          "ops::sliding_attention_output": 59087,
+          "ops::decoder_feedforward": 307241
+        },
+        "score": 5.7924082933218966,
+        "submitted": "09-11 15:34"
+      }
+    },
+    "zlfn": {
+      "current": {
+        "submission_id": "2026-09-13-01-50-09-756-808faa86",
+        "code": "808faa86",
+        "cycles": {
+          "ops::sliding_project_qkv": 113743,
+          "ops::sliding_attention_output": 46086,
+          "ops::decoder_feedforward": 311475
+        },
+        "score": 6.126256808363656,
+        "submitted": "09-13 10:50"
+      },
+      "previous": {
+        "submission_id": "2026-09-13-01-45-59-219-4093d38a",
+        "code": "4093d38a",
+        "cycles": {
+          "ops::sliding_project_qkv": 116626,
+          "ops::sliding_attention_output": 44815,
+          "ops::decoder_feedforward": 314596
+        },
+        "score": 6.111908377014954,
+        "submitted": "09-13 10:45"
+      }
+    },
+    "Participant #070": {
+      "current": {
+        "submission_id": "2026-09-12-09-25-56-722-8a19d8bb",
+        "code": "8a19d8bb",
+        "cycles": {
+          "ops::sliding_project_qkv": 164719,
+          "ops::sliding_attention_output": 99341,
+          "ops::decoder_feedforward": 567591
+        },
+        "score": 3.4318759880603857,
+        "submitted": "09-12 18:25"
+      },
+      "previous": {
+        "submission_id": "2026-09-11-13-23-27-986-f585e028",
+        "code": "f585e028",
+        "cycles": {
+          "ops::sliding_project_qkv": 165178,
+          "ops::sliding_attention_output": 99502,
+          "ops::decoder_feedforward": 585767
+        },
+        "score": 3.391026544702741,
+        "submitted": "09-11 22:23"
+      }
+    },
+    "The_Odyssey_of_EDABK": {
+      "current": {
+        "submission_id": "2026-09-11-14-35-12-823-a7f608c0",
+        "code": "a7f608c0",
+        "cycles": {
+          "ops::sliding_project_qkv": 245468,
+          "ops::sliding_attention_output": 417969,
+          "ops::decoder_feedforward": 3704183
+        },
+        "score": 0.9959182655031699,
+        "submitted": "09-11 23:35"
+      },
+      "previous": null
+    },
+    "ASP_BKIC Opticore": {
+      "current": {
+        "submission_id": "2026-09-11-17-30-06-173-8f50f3f7",
+        "code": "8f50f3f7",
+        "cycles": {
+          "ops::sliding_project_qkv": 253278,
+          "ops::sliding_attention_output": 406967,
+          "ops::decoder_feedforward": 3702755
+        },
+        "score": 0.9945049469174206,
+        "submitted": "09-12 02:30"
+      },
+      "previous": null
+    },
+    "vinxst": {
+      "current": {
+        "submission_id": "2026-09-12-01-07-32-752-97bbe09c",
+        "code": "97bbe09c",
+        "cycles": {
+          "ops::sliding_project_qkv": 89174,
+          "ops::sliding_attention_output": 33437,
+          "ops::decoder_feedforward": 301213
+        },
+        "score": 7.476891403266288,
+        "submitted": "09-12 10:07"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-00-08-33-585-d47582a7",
+        "code": "d47582a7",
+        "cycles": {
+          "ops::sliding_project_qkv": 90025,
+          "ops::sliding_attention_output": 44761,
+          "ops::decoder_feedforward": 261627
+        },
+        "score": 7.087923209914239,
+        "submitted": "09-12 09:08"
+      }
+    },
+    "Participant #414": {
+      "current": {
+        "submission_id": "2026-09-12-03-14-08-024-d3300c81",
+        "code": "d3300c81",
+        "cycles": {
+          "ops::sliding_project_qkv": 108142,
+          "ops::sliding_attention_output": 42851,
+          "ops::decoder_feedforward": 293681
+        },
+        "score": 6.509641795856492,
+        "submitted": "09-12 12:14"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-03-00-28-552-811d0c47",
+        "code": "811d0c47",
+        "cycles": {
+          "ops::sliding_project_qkv": 115688,
+          "ops::sliding_attention_output": 46177,
+          "ops::decoder_feedforward": 299685
+        },
+        "score": 6.166534276840292,
+        "submitted": "09-12 12:00"
+      }
+    },
+    "BEEF": {
+      "current": {
+        "submission_id": "2026-09-12-12-17-59-740-acb380e5",
+        "code": "acb380e5",
+        "cycles": {
+          "ops::sliding_project_qkv": 247376,
+          "ops::sliding_attention_output": 408017,
+          "ops::decoder_feedforward": 1214959
+        },
+        "score": 1.4520057845552574,
+        "submitted": "09-12 21:17"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-08-34-31-139-2e8eba5a",
+        "code": "2e8eba5a",
+        "cycles": {
+          "ops::sliding_project_qkv": 249632,
+          "ops::sliding_attention_output": 405649,
+          "ops::decoder_feedforward": 1429125
+        },
+        "score": 1.3740225710343446,
+        "submitted": "09-12 17:34"
+      }
+    },
+    "Pls follow @nize_reze catstargram": {
+      "current": {
+        "submission_id": "2026-09-12-04-52-48-405-ff884a89",
+        "code": "ff884a89",
+        "cycles": {
+          "ops::sliding_project_qkv": 117000,
+          "ops::sliding_attention_output": 49970,
+          "ops::decoder_feedforward": 313144
+        },
+        "score": 5.896863285157164,
+        "submitted": "09-12 13:52"
+      },
+      "previous": null
+    },
+    "HatsuneMiku39": {
+      "current": {
+        "submission_id": "2026-09-12-03-14-08-024-d3300c81",
+        "code": "d3300c81",
+        "cycles": {
+          "ops::sliding_project_qkv": 108142,
+          "ops::sliding_attention_output": 42851,
+          "ops::decoder_feedforward": 293681
+        },
+        "score": 6.509641795856492,
+        "submitted": "09-12 12:14"
+      },
+      "previous": null
+    },
+    "franknoh": {
+      "current": {
+        "submission_id": "2026-09-13-00-59-08-070-116f9d43",
+        "code": "116f9d43",
+        "cycles": {
+          "ops::sliding_project_qkv": 106917,
+          "ops::sliding_attention_output": 51443,
+          "ops::decoder_feedforward": 270518
+        },
+        "score": 6.318942757816699,
+        "submitted": "09-13 09:59"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-14-55-12-136-dbef32d4",
+        "code": "dbef32d4",
+        "cycles": {
+          "ops::sliding_project_qkv": 111043,
+          "ops::sliding_attention_output": 53448,
+          "ops::decoder_feedforward": 295729
+        },
+        "score": 5.980378081586752,
+        "submitted": "09-12 23:55"
+      }
+    },
+    "AURAFARM": {
+      "current": {
+        "submission_id": "2026-09-12-13-38-52-540-1899b63c",
+        "code": "1899b63c",
+        "cycles": {
+          "ops::sliding_project_qkv": 197475,
+          "ops::sliding_attention_output": 87033,
+          "ops::decoder_feedforward": 790999
+        },
+        "score": 3.0225731780914207,
+        "submitted": "09-12 22:38"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-12-19-16-405-b00a1232",
+        "code": "b00a1232",
+        "cycles": {
+          "ops::sliding_project_qkv": 194783,
+          "ops::sliding_attention_output": 101762,
+          "ops::decoder_feedforward": 790429
+        },
+        "score": 2.8829314178503243,
+        "submitted": "09-12 21:19"
+      }
+    },
+    "AIFUR": {
+      "current": {
+        "submission_id": "2026-09-12-15-41-59-544-d154fcb6",
+        "code": "d154fcb6",
+        "cycles": {
+          "ops::sliding_project_qkv": 243496,
+          "ops::sliding_attention_output": 401499,
+          "ops::decoder_feedforward": 3237580
+        },
+        "score": 1.0585268822700598,
+        "submitted": "09-13 00:41"
+      },
+      "previous": {
+        "submission_id": "2026-09-12-14-41-42-294-bc484a92",
+        "code": "bc484a92",
+        "cycles": {
+          "ops::sliding_project_qkv": 242214,
+          "ops::sliding_attention_output": 404403,
+          "ops::decoder_feedforward": 3243818
+        },
+        "score": 1.0571682978292278,
+        "submitted": "09-12 23:41"
+      }
+    },
+    "Participant #659": {
+      "current": {
+        "submission_id": "2026-09-12-12-18-34-684-6c129778",
+        "code": "6c129778",
+        "cycles": {
+          "ops::sliding_project_qkv": 111530,
+          "ops::sliding_attention_output": 46270,
+          "ops::decoder_feedforward": 320968
+        },
+        "score": 6.097004494033579,
+        "submitted": "09-12 21:18"
+      },
+      "previous": null
+    },
+    "Slugcat": {
+      "current": {
+        "submission_id": "2026-09-12-17-27-33-041-f139bd0d",
+        "code": "f139bd0d",
+        "cycles": {
+          "ops::sliding_project_qkv": 115239,
+          "ops::sliding_attention_output": 49951,
+          "ops::decoder_feedforward": 283728
+        },
+        "score": 6.125650383075278,
+        "submitted": "09-13 02:27"
+      },
+      "previous": null
+    }
+  }
+}

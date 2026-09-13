@@ -1,12 +1,43 @@
 # 세션 이관 문서 — 2026-09-13 (KST 03:15 · UTC 09-12 18:15 기준)
 
-> **추가 (2026-09-13 UTC 00:20):** 이 문서의 §1~§2 상태는 지났다. **RULES §10.0x부터 읽는다.**
-> - draw 대상: `V378_submit` = V368(V313 대칭 attn) + V369(qkv `÷rms` 제거) + V371(qkv x 한 조각, Stage 1 전용).
-> - 판정 기준: attn · qkv에 draw 꼬리 지표 추가(`scripts/dev/paired_tails.py`).
-> - 새로 닫힌 것: V373(ffn down 정렬 청크, 컴파일러 ICE), V372(attn 로컬 RMS, 꼬리 악화).
-> - draw 간격: **60 s**(사용자 결정, UTC 00:39부터 V378 배치 1). §7의 "12회 × 240 s" 설명은 지났다.
+> **세션 인계 (2026-09-13 UTC 02:00 · KST 11:00): 새 세션은 RULES §10.0y부터 읽는다.**
+> 이 문서 §1~§2의 상태는 지났고, §3~§8은 배경으로만 쓴다.
+>
+> **현재 상태**
+> - 공식 순위: **우리 2위 7.4364**(V377 draw) · 1위 vinxst 7.4769 · 3위 #663 7.3402.
+> - **코드 SOTA · draw 대상 `V383_submit`**(13e8880) = V378_submit + V383. V383은 qkv RoPE 두 행을 store 하나 · ExplicitSync 하나로 staging한다.
+>   - V383 32잡: warm −3.04%(30/32), 프로세스 첫 launch −5.4k, p10 −1.75%.
+>   - 제출 검증: Arena 25/25 ×2.
+>   - V378_submit은 draw 20회에서 최고 7.3668이었다.
+> - Stage 1 전용이라 Stage 2 전에 되돌릴 것: V257(attn x 한 조각), V371(qkv x 한 조각).
+>
+> **pod 무인 체인 (사용자 부재 중, UTC 15:38까지)**
+> - `/root/tk/drawkeeper.sh`: V383_submit을 12회 배치로 draw한다(배치 101은 UTC 01:54 시작). 점수는 `/root/tk/V383_submit_scores.txt`에 모인다.
+> - `/root/tk/chainv2_0913n.sh`: V383 rerun을 50 s 간격으로 돌려 64잡 · 96잡에서 다시 판정한다(`/root/tk/V383_verdict_64.txt` · `_96.txt`). 인계 시점 로그는 43개였다.
+> - 로그: `/root/tk/chain_0913n.log`, `/root/tk/drawkeeper.log`. 점수 수집은 `bash /root/tk/drawscores.sh <branch>`.
+>
+> **이번 세션의 핵심 발견**
+> - 공식 qkv는 프로세스의 첫 launch이고, 그 벌점(+3.5~4.3k)은 첫 ExplicitSync에 걸린다.
+> - 1 s 이상 쉬고 launch하면 그 동기화가 +26k~+49k 멈춘다(V382).
+> - 따라서 동기화의 개수 · 위치가 공식 점수의 레버다(메모리 `explicit-sync-host-latency`, RESULTS V381~V383).
+>
+> **닫힘과 보류**
+> - 닫힘: V380(attn 타일 비율, cold 기준), V372 lr(cold에서도 +4.27%), V373(ffn 정렬 청크, ICE).
+> - 보류: V370(attn 순서 — `tx` 게이트 VRF를 만들 수 없음, 하네스만 커밋), V375.
+>
+> **다음 후보**
+> - 칩 위 RoPE: `axes!`로 src/device에 크기 2 축을 선언 → AxisToggle 7 pass 램프 → `vector_fxp_to_fp` → Exp · Cos · Sin. 남은 RoPE 동기화를 없앤다.
+> - attn · ffn의 ExplicitSync 개수 · 위치 점검.
+>
+> **새 도구 (`scripts/dev/tk/`)**
+> - 분석: `cold_census.py` · `spandiff.py` · `pfirst.py` · `gapcold.py`
+> - 하네스 · 생성기: `mk_cold_harness.py` · `mk_idle_harness.py` · `gen_v383.py` · `gen_tile_arms.py`
+> - 무인 체인: `v383_verdict.py` · `chain_0913n.sh` · `chainv2_0913n.sh` · `drawkeeper.sh` · `drawscores.sh`
+> - 리더보드 감시기: `leaderboard/leaderboard_watch.py`
+>
+> **(지난 추가, UTC 00:20)** draw 대상 V378_submit, draw 꼬리 판정 기준(`scripts/dev/paired_tails.py`), V373 · V372 닫힘, draw 간격 60 s(§7의 "12회 × 240 s"는 지났다).
 
-새 세션은 **이 문서 → RULES.md §10.0w → RESULTS.md(V361~V367 행) → SOTA.md 첫 항목** 순서로 읽는다.
+새 세션은 **RULES.md §10.0y → §10.0x → 이 문서 §3~§8(배경) → RESULTS.md(V368~V383 행) → SOTA.md 첫 항목** 순서로 읽는다.
 문서 최신본은 브랜치 `V236_sweep_attnout_tiles`에 있다(origin push 완료). 이 문서가 담는 것:
 
 1. 현재 상태

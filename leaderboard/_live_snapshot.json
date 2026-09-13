@@ -1,0 +1,130 @@
+{
+ "success": true,
+ "baselineCycles": {
+  "ops::sliding_project_qkv": 250514,
+  "ops::sliding_attention_output": 404633,
+  "ops::decoder_feedforward": 3703473
+ },
+ "data": [
+  {
+   "rank": 1,
+   "teamName": "Participant #663",
+   "submissionId": "2026-09-10-21-05-54-460-c0ffdd40",
+   "submissionCode": "c0ffdd40",
+   "qkvCycles": 92586,
+   "attentionCycles": 39406,
+   "ffnCycles": 273805,
+   "cycles": {
+    "ops::sliding_project_qkv": 92586,
+    "ops::sliding_attention_output": 39406,
+    "ops::decoder_feedforward": 273805
+   },
+   "score": 7.216353698244407
+  },
+  {
+   "rank": 2,
+   "teamName": "Goat Chovy #1557",
+   "submissionId": "2026-09-11-00-20-33-523-e1fd59ad",
+   "submissionCode": "e1fd59ad",
+   "qkvCycles": 98645,
+   "attentionCycles": 38623,
+   "ffnCycles": 283438,
+   "cycles": {
+    "ops::sliding_project_qkv": 98645,
+    "ops::sliding_attention_output": 38623,
+    "ops::decoder_feedforward": 283438
+   },
+   "score": 7.031388737748155
+  },
+  {
+   "rank": 3,
+   "teamName": "monkey",
+   "submissionId": "2026-09-11-04-52-38-267-ae1922f2",
+   "submissionCode": "ae1922f2",
+   "qkvCycles": 106109,
+   "attentionCycles": 46139,
+   "ffnCycles": 265080,
+   "cycles": {
+    "ops::sliding_project_qkv": 106109,
+    "ops::sliding_attention_output": 46139,
+    "ops::decoder_feedforward": 265080
+   },
+   "score": 6.613556082682781
+  },
+  {
+   "rank": 4,
+   "teamName": "Pulbitmaru",
+   "submissionId": "2026-09-10-10-31-48-593-131b128d",
+   "submissionCode": "131b128d",
+   "qkvCycles": 107376,
+   "attentionCycles": 45577,
+   "ffnCycles": 289031,
+   "cycles": {
+    "ops::sliding_project_qkv": 107376,
+    "ops::sliding_attention_output": 45577,
+    "ops::decoder_feedforward": 289031
+   },
+   "score": 6.426409070875781
+  },
+  {
+   "rank": 5,
+   "teamName": "COSLAB",
+   "submissionId": "2026-09-11-04-40-57-552-65872c65",
+   "submissionCode": "65872c65",
+   "qkvCycles": 106988,
+   "attentionCycles": 51390,
+   "ffnCycles": 304281,
+   "cycles": {
+    "ops::sliding_project_qkv": 106988,
+    "ops::sliding_attention_output": 51390,
+    "ops::decoder_feedforward": 304281
+   },
+   "score": 6.076749312680316
+  },
+  {
+   "rank": 6,
+   "teamName": "Participant #905",
+   "submissionId": "2026-09-10-15-59-06-635-1bc12ee9",
+   "submissionCode": "1bc12ee9",
+   "qkvCycles": 107524,
+   "attentionCycles": 51058,
+   "ffnCycles": 307829,
+   "cycles": {
+    "ops::sliding_project_qkv": 107524,
+    "ops::sliding_attention_output": 51058,
+    "ops::decoder_feedforward": 307829
+   },
+   "score": 6.056307441360375
+  },
+  {
+   "rank": 7,
+   "teamName": "RTOSLab",
+   "submissionId": "2026-09-11-06-34-26-179-3e2a8485",
+   "submissionCode": "3e2a8485",
+   "qkvCycles": 106403,
+   "attentionCycles": 59087,
+   "ffnCycles": 307241,
+   "cycles": {
+    "ops::sliding_project_qkv": 106403,
+    "ops::sliding_attention_output": 59087,
+    "ops::decoder_feedforward": 307241
+   },
+   "score": 5.7924082933218966
+  },
+  {
+   "rank": 8,
+   "teamName": "Baseline",
+   "submissionId": "2026-09-08-10-52-27-259-207bc933",
+   "submissionCode": "207bc933",
+   "qkvCycles": 250514,
+   "attentionCycles": 404633,
+   "ffnCycles": 3703473,
+   "cycles": {
+    "ops::sliding_project_qkv": 250514,
+    "ops::sliding_attention_output": 404633,
+    "ops::decoder_feedforward": 3703473
+   },
+   "score": 1
+  }
+ ]
+}
