@@ -1,5 +1,11 @@
 # SOTA.md — Road to SOTA
 
+> **2026-09-13 (7):** 코드 SOTA · draw 대상 → **`V383_submit`** (13e8880 = V378_submit + V383: qkv RoPE cos · sin 행을 칩 안에서 한 스테이징 버퍼로 모아 **HBM store 하나 · ExplicitSync 하나**로, 정적 ExplicitSync 3 → 2, 정확한 변경).
+> - V383 32잡: warm −3.04%(30/32, 잡별 중앙값 32/32), 프로세스 첫 launch 중앙값 −5,395(90,750 대 96,145), pooled p10 −1.75% [−2,426, −1,055].
+> - 제출 검증 Arena 25/25 + rerun 25/25(UTC 01:46).
+> - 근거가 된 발견(V381 · V382): 공식 qkv는 프로세스 첫 launch이고, 그 벌점(+3.5~4.3k)과 호스트 대기가 커널 중간의 ExplicitSync에 걸린다. V380(attn 타일 비율)과 V372 lr은 cold 기준으로도 기각.
+> - 사용자 부재 12 h 무인 체인: `/root/tk/drawkeeper.sh`(UTC 15:38까지 draw), `/root/tk/chainv2_0913n.sh`(V383 64 · 96잡 재판정). RULES §10.0y.
+
 > **2026-09-13 (6):** draw 대상 → **`V378_submit`** (ea270d1 = V377_submit + V371, **Stage 1 전용**: qkv x를 f8 한 조각으로 — fixture에서 `x⊙w`가 ±1 근처라 전 원소가 f8 128로 반올림되고 head norm이 스케일을 흡수한다). V371 짝비교 15/16 −3.07% · pooled p10 −4.13% [−4,453, −2,049], 96/96 PASS. 제출 검증 Arena job 24526 25/25 + rerun 25/25. 돌던 V377 배치 1 뒤 전환(`/root/drawswitch_v378.sh`). Stage 2 전에 V377의 V369 경로로 되돌린다. 같은 날 닫힌 것: ffn down 정렬 청크(V373, 패딩 슬롯 로드에서 visa ICE).
 
 > **2026-09-13 (5):** draw 대상 → **`V377_submit`** (eb38766 = V368_submit + V369: qkv 입력 norm의 rms 스칼라 제거 — q/k/v head norm이 상쇄하므로 정확). V369 짝비교 12/16 −0.86% · 잡별 최저 15/16 −1.38% · pooled p10 −0.93% [−1,477, −379], 96/96 PASS. 제출 검증 Arena job 24476 25/25 + rerun 25/25. V368 전환은 첫 배치 전에 V377로 교체(`/root/drawswitch_v377.sh`, 돌던 V367 배치 뒤).

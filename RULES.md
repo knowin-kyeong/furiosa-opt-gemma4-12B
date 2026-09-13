@@ -457,9 +457,13 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
 
 ### 10.0y 2026-09-13 UTC 01~02시 — cold 조건 재측정, qkv 첫 동기화 벌점, 사용자 부재 12 h 무인 체인 (가장 최신, 여기서 시작할 것)
 
-**상태 (UTC 01:45).**
+**상태 (UTC 01:50).**
 - 공식 순위: 1위 vinxst 7.4769 · **우리 2위 7.4364**(V377 draw) · 3위 #663 7.3402.
-- draw 대상은 `V378_submit`이다. 13회까지 최고 7.3668이고, qkv 84,014가 나온 draw도 있다.
+- **코드 SOTA · draw 대상 = `V383_submit`**(13e8880 = V378_submit + V383).
+  - V383 32잡 판정 WIN: warm −3.04%(30/32), 프로세스 첫 launch −5.4k, p10 −1.75%.
+  - 제출 검증 Arena 25/25 ×2(UTC 01:46).
+  - 무인 체인이 draw 대상을 바꿨다. 돌던 V378 배치(20회까지 최고 7.3668)가 끝나면 drawkeeper가 V383_submit을 draw한다.
+- Stage 2 전에 되돌릴 목록은 그대로다(V371 한 조각, V257 attn 한 조각). V383 자체는 정확한 변경이다.
 
 **무인 체인 (사용자 부재, UTC 01:38 ~ 15:38). 복귀하면 여기부터 확인한다.**
 - **`/root/tk/drawkeeper.sh <deadline>`** (draw 유지)
@@ -475,6 +479,10 @@ export FURIOSA_ARENA_URL=https://arena.furiosa.ai
      - `draw_target`을 V383_submit으로 바꾼다.
      - V378 follow 루프를 PID로 끊는다. keeper가 돌던 배치 뒤에 새 대상을 시작한다.
   - 로그는 `/root/tk/chain_0913n.log`, 판정은 `/root/tk/V383_verdict_32.txt` · `_64.txt`.
+- **`/root/tk/chainv2_0913n.sh`** (UTC 01:50 추가, 같은 로그)
+  - 옛 체인이 32잡 판정(과 WIN이면 검증 · 전환)을 끝내고 몰아치는 rerun을 시작하는 순간, 그 체인과 rerun을 끊고 이어받는다.
+  - 이유: rerun은 ~11 s마다 끝나 같은 분에 몰리고, 분 단위 회전(프로세스 첫 launch arm)이 덩어리로 치우친다(32잡은 1s 14 · prod 18, 연속 덩어리).
+  - 이후 rerun은 50 s 간격이고, 64잡과 96잡에서 같은 사전 규칙으로 다시 판정한다(`V383_verdict_64.txt` · `_96.txt`).
 - **복귀 체크리스트**
   - `cat /root/tk/chain_0913n.log /root/tk/drawkeeper.log`
   - `bash /root/tk/drawscores.sh V378_submit` (전환됐으면 V383_submit도)
